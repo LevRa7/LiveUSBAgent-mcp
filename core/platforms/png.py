@@ -54,7 +54,8 @@ def encode_rgb(width: int, height: int, rows: Iterable[bytes]) -> bytes:
 
 def encode_bgra(width: int, height: int, bgra: Union[bytes, bytearray],
                 top_down: bool = True) -> bytes:
-    """Encode a 32-bit BGRA buffer (as Windows and X11 hand it out) as PNG.
+    """Encode a 32-bit BGRA buffer (as a Windows DIB or a CoreGraphics image
+    hands it out) as PNG.
 
     Alpha is dropped.  *top_down* is False for the bottom-up layout a DIB
     section uses, which is flipped here so callers do not each have to remember.

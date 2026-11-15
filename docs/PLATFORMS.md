@@ -28,6 +28,11 @@ core/platforms/
 │   ├── procfs.py        парсеры /proc (их же использует Android)
 │   ├── telemetry.py     витальные метрики и блоки system_info
 │   └── process.py       liveness и kill по /proc
+├── darwin/              macOS: libproc, sysctl, CoreGraphics
+│   ├── process.py       дерево процессов через libproc
+│   ├── telemetry.py     RAM (sysctl), диски (statfs), load, uptime
+│   ├── screen.py        скриншот через CoreGraphics + PNG
+│   └── clipboard.py     пастборд через pbcopy/pbpaste
 └── android/             /proc и /sys, Termux:API только там, где иначе нельзя
     ├── sysfs.py         батарея, термические зоны, сеть, хранилище
     ├── telemetry.py     витальные метрики + батарея + температуры
@@ -133,10 +138,16 @@ clipboard                      запись ok, чтение "" (Android скр�
 * **Скриншот на Android** невозможен: `screencap` требует группу `graphics`,
   у Termux:API команды экрана нет. Инструмент возвращает `available: false` с
   причиной.
-* **Скриншот на Linux** — `None`, если у процесса нет дисплея (сервер,
-  контейнер). Для X11-сессии нужен отдельный backend, его пока нет.
-* **macOS** реализован частично (`DarwinBackend`): оболочка, load, диски,
-  память через `sysctl`/`vm_stat`; дерево процессов и скриншот — нет.
+* **Скриншот на Linux не поддерживается сознательно.** X11-бэкенд был написан и
+  убран по решению оператора: он добавил бы зависимость от libX11 и всё равно не
+  работал бы ни на Wayland (композитор не отдаёт чужие пиксели), ни на сервере.
+  `LinuxBackend.screenshot_png()` возвращает `None`, `screen_capture` отвечает
+  `available: false` с причиной. Снимайте экран с Windows- или macOS-узла.
+* **macOS** (`core/platforms/darwin/`): оболочка, `sysctl`-память, `statfs`-диски,
+  load/uptime, дерево процессов через `libproc`, скриншот через CoreGraphics и
+  пастборд через `pbcopy`/`pbpaste`. Скриншот требует разрешения *Screen
+  Recording* — без него `CGDisplayCreateImage` возвращает `NULL`, и это
+  репортится как «нет снимка», а не как падение.
 * **Термозоны Android** бывают трёх видов: миллиградусы (`38300` = 38.3 °C),
   градусы и счётчики уровней (`750`). Значения вне диапазона −50…150 °C
   отбрасываются, поэтому «750 °C» больше не появляется.

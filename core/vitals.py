@@ -8,7 +8,7 @@ disk).  That logic now lives with the rest of each platform's Win32/procfs code:
 * Linux   - :mod:`core.platforms.linux.telemetry` (``/proc``, no ``free``/``df``);
 * Android - :mod:`core.platforms.android.telemetry` (``/proc`` + ``/sys``, so the
   battery block does not need the Termux:API app);
-* macOS   - :class:`core.platforms.linux.DarwinBackend`.
+* macOS   - :class:`core.platforms.darwin.DarwinBackend`.
 
 The public function keeps its name and its shape because ``core/mcp_tools.py``,
 ``core/server.py`` and ``core/device.py`` all import it, and because a caller

@@ -3,9 +3,15 @@
 Linux is the platform the node was written on, so it is the reference for what
 "the full set of tools" means.  This backend keeps that behaviour but removes
 its last external dependencies: telemetry reads ``/proc`` instead of running
-``df``/``free``/``ps``/``uptime``, process control is a syscall instead of
-``ps``/``kill``, and a screenshot goes through ``libX11`` (see
-:mod:`core.platforms.linux.x11`) instead of an image program.
+``df``/``free``/``ps``/``uptime``, and process control is a syscall instead of
+``ps``/``kill``.
+
+There is deliberately **no screenshot backend here.**  Linux has no portable
+screen API: an X server needs a client library the node does not ship, a Wayland
+session refuses to hand one client another's pixels, and a server has no display
+at all.  Guessing at one of those was rejected by the operator, so the platform
+answers ``None`` and ``screen_capture`` reports that instead of pretending.
+Capture from a Windows or macOS node.
 
 macOS lives in :mod:`core.platforms.darwin`: it is POSIX with the same shell, but
 none of the ``/proc`` interface this module reads.
@@ -20,7 +26,6 @@ from typing import Dict, List, Optional, Tuple
 from core.platforms import common, encoding, shell
 from core.platforms.base import PlatformBackend
 from core.platforms.linux import process as _process
-from core.platforms.linux import x11
 from core.platforms.linux import telemetry as _telemetry
 from core.platforms.linux.procfs import ProcFS
 
@@ -90,13 +95,14 @@ class LinuxBackend(PlatformBackend):
     # -- display -----------------------------------------------------------
 
     def screenshot_png(self) -> Optional[bytes]:
-        """An X11 screenshot when ``DISPLAY`` points at a reachable X server.
+        """Always ``None``: Linux has no portable screen API for this node.
 
-        ``None`` is the honest answer for the two cases this module cannot serve:
-        a headless server (no display at all) and a Wayland session, where
-        ``XGetImage`` on the root window is refused by the compositor.
+        A headless server has no display, a Wayland session refuses cross-client
+        pixel access, and an X server would need a client library the node does
+        not ship.  The base class already answers ``None``; the override exists
+        so the reason is written down where the next reader looks.
         """
-        return x11.screenshot_png()
+        return None
 
     def capabilities(self) -> Dict[str, bool]:
         return {
@@ -104,9 +110,7 @@ class LinuxBackend(PlatformBackend):
             "vitals": os.path.isdir("/proc"),
             "info_blocks": os.path.isdir("/proc"),
             "process_tree": os.path.isdir("/proc"),
-            # A screenshot needs both an X server and its client library; a
-            # server answers False and the tool explains it instead of hanging.
-            "screenshot": x11.available(),
+            "screenshot": False,
             "clipboard": bool(shutil.which("xclip") or shutil.which("xsel")),
         }
 

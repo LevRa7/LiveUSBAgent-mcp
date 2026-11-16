@@ -1,4 +1,4 @@
-"""Bump the release version in every place the repository declares it.
+﻿"""Bump the release version in every place the repository declares it.
 
 Run from the repository root: tests/test_version_single_source.py is the gate
 that proves the result is consistent.
@@ -8,7 +8,7 @@ import json
 import pathlib
 import re
 
-NEW = "0.5.0"
+NEW = "0.5.1"
 ROOT = pathlib.Path(r"D:\MyProjects\Antigravity-mash")
 
 # 1. core/version.py - the single source of truth.

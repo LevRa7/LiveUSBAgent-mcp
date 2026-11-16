@@ -810,27 +810,68 @@ if (-not $ScriptDir -or -not (Test-Path "$ScriptDir\core\agent.py")) {
     if (!(Test-Path $SkillsDir)) { New-Item -ItemType Directory -Path $SkillsDir -Force | Out-Null }
     if (!(Test-Path $OpsDir)) { New-Item -ItemType Directory -Path $OpsDir -Force | Out-Null }
     
+    # EVERY module the node imports, in the same shape as install.sh: the platform
+    # layer is a package (core/platforms/<os>/...), so a flat list that stopped at the
+    # top-level files left a bootstrapped node unable to start ("from core import
+    # platforms"). tests/test_installer_bootstrap.py checks both installers and
+    # imports the result, so a module cannot be missing from only one of them.
     $files = @(
+        "core/__init__.py",
         "core/agent.py",
-        "core/server.py",
-        "core/mcp_tools.py",
-        "core/web_share.py",
-        "core/domain.py",
-        "core/paths.py",
-        "core/goal.py",
-        "core/vitals.py",
-        "core/updater.py",
-        "core/version.py",
+        "core/agent_harness.py",
+        "core/code_cache.py",
         "core/control.py",
-        "core/usage.py",
-        "core/rescue.py",
-        "core/policy.py",
+        "core/device.py",
+        "core/domain.py",
+        "core/goal.py",
+        "core/hooks.py",
+        "core/mcp_tools.py",
         "core/menu.py",
+        "core/paths.py",
+        "core/policies.py",
+        "core/policy.py",
+        "core/rekey.py",
+        "core/redact.py",
+        "core/rescue.py",
         "core/sandbox.py",
         "core/schedule.py",
+        "core/schemas.py",
+        "core/server.py",
         "core/settings.py",
+        "core/subagents.py",
+        "core/termux.py",
+        "core/triggers.py",
+        "core/updater.py",
+        "core/usage.py",
+        "core/version.py",
+        "core/vitals.py",
+        "core/web_share.py",
         "core/web_settings.py",
-        "core/__init__.py",
+        "core/platforms/__init__.py",
+        "core/platforms/base.py",
+        "core/platforms/common.py",
+        "core/platforms/encoding.py",
+        "core/platforms/png.py",
+        "core/platforms/shell.py",
+        "core/platforms/windows/__init__.py",
+        "core/platforms/windows/clipboard.py",
+        "core/platforms/windows/process.py",
+        "core/platforms/windows/screen.py",
+        "core/platforms/windows/telemetry.py",
+        "core/platforms/windows/winapi.py",
+        "core/platforms/linux/__init__.py",
+        "core/platforms/linux/process.py",
+        "core/platforms/linux/procfs.py",
+        "core/platforms/linux/telemetry.py",
+        "core/platforms/android/__init__.py",
+        "core/platforms/android/sysfs.py",
+        "core/platforms/android/telemetry.py",
+        "core/platforms/android/termux.py",
+        "core/platforms/darwin/__init__.py",
+        "core/platforms/darwin/clipboard.py",
+        "core/platforms/darwin/process.py",
+        "core/platforms/darwin/screen.py",
+        "core/platforms/darwin/telemetry.py",
         "skills/orchestrator.md",
         "ops/windows/agent-watchdog.ps1",
         "ops/windows/rhm-tray.ps1",
@@ -840,6 +881,13 @@ if (-not $ScriptDir -or -not (Test-Path "$ScriptDir\core\agent.py")) {
     )
     foreach ($f in $files) {
         $dest = "$BootstrapDir\$($f -replace '/', '\')"
+        # A nested path needs its directory first: Invoke-WebRequest does not create
+        # one, and a failure here used to be swallowed and only surface as a Python
+        # import error on the first start.
+        $parent = Split-Path -Parent $dest
+        if ($parent -and !(Test-Path -LiteralPath $parent)) {
+            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        }
         try {
             Invoke-WebRequest -Uri "https://$Gateway/$f" -OutFile $dest -UseBasicParsing -ErrorAction Stop
         } catch {

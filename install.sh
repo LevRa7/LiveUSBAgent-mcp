@@ -895,13 +895,32 @@ if [ ! -f "$SCRIPT_DIR/core/agent.py" ]; then
     # stop at the files that existed when it was written, and a fresh phone install
     # then answered "the device layer (core/device.py) is missing from this checkout"
     # while the branch was advertised - the tool was there, its module was not.
-    # tests/test_installer_bootstrap.py fails when a core module is missing here.
+    # The platform layer is a PACKAGE (core/platforms/<os>/...), so it is listed with
+    # its directories: a flat list silently skipped it, and a freshly installed node
+    # then died on "from core import platforms" before it could report a version.
+    # tests/test_installer_bootstrap.py walks this list recursively and imports the
+    # result, so neither failure can ship again.
     for f in core/__init__.py core/agent.py core/agent_harness.py core/code_cache.py \
              core/control.py core/device.py core/domain.py core/goal.py core/hooks.py core/mcp_tools.py core/menu.py core/paths.py \
              core/policies.py core/policy.py core/rekey.py \
              core/redact.py core/rescue.py core/sandbox.py core/schedule.py core/schemas.py core/server.py core/settings.py core/subagents.py core/termux.py \
              core/triggers.py core/updater.py core/usage.py core/version.py core/vitals.py core/web_share.py core/web_settings.py \
+             core/platforms/__init__.py core/platforms/base.py core/platforms/common.py \
+             core/platforms/encoding.py core/platforms/png.py core/platforms/shell.py \
+             core/platforms/windows/__init__.py core/platforms/windows/clipboard.py \
+             core/platforms/windows/process.py core/platforms/windows/screen.py \
+             core/platforms/windows/telemetry.py core/platforms/windows/winapi.py \
+             core/platforms/linux/__init__.py core/platforms/linux/process.py \
+             core/platforms/linux/procfs.py core/platforms/linux/telemetry.py \
+             core/platforms/android/__init__.py core/platforms/android/sysfs.py \
+             core/platforms/android/telemetry.py core/platforms/android/termux.py \
+             core/platforms/darwin/__init__.py core/platforms/darwin/clipboard.py \
+             core/platforms/darwin/process.py core/platforms/darwin/screen.py \
+             core/platforms/darwin/telemetry.py \
              skills/orchestrator.md; do
+        # A nested path (core/platforms/android/termux.py) needs its directory first:
+        # curl cannot create one, and a failed download used to be skipped silently.
+        mkdir -p "$BOOTSTRAP_DIR/$(dirname "$f")"
         bootstrap_tmp="$BOOTSTRAP_DIR/${f}.part"
         if curl -fsSL "https://${GATEWAY}/${f}" -o "$bootstrap_tmp" 2>/dev/null \
             || curl -fsSL "https://raw.githubusercontent.com/LevRa7/remote-harness-mcp/main/${f}" -o "$bootstrap_tmp" 2>/dev/null; then

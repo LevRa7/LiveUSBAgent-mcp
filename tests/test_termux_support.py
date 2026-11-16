@@ -167,7 +167,8 @@ def _dry_run(extra_env: dict) -> str:
 
     result = subprocess.run(
         [BASH, INSTALLER, "--dry-run", "--mode=tunnel", "--user=pixel7pro", "--lang=en"],
-        capture_output=True, text=True, env=environment, cwd=REPO, timeout=180)
+        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                            env=environment, cwd=REPO, timeout=180)
     assert result.returncode == 0, result.stderr or result.stdout
     return result.stdout
 
@@ -316,7 +317,12 @@ def _install_on(phone, *extra_args, installer=None) -> subprocess.CompletedProce
     # including curl, is therefore guaranteed to win.
     script = 'export PATH="%s:$PATH"; exec bash "%s" --lang=en %s' % (
         _posix(phone["shim"]), _posix(installer or INSTALLER), " ".join(extra_args))
+    # ``encoding`` is not optional on Windows: the installer prints UTF-8 (box
+    # drawing and emoji), and a text-mode subprocess without it decodes with the
+    # ANSI code page and dies inside the reader thread - the failure then looks
+    # like ``result.stdout is None`` with a UnicodeDecodeError in the warnings.
     return subprocess.run([BASH, "-c", script], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace",
                           env=environment, cwd=REPO, timeout=300)
 
 

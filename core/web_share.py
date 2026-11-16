@@ -93,6 +93,33 @@ SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}-[0-9a-f]{%d}$" % (SECRET_BYTES 
 _NAME_CLEAN_RE = re.compile(r"[^a-z0-9_-]+")
 _DASH_RUN_RE = re.compile(r"-{2,}")
 
+#: Content types that are text even though they do not start with ``text/``.
+#: A browser draws its default encoding for these from the locale, so a UTF-8
+#: file served as bare ``application/json`` is decoded as windows-1251 on a
+#: Russian Windows and every Cyrillic letter becomes two ("РєР°Рє" instead of
+#: "как"). The charset is therefore always stated explicitly.
+_TEXTUAL_TYPES = (
+    "application/json",
+    "application/javascript",
+    "application/xml",
+    "application/x-yaml",
+    "application/x-ndjson",
+    "image/svg+xml",
+)
+
+
+def _with_charset(content_type: str) -> str:
+    """``text/plain`` -> ``text/plain; charset=utf-8``; an explicit charset wins."""
+    if not content_type:
+        return content_type
+    lowered = content_type.lower()
+    if "charset=" in lowered:
+        return content_type
+    if lowered.startswith("text/") or lowered in _TEXTUAL_TYPES:
+        return "%s; charset=utf-8" % content_type
+    return content_type
+
+
 #: Response headers a share may expose publicly. Everything else the local
 #: server emits (Server, Date, ...) is dropped instead of being relayed.
 _KEEP_HEADERS = (
@@ -219,8 +246,13 @@ def _now_iso() -> str:
 # ---------------------------------------------------------------------------
 
 def _load_registry() -> Dict[str, Dict[str, Any]]:
+    # ``utf-8-sig`` on purpose: Windows PowerShell writes a BOM with
+    # ``Set-Content -Encoding UTF8``, and a BOM makes ``json.load`` fail - which
+    # used to look exactly like "this node has no shares" (every published link
+    # answered 404) instead of an unrecoverable file. The reader tolerates the
+    # BOM; the writer below never emits one.
     try:
-        with open(_registry_path(), "r", encoding="utf-8") as handle:
+        with open(_registry_path(), "r", encoding="utf-8-sig") as handle:
             data = json.load(handle)
         if isinstance(data, dict):
             return {str(k): v for k, v in data.items() if isinstance(v, dict)}
@@ -364,6 +396,16 @@ class _ShareHandler(SimpleHTTPRequestHandler):
         self._redirecting = False
         self._root = os.path.realpath(directory) if directory else ""
         super().__init__(*args, directory=directory, **kwargs)
+
+    def guess_type(self, path: str) -> str:  # noqa: N802
+        """Always state the charset for text.
+
+        ``SimpleHTTPRequestHandler`` answers ``text/plain`` for a ``.txt`` file
+        with no charset at all. The browser then falls back to the system
+        locale - windows-1251 on a Russian Windows - and a UTF-8 file renders as
+        mojibake. The file is published as UTF-8, so the header has to say so.
+        """
+        return _with_charset(super().guess_type(path))
 
     def translate_path(self, path: str) -> str:  # noqa: N802
         translated = super().translate_path(path)

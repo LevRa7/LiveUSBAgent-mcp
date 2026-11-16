@@ -323,3 +323,35 @@ def test_the_domain_literal_lives_in_exactly_one_module():
         "the public domain must only be declared in core/domain.py, found in: %s" % offenders
     )
     assert "smart-server.online" in (root / "core" / "domain.py").read_text(encoding="utf-8")
+
+# ---------------------------------------------------------------------------
+# The gateway announces the domain; the node adopts it for its links
+# ---------------------------------------------------------------------------
+
+def test_the_tunnel_hello_names_the_public_domain_the_gateway_uses():
+    """The hello is what keeps a node from minting links on a stale domain."""
+    import gateway
+
+    hello = gateway.tunnel_hello("node-one")
+
+    assert hello["type"] == "hello"
+    assert hello["user"] == "node-one"
+    assert hello["public_base"] == gateway.PUBLIC_BASE_URL
+    assert hello["gateway"] == gateway.PUBLIC_HOST
+
+
+def test_a_node_adopts_the_announced_domain_for_every_link_it_publishes():
+    from core import agent, mcp_tools
+
+    try:
+        assert agent.apply_gateway_hello({"type": "ping"}) == ""
+        assert agent.apply_gateway_hello({"type": "hello"}) == ""
+        assert agent.apply_gateway_hello({"type": "hello", "public_base": ""}) == ""
+
+        adopted = agent.apply_gateway_hello(
+            {"type": "hello", "public_base": "https://other.example.com/"})
+
+        assert adopted == "https://other.example.com"
+        assert mcp_tools.public_base_url() == "https://other.example.com"
+    finally:
+        mcp_tools.configure(public_url="")

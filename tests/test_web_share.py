@@ -161,6 +161,26 @@ def test_the_internal_relay_is_not_advertised():
 # share_file / share_list / unshare
 # ---------------------------------------------------------------------------
 
+def test_a_bom_in_the_registry_does_not_hide_every_share(tmp_path):
+    """Windows PowerShell writes a BOM; the reader must still see the shares.
+
+    Before this, a BOM made ``json.load`` fail and the failure was swallowed as
+    "no shares": every published link answered 404 while the file looked fine.
+    """
+    source = tmp_path / "bom.txt"
+    source.write_bytes(b"payload")
+    published = mcp_tools.call_tool("share_file", {"path": str(source)})
+
+    registry = web_share._registry_path()
+    body = open(registry, "rb").read()
+    open(registry, "wb").write(b"\xef\xbb\xbf" + body)
+
+    assert mcp_tools.call_tool("share_list")["count"] == 1
+    relayed = mcp_tools.call_tool("_http_share", {
+        "slug": published["slug"], "path": "/bom.txt", "method": "GET", "query": ""})
+    assert relayed["status"] == 200
+
+
 def test_share_file_publishes_serves_lists_and_unshares(tmp_path):
     source = tmp_path / "report.txt"
     # Bytes, not text: Path.write_text translates "\n" to CRLF on Windows and the
@@ -296,10 +316,45 @@ def test_the_gateway_relay_serves_a_shared_file(tmp_path):
 
     assert relayed["status"] == 200
     assert base64.b64decode(relayed["body_b64"]) == b"relayed body"
+    # A UTF-8 text file must say so: a bare "text/plain" leaves the browser to
+    # guess the locale encoding and renders Cyrillic as mojibake ("РєР°Рє").
+    assert relayed["headers"]["content-type"] == "text/plain; charset=utf-8"
 
     # A wrong secret is an opaque 404, exactly like a share that never existed.
     assert mcp_tools.call_tool("_http_share", {
         "slug": "relay-0000000000000000", "path": "/relay.txt", "method": "GET"})["status"] == 404
+
+
+def test_cyrillic_reaches_the_client_as_utf8(tmp_path):
+    source = tmp_path / "ru.txt"
+    source.write_text("как она разворачивается", encoding="utf-8")
+    published = mcp_tools.call_tool("share_file", {"path": str(source)})
+
+    relayed = mcp_tools.call_tool("_http_share", {
+        "slug": published["slug"], "path": "/ru.txt", "method": "GET", "query": ""})
+
+    assert relayed["headers"]["content-type"] == "text/plain; charset=utf-8"
+    assert base64.b64decode(relayed["body_b64"]).decode("utf-8") == "как она разворачивается"
+
+
+def test_a_non_text_share_keeps_its_type_without_a_charset(tmp_path):
+    source = tmp_path / "photo.png"
+    source.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+    published = mcp_tools.call_tool("share_file", {"path": str(source)})
+
+    relayed = mcp_tools.call_tool("_http_share", {
+        "slug": published["slug"], "path": "/photo.png", "method": "GET", "query": ""})
+
+    assert relayed["headers"]["content-type"] == "image/png"
+
+
+def test_the_charset_helper_states_utf8_only_for_text():
+    with_charset = web_share._with_charset
+    assert with_charset("text/plain") == "text/plain; charset=utf-8"
+    assert with_charset("text/html") == "text/html; charset=utf-8"
+    assert with_charset("application/json") == "application/json; charset=utf-8"
+    assert with_charset("image/png") == "image/png"
+    assert with_charset("text/plain; charset=windows-1251") == "text/plain; charset=windows-1251"
 
 
 # ---------------------------------------------------------------------------

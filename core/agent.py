@@ -49,7 +49,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Optional
+from typing import Any, Optional
 
 try:
     import websockets
@@ -668,6 +668,27 @@ def _looks_like_dns_failure(exc: BaseException) -> bool:
     ))
 
 
+def apply_gateway_hello(message: Any) -> str:
+    """Adopt the public domain the gateway announces for link generation.
+
+    The gateway is the one place an operator changes the mesh's address. A node
+    that kept minting links from its own copy of the domain could name a host
+    this gateway is no longer reached at - the exact drift that made published
+    share links point at a dead domain while the tunnel itself was healthy.
+
+    The announcement is best-effort: an older gateway never sends it, and then
+    the node keeps resolving the domain itself (``MESH_PUBLIC_URL`` ->
+    ``domain.env`` -> the built-in default), so nothing breaks.
+    """
+    if not isinstance(message, dict) or str(message.get("type") or "") != "hello":
+        return ""
+    base = domain.normalise_public_base_url(message.get("public_base"))
+    if not base:
+        return ""
+    mcp_tools.configure(public_url=base)
+    return base
+
+
 def tunnel_uri() -> str:
     """Canonical tunnel URL: one shared domain, node selected by ?user=."""
     base = GATEWAY_HOST.rstrip("/")
@@ -688,6 +709,7 @@ async def run_agent():
         logger.error("MESH_TOKEN is empty (env and %s): the gateway will reject this node. "
                      "Re-run the installer.", os.environ.get("MESH_CONFIG_FILE") or DEFAULT_CONFIG_FILE)
     uri = tunnel_uri()
+    logger.info("Public links: %s (source: %s)", domain.public_url(), domain.source())
     logger.info(f"Connecting to Gateway {uri.split('&token=')[0]} ...")
     backoff = 1.0
     in_flight = set()
@@ -704,6 +726,10 @@ async def run_agent():
                     try:
                         data = json.loads(raw_msg)
                     except Exception:
+                        continue
+                    adopted = apply_gateway_hello(data)
+                    if adopted:
+                        logger.info("Public links now follow the gateway: %s", adopted)
                         continue
                     if data.get("method") == "tools/call":
                         # Each call runs on its own: Gemini issues parallel calls,

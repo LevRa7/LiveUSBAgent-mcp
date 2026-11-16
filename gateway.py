@@ -2985,6 +2985,21 @@ async def mcp_unified_endpoint(request: Request):
         }
     )
 
+#: The first message every tunnel receives: the public host its links must name.
+#: The gateway owns the domain (MESH_PUBLIC_URL / domain.env); a node that built
+#: share links from its own copy handed out a host this gateway is not reached
+#: at, which is exactly how a published link ended up on a dead domain while the
+#: tunnel itself was healthy. Older nodes ignore unknown messages, so sending it
+#: is backward compatible.
+def tunnel_hello(user: str) -> dict:
+    return {
+        "type": "hello",
+        "user": user,
+        "gateway": PUBLIC_HOST,
+        "public_base": PUBLIC_BASE_URL,
+    }
+
+
 async def ws_tunnel_endpoint(websocket: WebSocket):
     query = websocket.query_params
     user = query.get("user", "").lower()
@@ -3033,6 +3048,12 @@ async def ws_tunnel_endpoint(websocket: WebSocket):
 
     await websocket.accept()
     logger.info(f"Agent tunnel connected for user '{user}'")
+    # Tell the node which public host its links must use, before it serves any
+    # tool call. Best effort: a node that ignores it keeps its own resolution.
+    try:
+        await websocket.send_json(tunnel_hello(user))
+    except Exception as exc:  # pragma: no cover - a dead socket fails the loop below
+        logger.debug("Could not send the tunnel hello to '%s': %s", user, exc)
     tunnel_data = {"ws": websocket, "pending": {}}
     active_tunnels[user] = tunnel_data
     # The agent is connected: this is the timestamp /health reports as
@@ -3090,6 +3111,35 @@ _RELAY_HEADERS = (
 )
 _HEADER_VALUE_RE = re.compile(r"[\x00-\x1f\x7f]")
 _CONTENT_LENGTH_RE = re.compile(r"^\d{1,12}$")
+#: Content types that are text but do not start with ``text/``.
+_TEXTUAL_TYPES = (
+    "application/json",
+    "application/javascript",
+    "application/xml",
+    "application/x-yaml",
+    "application/x-ndjson",
+    "image/svg+xml",
+)
+
+
+def _with_charset(content_type: str) -> str:
+    """Give a text response an explicit UTF-8 charset.
+
+    A node that answers ``Content-Type: text/plain`` for a UTF-8 file leaves the
+    browser to guess, and a Russian Windows guesses windows-1251: the share
+    opens as mojibake. The node is fixed to send the charset itself; this is the
+    gateway's half of the repair, so shares published by a node that still runs
+    the older code render correctly too. An explicit charset from the node is
+    never overridden.
+    """
+    if not content_type:
+        return content_type
+    lowered = content_type.lower()
+    if "charset=" in lowered:
+        return content_type
+    if lowered.startswith("text/") or lowered in _TEXTUAL_TYPES:
+        return "%s; charset=utf-8" % content_type
+    return content_type
 
 
 def _relay_headers(raw) -> dict:
@@ -3104,6 +3154,8 @@ def _relay_headers(raw) -> dict:
         text = text.encode("latin-1", "replace").decode("latin-1")
         if name == "location" and not text.startswith("/"):
             continue  # a redirect must stay inside this domain's share namespace
+        if name == "content-type":
+            text = _with_charset(text)
         headers[name] = text
     return headers
 

@@ -569,11 +569,46 @@ def test_only_allow_listed_headers_survive_the_relay(tmp_path, monkeypatch):
 
     response = _call(_share_request())
 
-    assert response.headers["content-type"] == "text/html"
+    assert response.headers["content-type"] == "text/html; charset=utf-8"
     assert response.headers["etag"] == '"abc"'
     assert "set-cookie" not in response.headers
     assert "x-accel-redirect" not in response.headers
     assert "location" not in response.headers, "a redirect must stay inside the share namespace"
+
+
+def test_a_text_share_states_utf8_so_cyrillic_is_not_mojibake(tmp_path, monkeypatch):
+    """A bare ``text/plain`` makes the browser guess windows-1251 on a Russian Windows.
+
+    ``РєР°Рє`` is UTF-8 ``как`` read as windows-1251. The node now states the
+    charset itself, and this half of the repair covers a node that still runs the
+    older code: the share must render as Cyrillic either way.
+    """
+    _registry(tmp_path, monkeypatch)
+    _node_online(monkeypatch)
+    _relay(monkeypatch, {
+        "status": 200,
+        "body_b64": base64.b64encode("как она разворачивается".encode("utf-8")).decode(),
+        "headers": {"content-type": "text/plain"},
+    })
+
+    response = _call(_share_request())
+
+    assert response.headers["content-type"] == "text/plain; charset=utf-8"
+    assert response.body.decode("utf-8").startswith("как")
+
+
+def test_an_explicit_charset_from_the_node_is_never_overridden(tmp_path, monkeypatch):
+    _registry(tmp_path, monkeypatch)
+    _node_online(monkeypatch)
+    _relay(monkeypatch, {
+        "status": 200,
+        "body_b64": "",
+        "headers": {"content-type": "text/plain; charset=windows-1251"},
+    })
+
+    response = _call(_share_request())
+
+    assert response.headers["content-type"] == "text/plain; charset=windows-1251"
 
 
 def test_a_relative_location_is_relayed_and_control_characters_are_stripped(tmp_path, monkeypatch):

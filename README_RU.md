@@ -87,7 +87,7 @@ SSID и оба адреса замазаны, остальное пришло и
 
 ## 🛠️ Что Gemini может делать на вашей машине (MCP-инструменты)
 
-**30 инструментов.** Все они выполняются на вашей машине под вашей учётной записью — шлюз только передаёт вызовы.
+**28 инструментов.** Все они выполняются на вашей машине под вашей учётной записью — шлюз только передаёт вызовы.
 
 ### На какие вызовы Gemini спросит подтверждение
 
@@ -469,10 +469,10 @@ https://racknerd-5a24bf9.merino-carob.ts.net/sse?user=<имя-вашего-уз�
 где не хочется ничего клонировать:
 
 ```powershell
-.\RemoteHarnessMCP-Setup-0.4.8.exe            # открыть визуальный установщик
-.\RemoteHarnessMCP-Setup-0.4.8.exe -Lang ru   # начать на русском
-.\RemoteHarnessMCP-Setup-0.4.8.exe -SelfTest  # самопроверка без окна, печатает JSON
-.\RemoteHarnessMCP-Setup-0.4.8.exe --version  # показать версию
+.\RemoteHarnessMCP-Setup-0.5.0.exe            # открыть визуальный установщик
+.\RemoteHarnessMCP-Setup-0.5.0.exe -Lang ru   # начать на русском
+.\RemoteHarnessMCP-Setup-0.5.0.exe -SelfTest  # самопроверка без окна, печатает JSON
+.\RemoteHarnessMCP-Setup-0.5.0.exe --version  # показать версию
 ```
 
 Внутри него лежат мастер, `install.ps1`, `core/` и `install.sh`; он распаковывает их в

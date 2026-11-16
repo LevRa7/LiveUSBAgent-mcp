@@ -87,7 +87,7 @@ Every answer was produced by `system_vitals`, `device_info`, `device_capture` an
 
 ## 🛠️ What Gemini can do on your machine (MCP tools)
 
-**30 tools.** Every one of them runs on your machine under your own user account — the gateway only carries the calls.
+**28 tools.** Every one of them runs on your machine under your own user account — the gateway only carries the calls.
 
 ### Which calls ask for your confirmation
 
@@ -425,10 +425,10 @@ The release also ships a single compiled installer, for machines where you would
 not clone or download anything else — `RemoteHarnessMCP-Setup-<version>.exe`:
 
 ```powershell
-.\RemoteHarnessMCP-Setup-0.4.8.exe            # open the visual installer
-.\RemoteHarnessMCP-Setup-0.4.8.exe -Lang ru   # start in Russian
-.\RemoteHarnessMCP-Setup-0.4.8.exe -SelfTest  # headless self-check, prints JSON
-.\RemoteHarnessMCP-Setup-0.4.8.exe --version  # print the version
+.\RemoteHarnessMCP-Setup-0.5.0.exe            # open the visual installer
+.\RemoteHarnessMCP-Setup-0.5.0.exe -Lang ru   # start in Russian
+.\RemoteHarnessMCP-Setup-0.5.0.exe -SelfTest  # headless self-check, prints JSON
+.\RemoteHarnessMCP-Setup-0.5.0.exe --version  # print the version
 ```
 
 It carries the wizard, `install.ps1`, `core/` and `install.sh` inside itself, unpacks them

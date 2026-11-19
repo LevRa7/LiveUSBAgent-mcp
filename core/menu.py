@@ -368,7 +368,13 @@ def _render_lines(env: Dict[str, str], *, include_endpoint: bool = True,
         ("[ %s ]" % labels[m]) if m == mode else ("  %s  " % labels[m]) for m in order
     )
     lines.append("Mode:  <  %s  >      (Tab / Left / Right)" % pretty)
-    lines.append("Home:  %s" % (state["workspace"] or os.getcwd()))
+    home = state["workspace"] or os.getcwd()
+    home_button = "  [d] edit"
+    if columns:
+        # Keep the button visible: shrink the path, never the affordance.
+        room = max(8, columns - len("Home:  ") - len(home_button))
+        home = _fit(home, room)
+    lines.append("Home:  %s%s" % (home, home_button))
     isolated = sandbox.status()
     if isolated["enabled"]:
         lines.append(

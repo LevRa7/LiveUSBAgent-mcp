@@ -200,6 +200,21 @@ def test_interactive_frame_fits_the_window(monkeypatch):
     assert "q quit" in frame
 
 
+def test_home_line_has_an_edit_button(monkeypatch):
+    monkeypatch.setattr(menu, "read_agent_env", lambda: {"MESH_USER": "n"})
+    text = menu.render(menu.read_agent_env())
+    assert "Home:" in text
+    assert "[d] edit" in text
+
+
+def test_home_edit_button_survives_a_narrow_frame():
+    env = {"MESH_USER": "node-one", "MESH_LINK_KEY": "lk_" + "a" * 32,
+           "MESH_GATEWAY": "gw.test"}
+    frame = menu._frame(env, columns=60, rows=24)
+    assert "[d] edit" in frame
+    assert all(len(line) <= 60 for line in frame.splitlines())
+
+
 def test_frame_shows_token_and_qr_in_a_large_window():
     env = {"MESH_USER": "node-one", "MESH_LINK_KEY": "lk_" + "a" * 32,
            "MESH_GATEWAY": "gw.test"}

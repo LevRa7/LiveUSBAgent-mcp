@@ -925,6 +925,47 @@ class CabinetNodeControl:
             save_registry(registry)
         return {"ok": True, "node": node}
 
+    def pair(self, code: str) -> dict | None:
+        """What a browser may see about a pending pairing code: no credentials.
+
+        The page asks "connect this machine?" and needs the name, the OS and how
+        long the code still lives. The token and the link key belong to the
+        device that requested the code and are handed to it by
+        ``device_pair_status``, so they are not part of this snapshot at all.
+        """
+        code = str(code or "").strip().upper()
+        purge_pairs()
+        pair = pending_pairs.get(code)
+        if pair is None:
+            return None
+        return {
+            "hostname": str(pair.get("hostname") or ""),
+            "os": str(pair.get("os") or ""),
+            "arch": str(pair.get("arch") or ""),
+            "created_at": pair.get("created_at"),
+            "expires_in": max(0, int(pair.get("expires_at", 0) - time.time())),
+            "approved": bool(pair.get("approved")),
+            "owner_subject": str(pair.get("owner_subject") or ""),
+        }
+
+    def approve_pair(self, code: str, owner_subject: str = "",
+                     account_id: str = "") -> dict:
+        """Approve a code from the cabinet: the same issuer the admin API uses.
+
+        The cabinet never names the node itself - the name comes from the device
+        that asked for the code - and it only learns the resulting username, not
+        the credentials, which stay queued for that device.
+        """
+        result = approve_pending_pair(code, owner_subject=owner_subject,
+                                      account_id=account_id)
+        if not result.get("ok"):
+            return {"ok": False, "error": str(result.get("error") or "unknown_pair")}
+        return {
+            "ok": True,
+            "username": str(result.get("username") or ""),
+            "hostname": str(result.get("hostname") or ""),
+        }
+
     async def call(self, node: str, payload: dict) -> dict:
         args = dict(payload) if isinstance(payload, dict) else {}
         args.setdefault("action", "status")
@@ -1255,9 +1296,12 @@ async def api_register(request: Request):
 # The join flow that replaces "anyone may POST /api/register and receive a token":
 #
 #   1. the node asks for a code            POST /v1/devices/pair
-#   2. a human with admin rights approves  POST /v1/devices/pair/{code}/approve
+#   2. a human approves it                 POST /v1/devices/pair/{code}/approve (admin)
+#                                          or /account/pair/{code}/approve (cabinet)
 #   3. the node collects its credentials   GET  /v1/devices/pair/{code}
 #
+# Both approvals go through approve_pending_pair(): the registry side effects and
+# the one-shot hand-out are identical, only the authority differs.
 # The credentials are handed out exactly once, after approval, and the code dies
 # with its 10-minute TTL. Nothing is created in the registry before step 2, so a
 # bot that can reach the endpoint can at worst ask for codes.
@@ -1420,32 +1464,39 @@ async def device_pair_status(request: Request):
     return JSONResponse({"status": "approved", **issued})
 
 
-async def device_pair_approve(request: Request):
-    if not ADMIN_TOKEN:
-        return JSONResponse({
-            "error": "pairing_not_configured",
-            "message": "This gateway has no MESH_ADMIN_TOKEN set, so no code can be approved.",
-        }, status_code=503)
-    if not admin_authorised(request):
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-    code = (request.path_params.get("code") or "").strip().upper()
+def approve_pending_pair(code: str, owner_subject: str = "",
+                         account_id: str = "") -> dict:
+    """Issue one pending pairing's credentials - the single path both callers use.
+
+    The admin API and the account cabinet must not grow two copies of this: the
+    registry side effects (a unique name, a token, a link key, and now the owner)
+    are the whole security surface of pairing. Synchronous on purpose, so
+    ``approving`` is set before anything can yield to a second request; two
+    concurrent approvals used to pass the same check, create two registry entries
+    and lose the first token.
+
+    Returns ``{"ok": True, "username": ..., "hostname": ...}`` or
+    ``{"ok": False, "error": "unknown_pair"|"already_approved"}``. The credentials
+    are stored in the pending pair and collected exactly once by
+    ``device_pair_status``; they never leave through the return value.
+    """
+    code = str(code or "").strip().upper()
     purge_pairs()
     pair = pending_pairs.get(code)
     if pair is None:
-        return JSONResponse({"error": "unknown_pair"}, status_code=404)
-    if pair["approved"] or pair.get("approving"):
-        return JSONResponse({"error": "already_approved"}, status_code=409)
-    # Claim the request before the first await: two concurrent approvals used to
-    # pass this check, create two registry entries and lose the first token.
+        return {"ok": False, "error": "unknown_pair"}
+    if pair.get("approved") or pair.get("approving"):
+        return {"ok": False, "error": "already_approved"}
+    # Claim the code before the first write: this function has no awaits, but a
+    # second request must still never observe a half-approved pair.
     pair["approving"] = True
     try:
-        try:
-            data = await request.json()
-        except Exception:
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
-        wanted = re.sub(r"[^a-z0-9_-]", "", str(data.get("username") or pair.get("hostname") or "node").lower())[:40]
+        # The admin API may name the node explicitly; the cabinet cannot, so the
+        # wish (if any) is read from the pending pair itself and both callers
+        # keep the same signature.
+        wanted = re.sub(r"[^a-z0-9_-]", "",
+                        str(pair.get("requested_username")
+                            or pair.get("hostname") or "node").lower())[:40]
         if not wanted or len(wanted) < 2:
             wanted = "node"
         registry = load_registry()
@@ -1457,23 +1508,62 @@ async def device_pair_approve(request: Request):
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         entry = new_node_entry("", pair["os"], pair["arch"], now_iso, token, link_key)
         entry["hostname"] = pair["hostname"]
+        # Ownership is written only when the caller knows it: the admin API may
+        # approve anonymously, the cabinet always acts for a signed-in owner.
+        subject = str(owner_subject or "").strip()[:200]
+        owner_id = str(account_id or "").strip()[:200]
+        if subject:
+            entry["owner_subject"] = subject
+        if owner_id:
+            entry["account_id"] = owner_id
         registry[wanted] = entry
         save_registry(registry)
 
+        pair["owner_subject"] = subject
+        pair["account_id"] = owner_id
+        pair["issued"] = {
+            "username": wanted,
+            "token": token,
+            "link_key": link_key,
+            "gateway": PUBLIC_HOST,
+            "sse_url": node_mcp_url(wanted, link_key),
+            "tunnel_url": f"wss://{PUBLIC_HOST}/ws/tunnel?user={wanted}",
+            "token_use": "Authorization: Bearer <token> (the tunnel and CLI use this; never in a URL)",
+        }
         pair["approved"] = True
     finally:
         pair.pop("approving", None)
-    pair["issued"] = {
-        "username": wanted,
-        "token": token,
-        "link_key": link_key,
-        "gateway": PUBLIC_HOST,
-        "sse_url": node_mcp_url(wanted, link_key),
-        "tunnel_url": f"wss://{PUBLIC_HOST}/ws/tunnel?user={wanted}",
-        "token_use": "Authorization: Bearer <token> (the tunnel and CLI use this; never in a URL)",
-    }
     logger.info("Paired node '%s' from code %s", wanted, code)
-    return JSONResponse({"status": "approved", "username": wanted})
+    return {"ok": True, "username": wanted, "hostname": str(pair.get("hostname") or "")}
+
+
+async def device_pair_approve(request: Request):
+    if not ADMIN_TOKEN:
+        return JSONResponse({
+            "error": "pairing_not_configured",
+            "message": "This gateway has no MESH_ADMIN_TOKEN set, so no code can be approved.",
+        }, status_code=503)
+    if not admin_authorised(request):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    code = (request.path_params.get("code") or "").strip().upper()
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    # The admin may name the node in the body; the shared issuer reads that wish
+    # from the pending pair, so one function serves both callers.
+    requested = re.sub(r"[^a-z0-9_-]", "", str(data.get("username") or "").lower())[:40]
+    pending = pending_pairs.get(code)
+    if pending is not None and requested:
+        pending["requested_username"] = requested
+    result = approve_pending_pair(code)
+    if not result.get("ok"):
+        if result.get("error") == "already_approved":
+            return JSONResponse({"error": "already_approved"}, status_code=409)
+        return JSONResponse({"error": "unknown_pair"}, status_code=404)
+    return JSONResponse({"status": "approved", "username": result["username"]})
 
 
 async def device_rotate(request: Request):

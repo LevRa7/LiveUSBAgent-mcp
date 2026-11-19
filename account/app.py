@@ -69,6 +69,11 @@ CLAIM_ERRORS = {
     "rate_limited": "Слишком много попыток привязки. Подождите несколько минут.",
 }
 
+PAIR_ERRORS = {
+    "unknown_pair": "Код привязки не найден или истёк.",
+    "already_approved": "Этот код уже подтверждён.",
+}
+
 
 def _headers(response: Response) -> Response:
     response.headers["Cache-Control"] = "no-store"
@@ -188,6 +193,44 @@ def create_app(config: Optional[AccountConfig] = None,
             return {}
         return {str(name): dict(entry) for name, entry in snapshot.items()
                 if isinstance(entry, dict)}
+
+    def pair_code_from(request: Request) -> str:
+        """The pairing code from the query or the path, reduced to its alphabet.
+
+        Codes are generated as ``XXXX-XXXX`` from an unambiguous alphabet. Only
+        those characters survive here, which keeps the value safe to echo into a
+        redirect and an HTML form even when the URL was typed by hand.
+        """
+        raw = str(request.query_params.get("code")
+                  or request.path_params.get("code") or "")
+        return "".join(ch for ch in raw.strip().upper()
+                       if ch.isalnum() or ch == "-")[:32]
+
+    def pair_metadata(code: str) -> Optional[Dict[str, Any]]:
+        """The bridge's metadata for a pending code; no key ever passes through.
+
+        An absent or failing bridge means "unknown code", which the page answers
+        with a 404 - a bridge exception must not become a 500 on a public page.
+        """
+        if not code or node_control is None:
+            return None
+        reader = getattr(node_control, "pair", None)
+        if not callable(reader):
+            return None
+        try:
+            metadata = reader(code)
+        except Exception:                     # a broken bridge is an unknown code
+            return None
+        return dict(metadata) if isinstance(metadata, dict) else None
+
+    def pair_problem_page(status: int, heading: str, hint: str) -> HTMLResponse:
+        return page(
+            heading,
+            "<div class=card><h1>%s</h1><p class=muted>%s</p>"
+            "<p><a class=btn href=\"/account\">В кабинет</a></p></div>"
+            % (_esc(heading), _esc(hint)),
+            status,
+        )
 
     def merged_device(row: Dict[str, Any], entry: Dict[str, Any], node: str,
                       source: str) -> Dict[str, Any]:
@@ -567,6 +610,102 @@ def create_app(config: Optional[AccountConfig] = None,
         )
         return page("Настройки — %s" % node, body)
 
+    async def pair_page(request: Request) -> Response:
+        """The one page that turns a pairing code into a device of this account."""
+        code = pair_code_from(request)
+        account = await require(request)
+        if account is None:
+            # The code survives the login round-trip: the device is polling and
+            # the person must land back on the same confirmation.
+            return RedirectResponse("/account/login?next=/account/pair?code=" + code,
+                                    status_code=303)
+        metadata = pair_metadata(code)
+        if metadata is None:
+            return pair_problem_page(
+                404, "Код привязки не найден",
+                "Код действует 10 минут. Запустите привязку на устройстве заново "
+                "и подтвердите новый код.")
+        hostname = str(metadata.get("hostname") or "") or "устройство"
+        os_arch = " ".join(str(part) for part in
+                           (metadata.get("os"), metadata.get("arch")) if part) or "неизвестно"
+        if metadata.get("approved"):
+            return pair_problem_page(
+                409, "Этот код уже подтверждён",
+                "Коды одноразовые: устройство, которому он выдавался, уже получило "
+                "доступ. Если это не ваше устройство, ничего не делайте.")
+        minutes = max(0, int(metadata.get("expires_in") or 0)) // 60
+        body = (
+            "%s<div class=card><h1>%s</h1>"
+            "<p class=muted>Устройство просит подключить его к вашему кабинету. "
+            "Код <code>%s</code> действует ещё %d мин.</p>"
+            "<p>Система: %s</p>"
+            "<p class=muted>Подтверждайте только ту машину, которую вы сами только что "
+            "подключали: после подтверждения она получит доступ к вашему кабинету.</p>"
+            "<form method=post action=\"/account/pair/%s/approve\">"
+            "<input type=hidden name=csrf value=\"%s\">"
+            "<button class=btn type=submit>Подключить</button></form>"
+            "<p><a class=\"btn secondary\" href=\"/account\">В кабинет</a></p></div>"
+            % (feedback(request), _esc(hostname), _esc(code), minutes, _esc(os_arch),
+               _esc(code), _esc(account.get("csrf")))
+        )
+        return page("Привязка — %s" % hostname, body)
+
+    async def pair_approve(request: Request) -> Response:
+        """Confirm a code: a session, a CSRF token and a matching Origin are required."""
+        code = pair_code_from(request)
+        account = await require(request)
+        if account is None:
+            return RedirectResponse("/account/login?next=/account/pair?code=" + code,
+                                    status_code=303)
+        if request.method != "POST" or store is None:
+            return _headers(Response("Use POST", status_code=405))
+        form = await request.form()
+        if not csrf_ok(request, account, form):
+            return page("Ошибка", "<div class=card><h1>CSRF-токен неверен</h1></div>", 403)
+        metadata = pair_metadata(code)
+        if metadata is None:
+            return pair_problem_page(
+                404, "Код привязки не найден",
+                "Код действует 10 минут. Запустите привязку на устройстве заново.")
+        if metadata.get("approved"):
+            return pair_problem_page(
+                409, "Этот код уже подтверждён",
+                "Коды одноразовые: второй раз один и тот же код не срабатывает.")
+        if not gateway_ready():
+            return back("/account", {"error": "Шлюз не подключён: привязка недоступна."})
+        try:
+            result = node_control.approve_pair(
+                code,
+                owner_subject=owner_subject(account),
+                account_id=str(account.get("id") or ""),
+            )
+        except Exception as exc:
+            return back("/account", {"error": "%s: %s" % (type(exc).__name__, exc)})
+        if not result.get("ok"):
+            error = str(result.get("error") or "")
+            if error == "unknown_pair":
+                return pair_problem_page(
+                    404, "Код привязки не найден",
+                    "Код действует 10 минут. Запустите привязку на устройстве заново.")
+            if error == "already_approved":
+                return pair_problem_page(
+                    409, "Этот код уже подтверждён",
+                    "Коды одноразовые: второй раз один и тот же код не срабатывает.")
+            return back("/account", {"error": PAIR_ERRORS.get(
+                error, "Не удалось подтвердить привязку.")})
+        node = str(result.get("username") or "").strip()
+        if not node:
+            return back("/account", {"error": "Шлюз не вернул имя устройства."})
+        hostname = str(result.get("hostname") or metadata.get("hostname") or "") or node
+        # The registry now carries the owner; the cabinet row is what every later
+        # page addresses by id, so a successful approval always writes one.
+        device = store.claim_device(account["tenant_id"], node, display_name=hostname)
+        if device is None:
+            return back("/account", {"error": CLAIM_ERRORS["already_linked"]})
+        # Keys are not shown on purpose: the device that asked for the code
+        # collects its token and link key itself.
+        return back("/account", {"message": "Устройство %s привязано." % node})
+
     async def claim(request: Request) -> Response:
         account = await require(request)
         if account is None:
@@ -830,6 +969,9 @@ def create_app(config: Optional[AccountConfig] = None,
 
     app = Starlette(routes=[
         Route("/", root, methods=["GET", "HEAD"]),
+        # Pairing: the code is typed by the device, the confirmation by the owner.
+        Route("/pair", pair_page, methods=["GET", "HEAD"]),
+        Route("/pair/{code}/approve", pair_approve, methods=["POST"]),
         Route("/devices/claim", claim, methods=["POST"]),
         Route("/devices/{device_id}", device_page, methods=["GET", "HEAD"]),
         Route("/devices/{device_id}/control", device_control, methods=["POST"]),

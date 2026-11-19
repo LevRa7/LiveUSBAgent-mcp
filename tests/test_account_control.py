@@ -38,6 +38,10 @@ class FakeBridge:
         self.claim_answer = {"ok": True, "node": "desk"}
         #: What the bridge's registry snapshot reports; a test fills it in.
         self.registry = {}
+        #: Pending pairing codes the bridge knows, and the approvals it saw.
+        self.pairs = {}
+        self.approve_calls = []
+        self.approve_answer = {"ok": True, "username": "desk-pc", "hostname": "desk-pc"}
 
     def available(self):
         return True
@@ -56,6 +60,21 @@ class FakeBridge:
             "account_id": account_id,
         })
         return dict(self.claim_answer)
+
+    def pair(self, code):
+        entry = self.pairs.get(code)
+        return dict(entry) if entry else None
+
+    def approve_pair(self, code, owner_subject="", account_id=""):
+        self.approve_calls.append({
+            "code": code,
+            "owner_subject": owner_subject,
+            "account_id": account_id,
+        })
+        answer = dict(self.approve_answer)
+        if answer.get("ok") and code in self.pairs:
+            self.pairs[code]["approved"] = True
+        return answer
 
     async def call(self, node, payload):
         self.calls.append((node, dict(payload)))

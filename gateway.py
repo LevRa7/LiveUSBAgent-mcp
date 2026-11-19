@@ -208,7 +208,7 @@ PUBLIC_HOST = urlparse(PUBLIC_BASE_URL).netloc or PUBLIC_BASE_URL
 
 # Legacy per-device subdomain resolution. Kept only so URLs handed out before the
 # shared-domain contract keep working; never advertised, and it logs a warning.
-LEGACY_SUBDOMAIN_ACCESS = os.environ.get("MESH_LEGACY_SUBDOMAIN", "1").strip().lower() in (
+LEGACY_SUBDOMAIN_ACCESS = os.environ.get("MESH_LEGACY_SUBDOMAIN", "0").strip().lower() in (
     "1", "true", "yes", "on"
 )
 
@@ -1078,7 +1078,10 @@ async def api_register(request: Request):
     # The device token may arrive as an Authorization header (preferred) or in
     # the JSON body (installers that predate the header). It is never read from
     # the query string here: a registration URL is not a place for a secret.
-    supplied, _source = request_credential(request)
+    supplied, credential_source = request_credential(request)
+    if credential_source == "query":
+        # A registration URL is not a place for a secret: a query token is ignored.
+        supplied = ""
     supplied = supplied or str(data.get("token") or "").strip()
     auto_suffix = data.get("auto_suffix", False)
 
@@ -1184,16 +1187,38 @@ ADMIN_TOKEN = os.environ.get("MESH_ADMIN_TOKEN", "").strip()
 pending_pairs: dict[str, dict] = {}
 
 
+def header_credential(request: Request) -> str:
+    """A device credential from a header only; query credentials are refused.
+
+    State-changing endpoints (rotate/revoke) used to accept ``?token=`` just
+    because request_credential() returns query values too. A leaked URL then
+    allowed rotating and revoking the very node it belonged to.
+    """
+    supplied, source = request_credential(request)
+    return supplied if source == "header" else ""
+
+
+def _admin_tokens() -> list[str]:
+    """Every acceptable admin secret; entries shorter than 32 chars are ignored."""
+    raw = str(ADMIN_TOKEN or "")
+    tokens = [item.strip() for item in raw.split(",") if item.strip()]
+    valid = [item for item in tokens if len(item) >= 32]
+    if tokens and not valid:
+        logger.error("MESH_ADMIN_TOKEN is shorter than 32 characters; admin API disabled")
+    return valid
+
+
 def admin_authorised(request: Request) -> bool:
     supplied = (request.headers.get("x-admin-token") or "").strip()
-    if not ADMIN_TOKEN or not supplied:
+    tokens = _admin_tokens()
+    if not tokens or not supplied:
         return False
-    if len(ADMIN_TOKEN) < 32:
-        # One short shared secret used to be enough to rotate every device. A
-        # short value is refused instead of silently protecting nothing.
-        logger.error("MESH_ADMIN_TOKEN is shorter than 32 characters; admin API disabled")
-        return False
-    if not tokens_equal(supplied, ADMIN_TOKEN):
+    if os.environ.get("MESH_ADMIN_REQUIRE_LOCALHOST", "").strip().lower() in ("1", "true", "yes", "on"):
+        peer = request.client.host if request.client else ""
+        if peer not in ("127.0.0.1", "::1"):
+            logger.warning("Admin API refused from a non-loopback peer")
+            return False
+    if not any(tokens_equal(supplied, candidate) for candidate in tokens):
         return False
     logger.warning("Admin API used: %s %s from %s", request.method, request.url.path, client_ip(request))
     return True
@@ -1350,7 +1375,7 @@ async def device_rotate(request: Request):
     entry = registry.get(user)
     if entry is None:
         return JSONResponse({"error": "unknown_node"}, status_code=404)
-    supplied, _source = request_credential(request)
+    supplied = header_credential(request)
     if not (admin_authorised(request) or token_matches_device(entry, supplied)):
         return JSONResponse({"error": "forbidden"}, status_code=403)
     link_key = new_link_key()
@@ -1395,7 +1420,7 @@ async def device_rotate_token(request: Request):
     entry = registry.get(user)
     if entry is None:
         return JSONResponse({"error": "unknown_node"}, status_code=404)
-    supplied, _source = request_credential(request)
+    supplied = header_credential(request)
     if not (admin_authorised(request) or token_matches_device(entry, supplied)):
         return JSONResponse({
             "error": "forbidden",
@@ -1431,7 +1456,7 @@ async def device_rotate_token_finish(request: Request):
     entry = registry.get(user)
     if entry is None:
         return JSONResponse({"error": "unknown_node"}, status_code=404)
-    supplied, _source = request_credential(request)
+    supplied = header_credential(request)
     if not (admin_authorised(request)
             or token_matches_device(entry, supplied)
             or token_matches_next(entry, supplied)):
@@ -1453,7 +1478,7 @@ async def device_revoke(request: Request):
     entry = registry.get(user)
     if entry is None:
         return JSONResponse({"error": "unknown_node"}, status_code=404)
-    supplied, _source = request_credential(request)
+    supplied = header_credential(request)
     if not (admin_authorised(request) or token_matches_device(entry, supplied)):
         return JSONResponse({"error": "forbidden"}, status_code=403)
     registry.pop(user, None)
@@ -3036,6 +3061,18 @@ async def mcp_unified_endpoint(request: Request):
         session_id = resolve_session_id(request, user)
         logger.info(f"Session teardown (DELETE) from {client_ip} [{user}] session_id={session_id[:12]}…")
 
+        # A session id is guessable/leakable enough that the DELETE must check
+        # who owns it: closing another node's stream only because its id was in
+        # the header is a denial of service.
+        owner = active_sessions.get(session_id)
+        if owner is not None and owner != user:
+            logger.warning("DELETE ignored: session belongs to another node")
+            return JSONResponse(
+                {"error": "not_found"},
+                status_code=404,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
         # Forget the session we issued for this connection. Streams live under
         # their own per-connection key, so a teardown can never close a stream
         # that another in-flight request is still reading.
@@ -3046,14 +3083,16 @@ async def mcp_unified_endpoint(request: Request):
         # another connection's. The queue is unregistered from the per-user list
         # and the session index here as well, so /health stays truthful even if
         # the stream generator never resumes to run its own cleanup.
-        if session_id in active_sse_sessions:
-            q = active_sse_sessions.pop(session_id, None)
-            if q is not None:
-                try:
-                    q.put_nowait(None)
-                except Exception:
-                    pass
-                forget_sse_queue(user, q)
+        queue = active_sse_sessions.get(session_id)
+        if queue is not None and queue in active_sse_subscribers.get(user, []):
+            active_sse_sessions.pop(session_id, None)
+            try:
+                queue.put_nowait(None)
+            except Exception:
+                pass
+            forget_sse_queue(user, queue)
+        elif queue is not None:
+            logger.warning("DELETE ignored: stream belongs to another node")
 
         return Response(
             status_code=204,
@@ -4024,6 +4063,10 @@ def _share_response(status: int, message: str, extra=None) -> Response:
 
 async def public_share_endpoint(request: Request) -> Response:
     """Relay one public share request to the node that owns it."""
+    if rate_limited("share", client_ip(request), limit=_env_int("MESH_SHARE_RATE_LIMIT", 600, 10, 100000)):
+        # The route is unauthenticated: without a bucket one client can pin the
+        # event loop on registry reads and node relays for everybody else.
+        return _share_response(429, "too many requests", {"retry-after": "5"})
     user = (request.path_params.get("user") or "").strip().lower()
     rest = (request.path_params.get("rest") or "").strip("/")
     if not user or not rest:

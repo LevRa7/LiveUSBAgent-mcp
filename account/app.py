@@ -10,7 +10,10 @@ a node's settings itself.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import html
+import os
 import time
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
@@ -104,6 +107,43 @@ def create_app(config: Optional[AccountConfig] = None,
     #: Per-tenant claim attempts: a code or credential is guessable only if the
     #: caller may try forever, so the cabinet slows the obvious attack down.
     claim_guard: Dict[str, List[float]] = {}
+    #: Per-IP windows for the OAuth start/callback. Without them a login loop
+    #: fills the auth_flows table and turns /account into a CPU burner.
+    login_hits: Dict[str, List[float]] = {}
+
+    def login_rate_limited(request: Request, bucket: str, limit: int = 20,
+                           window: float = 60.0) -> bool:
+        key = "%s:%s" % (bucket, request.client.host if request.client else "unknown")
+        now = time.time()
+        if len(login_hits) > 4096:
+            for stale in [k for k, stamps in login_hits.items()
+                          if not stamps or now - stamps[-1] > 300]:
+                login_hits.pop(stale, None)
+        seen = [stamp for stamp in login_hits.get(key, []) if now - stamp < window]
+        if len(seen) >= limit:
+            login_hits[key] = seen
+            return True
+        seen.append(now)
+        login_hits[key] = seen
+        return False
+
+    def owner_allowed(claims: Dict[str, Any]) -> bool:
+        """Optional allowlist: only these Google accounts may sign in.
+
+        Empty MESH_OWNER_EMAILS/MESH_OWNER_DOMAINS keeps the old behaviour
+        (any verified Google account), which is fine for a personal gateway but
+        not for a shared one.
+        """
+        emails = {item.strip().lower() for item in
+                  os.environ.get("MESH_OWNER_EMAILS", "").split(",") if item.strip()}
+        domains = {item.strip().lower() for item in
+                   os.environ.get("MESH_OWNER_DOMAINS", "").split(",") if item.strip()}
+        if not emails and not domains:
+            return True
+        email = str(claims.get("email") or "").lower()
+        if not email:
+            return False
+        return email in emails or any(email.endswith("@" + domain) for domain in domains)
 
     def current(request: Request) -> Optional[Dict[str, Any]]:
         if store is None or not cfg.configured:
@@ -176,7 +216,12 @@ def create_app(config: Optional[AccountConfig] = None,
 
     def csrf_ok(request: Request, account: Dict[str, Any], form: Any) -> bool:
         supplied = str(form.get("csrf") or "")
-        return bool(supplied) and supplied == str(account.get("csrf") or "")
+        if not supplied or supplied != str(account.get("csrf") or ""):
+            return False
+        # A browser always sends Origin on a cross-site POST; a mismatch means
+        # the form was submitted from another site even if the token leaked.
+        origin = request.headers.get("origin")
+        return origin is None or origin == cfg.base_url.rstrip("/")
 
     # -- rendering ---------------------------------------------------------
 
@@ -542,13 +587,17 @@ def create_app(config: Optional[AccountConfig] = None,
         state = auth.new_state()
         nonce = auth.new_nonce()
         verifier = auth.new_verifier()
+        binding = auth.new_state()
         store.create_flow(state, nonce, verifier, "/account/drive",
-                          kind="drive", account_id=account["id"])
-        return RedirectResponse(
+                          kind="drive", account_id=account["id"],
+                          binding_hash=hashlib.sha256(binding.encode()).hexdigest())
+        response = RedirectResponse(
             auth.build_auth_url(cfg, state, nonce, verifier, scopes=auth.DRIVE_SCOPES,
                                 access_type="offline", prompt="consent"),
             status_code=302,
         )
+        sessions.set_login_cookie(response, binding, cfg.base_url)
+        return response
 
     async def drive_disconnect(request: Request) -> Response:
         account = await require(request)
@@ -578,15 +627,29 @@ def create_app(config: Optional[AccountConfig] = None,
     async def start(request: Request) -> Response:
         if not cfg.configured:
             return page("Не настроено", "<div class=card><h1>OAuth не настроен</h1></div>", 503)
+        if login_rate_limited(request, "start"):
+            return page("Подождите", "<div class=card><h1>Слишком много попыток входа</h1>"
+                                     "<p class=muted>Повторите через минуту.</p></div>", 429)
         state = auth.new_state()
         nonce = auth.new_nonce()
         verifier = auth.new_verifier()
-        store.create_flow(state, nonce, verifier, auth.sanitize_next(request.query_params.get("next")))
-        return RedirectResponse(auth.build_auth_url(cfg, state, nonce, verifier), status_code=302)
+        binding = auth.new_state()
+        store.create_flow(
+            state, nonce, verifier, auth.sanitize_next(request.query_params.get("next")),
+            binding_hash=hashlib.sha256(binding.encode()).hexdigest(),
+        )
+        response = RedirectResponse(auth.build_auth_url(cfg, state, nonce, verifier), status_code=302)
+        # The callback must arrive in the same browser that started the flow:
+        # otherwise a link with somebody else's state can attach their identity
+        # to this session.
+        sessions.set_login_cookie(response, binding, cfg.base_url)
+        return response
 
     async def callback(request: Request) -> Response:
         if not cfg.configured:
             return page("Не настроено", "<div class=card><h1>OAuth не настроен</h1></div>", 503)
+        if login_rate_limited(request, "callback"):
+            return page("Подождите", "<div class=card><h1>Слишком много попыток входа</h1></div>", 429)
         error = request.query_params.get("error")
         state = request.query_params.get("state", "")
         if error:
@@ -596,6 +659,15 @@ def create_app(config: Optional[AccountConfig] = None,
         if flow is None:
             return page("Вход отклонён", "<div class=card><h1>Сессия входа истекла</h1>"
                         "<p class=muted>Повторите вход.</p><a class=btn href=\"/account/login\">Войти</a></div>", 400)
+        binding = sessions.login_binding(request, cfg.base_url)
+        expected = str(flow.get("binding_hash") or "")
+        if expected and (not binding or not hmac.compare_digest(
+                hashlib.sha256(binding.encode()).hexdigest(), expected)):
+            response = page("Вход отклонён", "<div class=card><h1>Ссылка входа открыта в другом браузере</h1>"
+                                             "<p class=muted>Начните вход заново из кабинета.</p>"
+                                             "<a class=btn href=\"/account/login\">Войти</a></div>", 400)
+            sessions.clear_login_cookie(response, cfg.base_url)
+            return response
         code = request.query_params.get("code", "")
         if not code:
             return page("Вход отклонён", "<div class=card><h1>Нет кода авторизации</h1></div>", 400)
@@ -624,6 +696,11 @@ def create_app(config: Optional[AccountConfig] = None,
         if claims is None:
             return page("Ошибка входа", "<div class=card><h1>Токен отклонён</h1>"
                         "<p class=muted>%s</p></div>" % html.escape(problem), 400)
+        if not owner_allowed(claims):
+            response = page("Доступ закрыт", "<div class=card><h1>Этот аккаунт не в списке владельцев</h1>"
+                                             "<p class=muted>Обратитесь к оператору шлюза.</p></div>", 403)
+            sessions.clear_login_cookie(response, cfg.base_url)
+            return response
         account = store.upsert_account(claims)
         session = store.create_session(account["id"])
         target = flow.get("next_path") or "/account"
@@ -633,6 +710,7 @@ def create_app(config: Optional[AccountConfig] = None,
             target = "/account?welcome=1"
         response = RedirectResponse(target, status_code=303)
         sessions.set_cookie(response, session["id"], cfg.session_secret, cfg.base_url)
+        sessions.clear_login_cookie(response, cfg.base_url)
         return _headers(response)
 
     async def logout(request: Request) -> Response:

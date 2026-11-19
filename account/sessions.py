@@ -42,6 +42,26 @@ def cookie_name(base_url: str) -> str:
     return "__Host-rhm_session" if base_url.startswith("https://") else "rhm_session"
 
 
+def login_cookie_name(base_url: str) -> str:
+    """Short-lived cookie that ties an OAuth flow to the browser that started it."""
+    return "__Host-rhm-login" if base_url.startswith("https://") else "rhm_login"
+
+
+def set_login_cookie(response: Response, value: str, base_url: str, max_age: int = 600) -> None:
+    response.set_cookie(
+        login_cookie_name(base_url), value, max_age=max_age, httponly=True,
+        secure=base_url.startswith("https://"), samesite="lax", path="/",
+    )
+
+
+def login_binding(request: Request, base_url: str) -> str:
+    return request.cookies.get(login_cookie_name(base_url), "")
+
+
+def clear_login_cookie(response: Response, base_url: str) -> None:
+    response.delete_cookie(login_cookie_name(base_url), path="/")
+
+
 def session_id(request: Request, secret: str, base_url: str) -> str:
     raw = request.cookies.get(cookie_name(base_url), "")
     return decode(raw, secret) if raw else ""

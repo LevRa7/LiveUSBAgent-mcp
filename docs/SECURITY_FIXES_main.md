@@ -9,7 +9,7 @@
 эксплуатировать и чем это подтверждено**. Для находок, которые к основному проекту не применимы
 (другая архитектура) или закрыты ранее, это сказано явно.
 
-**Проверка:** `python -m pytest tests -q` → **1520 passed, 8 skipped** (2026-11-19).
+**Проверка:** `python -m pytest tests -q` → **1532 passed, 8 skipped** (2026-11-19: 1520 после первого пакета, 1532 после второго).
 Новый файл регрессий: `tests/test_security_audit_2026_11_19.py` (23 теста).
 
 ---
@@ -152,11 +152,29 @@
 
 ---
 
-## 6. Приёмка
+## 6. Второй пакет (продолжение, 2026-11-19)
+
+| Что | Как эксплуатировалось | Исправление | Тест |
+| :--- | :--- | :--- | :--- |
+| State-changing с query-токеном | зная `?token=<device-token>` из логов/истории, атакующий вызывал `POST /v1/devices/<node>/rotate` или `/revoke` и менял/отзывал учётные данные узла | `header_credential()`: `rotate`, `rotate-token`, `rotate-token/finish`, `revoke` принимают только `Authorization`/`X-Mesh-Token` | `test_state_changing_endpoints_require_a_header_credential` |
+| Токен в query у `/api/register` | `POST /api/register?token=<device-token>` проходил проверку владения и возвращал `link_key` | query-токен игнорируется, принимается только header/тело | `test_registration_ignores_a_query_token` |
+| Legacy-поддомен и `Host` | `Host: victim.<домен>` без `?user=` выбирал узел жертвы в `get_target_user` | `MESH_LEGACY_SUBDOMAIN` по умолчанию `0`; включается только явно | `test_legacy_subdomain_is_off_by_default`, `test_legacy_subdomain_resolves_when_explicitly_enabled` |
+| DELETE чужой сессии | зная/подобрав `mcp-session-id`, клиент закрывал SSE-поток другого узла | DELETE проверяет владельца в `active_sessions` и очередь в `active_sse_subscribers[user]`, иначе `404` | `test_delete_of_a_foreign_session_is_refused` |
+| Админ-секрет: один короткий токен | утечка одного значения = ротация/отзыв всех устройств | список токенов через запятую, каждый ≥32 символов; опция `MESH_ADMIN_REQUIRE_LOCALHOST=1`; лог с IP | `test_admin_accepts_a_token_list_and_ignores_short_entries`, `test_short_admin_token_disables_the_admin_api` |
+| Flood по catch-all шар | анонимный поток запросов с любым слагом занимал event loop чтением реестра и relay | бакет `MESH_SHARE_RATE_LIMIT` (600/мин/IP) → `429 Retry-After` | `test_share_route_is_rate_limited` |
+| Обход hooks | `rm  -rf  /`, `cat rhm_""tasks.json`, `curl … \| sh` не совпадали с узкими шаблонами | нормализация кавычек/бэкслешей/пробелов до сравнения; добавлены `rm -rf /`, `shutdown/reboot`, `Remove-Item -Recurse`, `curl\|sh`, `chmod` по системным путям, `mv` каталога агента | `test_hooks_normalise_quotes_before_matching` |
+| Установщик без проверки целостности | подмена ответа хоста установщика давала RCE на машине пользователя | `RHM_INSTALLER_SHA256` — CLI сверяет SHA-256 скачанного установщика и отказывается запускать при расхождении | `test_cli_supports_installer_hash_pinning` |
+| OAuth-кабинет: фиксация входа | ссылка с чужим `state` в другом браузере привязывала чужую личность к сессии; любой Google-аккаунт мог войти; вход не был ограничен по частоте | binding-cookie `__Host-rhm-login` + `binding_hash` в `auth_flows`; проверка `Origin` в CSRF; лимит 20/мин на start и callback; allowlist `MESH_OWNER_EMAILS`/`MESH_OWNER_DOMAINS` | `test_login_flow_is_bound_to_the_browser_that_started_it`, `test_cabinet_posts_reject_a_foreign_origin`, `test_login_start_is_rate_limited`, `test_owner_allowlist_blocks_other_google_accounts` |
+
+Проверка после второго пакета: `python -m pytest tests -q` → **1532 passed, 8 skipped**.
+
+---
+
+## 7. Приёмка
 
 ```bash
 python -m pytest tests -q
-# 1520 passed, 8 skipped
+# 1532 passed, 8 skipped
 ```
 
 Ручные проверки после выката:

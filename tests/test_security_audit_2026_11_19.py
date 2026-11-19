@@ -328,3 +328,74 @@ def test_cli_does_not_shell_interpolate_arguments():
     assert "scriptblock" not in code
     assert "rawArgs" not in code
     assert "downloadInstaller" in code
+
+
+# ---------------------------------------------------------------------------
+# Second batch: state-changing credentials, sessions, admin list, hooks
+# ---------------------------------------------------------------------------
+
+def test_state_changing_endpoints_require_a_header_credential(tmp_path, monkeypatch):
+    _registry(tmp_path, monkeypatch, entries={NODE: {
+        "token_sha256": gateway.hash_secret(TOKEN),
+        "link_key_sha256": gateway.hash_secret("lk_" + "d" * 32),
+    }})
+    in_query = asyncio.run(gateway.device_rotate(_request(
+        method="POST", query="token=%s" % TOKEN, path_params={"user": NODE})))
+    assert in_query.status_code == 403
+
+    in_header = asyncio.run(gateway.device_rotate(_request(
+        method="POST", path_params={"user": NODE},
+        headers={"Authorization": "Bearer %s" % TOKEN})))
+    assert in_header.status_code == 200
+
+
+def test_registration_ignores_a_query_token(tmp_path, monkeypatch):
+    _registry(tmp_path, monkeypatch, entries={NODE: {
+        "token_sha256": gateway.hash_secret(TOKEN),
+        "link_key_sha256": gateway.hash_secret("lk_" + "e" * 32),
+    }})
+    body = json.dumps({"username": NODE}).encode()
+    response = asyncio.run(gateway.api_register(_request(
+        method="POST", query="token=%s" % TOKEN, body=body)))
+    assert response.status_code == 409, "a URL token must not prove ownership"
+
+
+def test_delete_of_a_foreign_session_is_refused(tmp_path, monkeypatch):
+    _registry(tmp_path, monkeypatch)
+    monkeypatch.setattr(gateway, "active_sessions", {"session-x": "other-node"})
+    response = asyncio.run(gateway.mcp_unified_endpoint(_request(
+        method="DELETE", path="/mcp", query="user=%s&token=%s" % (NODE, TOKEN),
+        headers={"mcp-session-id": "session-x"})))
+    assert response.status_code == 404
+
+
+def test_admin_accepts_a_token_list_and_ignores_short_entries(monkeypatch):
+    long_token = "b" * 40
+    monkeypatch.setattr(gateway, "ADMIN_TOKEN", "short," + long_token)
+    assert gateway.admin_authorised(_request(headers={"X-Admin-Token": long_token})) is True
+    assert gateway.admin_authorised(_request(headers={"X-Admin-Token": "short"})) is False
+
+
+def test_share_route_is_rate_limited(monkeypatch):
+    monkeypatch.setattr(gateway, "_rate_windows", {})
+    monkeypatch.setenv("MESH_SHARE_RATE_LIMIT", "10")
+    codes = [asyncio.run(gateway.public_share_endpoint(_share_request("ghost"))).status_code
+             for _ in range(11)]
+    assert codes[:10] == [404] * 10
+    assert codes[10] == 429
+
+
+def test_hooks_normalise_quotes_before_matching():
+    from core import hooks
+
+    assert "rm -rf /" in hooks._normalise("rm  -rf  /")
+    assert "rhm_tasks.json" in hooks._normalise('cat rhm_""tasks.json')
+    assert any(pattern.search(hooks._normalise("rm -rf /"))
+               for pattern in hooks.DANGEROUS_PATTERNS)
+
+
+def test_cli_supports_installer_hash_pinning():
+    source = open(os.path.join(os.path.dirname(gateway.__file__), "bin", "cli.js"),
+                  encoding="utf-8").read()
+    assert "RHM_INSTALLER_SHA256" in source
+    assert "createHash" in source

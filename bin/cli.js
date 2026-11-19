@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 const { spawn } = require('child_process');
+const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
@@ -94,6 +95,29 @@ function runLocalScript(name, rest) {
 
 const INSTALLER_BASE = 'https://racknerd-5a24bf9.merino-carob.ts.net';
 
+function verifyInstallerHash(target, done) {
+  // Optional pinning: RHM_INSTALLER_SHA256=<hex> makes the CLI refuse anything
+  // the release did not publish. Without it the download is still TLS-only, so
+  // a compromised host could serve arbitrary code - set the variable in CI.
+  const expected = (process.env.RHM_INSTALLER_SHA256 || '').trim().toLowerCase();
+  if (!expected) {
+    done(null);
+    return;
+  }
+  const digest = crypto.createHash('sha256');
+  fs.createReadStream(target)
+    .on('data', (chunk) => digest.update(chunk))
+    .on('error', done)
+    .on('end', () => {
+      const actual = digest.digest('hex');
+      if (actual !== expected) {
+        done(new Error(`installer sha256 mismatch: expected ${expected}, got ${actual}`));
+        return;
+      }
+      done(null);
+    });
+}
+
 function downloadInstaller(name, target, done) {
   // The installer is fetched to a file and executed from it with an argument
   // array. It used to be interpolated into `curl … | bash -s -- ${rawArgs}` and
@@ -119,7 +143,7 @@ function downloadInstaller(name, target, done) {
       }
       const out = fs.createWriteStream(target, { mode: 0o600 });
       response.pipe(out);
-      out.on('finish', () => out.close(() => done(null)));
+      out.on('finish', () => out.close(() => verifyInstallerHash(target, done)));
       out.on('error', done);
     }).on('error', done);
   };

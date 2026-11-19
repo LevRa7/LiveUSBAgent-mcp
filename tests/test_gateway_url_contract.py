@@ -54,11 +54,14 @@ def test_query_param_wins_over_a_legacy_subdomain():
     assert gateway.get_target_user(req) == "node-one"
 
 
-def test_legacy_subdomain_still_resolves_when_no_user_param():
-    # The host is built from THIS process's resolved domain, not from the
-    # repository default: a node machine with its own domain.env (the normal
-    # case) resolves a different public host, and a hardcoded one made this test
-    # depend on the machine it ran on.
+def test_legacy_subdomain_is_off_by_default():
+    """The Host header is caller-controlled; a subdomain must not pick a node."""
+    req = _request("", host="legacy-node." + gateway.PUBLIC_HOST)
+    assert gateway.get_target_user(req) == "anonymous"
+
+
+def test_legacy_subdomain_resolves_when_explicitly_enabled(monkeypatch):
+    monkeypatch.setattr(gateway, "LEGACY_SUBDOMAIN_ACCESS", True)
     req = _request("", host="legacy-node." + gateway.PUBLIC_HOST)
     assert gateway.get_target_user(req) == "legacy-node"
 

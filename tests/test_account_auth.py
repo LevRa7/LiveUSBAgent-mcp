@@ -101,3 +101,75 @@ def test_sanitize_next_blocks_external_targets():
     assert auth.sanitize_next("//evil") == "/account"
     assert auth.sanitize_next("https://evil") == "/account"
     assert auth.sanitize_next("/account/devices") == "/account/devices"
+
+
+# ---------------------------------------------------------------------------
+# Hardening: browser binding, Origin, rate limit, owner allowlist
+# ---------------------------------------------------------------------------
+
+def _login_claims(cfg, email="user@example.com"):
+    return {
+        "iss": auth.ISSUER, "sub": "google-sub-1", "aud": cfg.client_id,
+        "email": email, "email_verified": True, "name": "Test User",
+    }
+
+
+def test_login_flow_is_bound_to_the_browser_that_started_it(tmp_path, monkeypatch):
+    cfg = make_config(tmp_path)
+    app = create_app(cfg)
+    starter = TestClient(app)
+    start = starter.get("/auth/google/start", follow_redirects=False)
+    state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+    assert starter.cookies.get("rhm_login"), "the start must set the binding cookie"
+
+    monkeypatch.setattr(account_app_module.auth, "exchange_code", lambda *a, **k: {"id_token": "fake"})
+    monkeypatch.setattr(account_app_module.auth, "verify_id_token",
+                        lambda *a, **k: (_login_claims(cfg), ""))
+
+    # A different browser (no binding cookie) replays the same state.
+    other = TestClient(create_app(cfg))
+    replay = other.get("/auth/google/callback?state=%s&code=abc" % state, follow_redirects=False)
+    assert replay.status_code == 400
+    assert "/account/login" in replay.text
+
+
+def test_cabinet_posts_reject_a_foreign_origin(tmp_path, monkeypatch):
+    cfg = make_config(tmp_path)
+    app = create_app(cfg)
+    client = TestClient(app)
+    start = client.get("/auth/google/start", follow_redirects=False)
+    state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+    monkeypatch.setattr(account_app_module.auth, "exchange_code", lambda *a, **k: {"id_token": "fake"})
+    monkeypatch.setattr(account_app_module.auth, "verify_id_token",
+                        lambda *a, **k: (_login_claims(cfg), ""))
+    assert client.get("/auth/google/callback?state=%s&code=abc" % state,
+                      follow_redirects=False).status_code == 303
+
+    cookie = client.cookies.get("rhm_session")
+    sid = sessions.decode(cookie, cfg.session_secret)
+    csrf = app.state.account_store.session(sid)["csrf"]
+    evil = client.post("/logout", data={"csrf": csrf},
+                       headers={"Origin": "https://evil.example"}, follow_redirects=False)
+    assert evil.status_code == 403
+
+
+def test_login_start_is_rate_limited(tmp_path):
+    client = TestClient(create_app(make_config(tmp_path)))
+    codes = [client.get("/auth/google/start", follow_redirects=False).status_code
+             for _ in range(21)]
+    assert codes[:20] == [302] * 20
+    assert codes[20] == 429
+
+
+def test_owner_allowlist_blocks_other_google_accounts(tmp_path, monkeypatch):
+    monkeypatch.setenv("MESH_OWNER_EMAILS", "boss@example.com")
+    cfg = make_config(tmp_path)
+    client = TestClient(create_app(cfg))
+    start = client.get("/auth/google/start", follow_redirects=False)
+    state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+    monkeypatch.setattr(account_app_module.auth, "exchange_code", lambda *a, **k: {"id_token": "fake"})
+    monkeypatch.setattr(account_app_module.auth, "verify_id_token",
+                        lambda *a, **k: (_login_claims(cfg, "stranger@example.com"), ""))
+    response = client.get("/auth/google/callback?state=%s&code=abc" % state,
+                          follow_redirects=False)
+    assert response.status_code == 403

@@ -399,3 +399,29 @@ def test_cli_supports_installer_hash_pinning():
                   encoding="utf-8").read()
     assert "RHM_INSTALLER_SHA256" in source
     assert "createHash" in source
+
+
+# ---------------------------------------------------------------------------
+# Third batch: admin second factor, cabinet-gated registration
+# ---------------------------------------------------------------------------
+
+def test_admin_totp_is_required_when_configured(monkeypatch):
+    secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"   # RFC 6238 test key, base32
+    monkeypatch.setattr(gateway, "ADMIN_TOKEN", "a" * 40)
+    monkeypatch.setenv("MESH_ADMIN_TOTP_SECRET", secret)
+    code = gateway._totp_code(secret, int(gateway.time.time()) // 30)
+
+    assert gateway.admin_authorised(_request(headers={
+        "X-Admin-Token": "a" * 40, "X-Admin-Totp": code})) is True
+    assert gateway.admin_authorised(_request(headers={
+        "X-Admin-Token": "a" * 40, "X-Admin-Totp": "000000"})) is False
+    assert gateway.admin_authorised(_request(headers={
+        "X-Admin-Token": "a" * 40})) is False
+
+
+def test_account_cabinet_can_close_self_registration(monkeypatch):
+    monkeypatch.setattr(gateway, "REGISTER_MODE", "open")
+    monkeypatch.setenv("MESH_ACCOUNT", "1")
+    monkeypatch.setenv("MESH_CLOSE_REGISTER_WITH_ACCOUNT", "1")
+    refusal = gateway.enrolment_refusal(_request(method="POST"))
+    assert "cabinet" in refusal.lower()

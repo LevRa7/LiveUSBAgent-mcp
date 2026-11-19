@@ -12,6 +12,7 @@ import re
 import secrets
 import shutil
 import socket
+import struct
 import tempfile
 import threading
 import time
@@ -967,6 +968,12 @@ def enrolment_refusal(request: Request) -> str:
             "Self-registration is disabled on this gateway (MESH_REGISTER_MODE=pair). "
             "Start a pairing with POST /v1/devices/pair and approve the code."
         )
+    if os.environ.get("MESH_CLOSE_REGISTER_WITH_ACCOUNT", "").strip().lower() in ("1", "true", "yes", "on") \
+            and os.environ.get("MESH_ACCOUNT", "").strip().lower() in ("1", "true", "yes", "on"):
+        # A cabinet with Google sign-in implies "the owner decides who joins";
+        # leaving /api/register open would let anyone enrol a node beside it.
+        return ("Self-registration is disabled while the account cabinet is enabled. "
+                "Use pairing or an enrollment secret.")
     if ENROLL_SECRET:
         supplied = request.headers.get("x-enroll-secret", "")
         if not tokens_equal(supplied, ENROLL_SECRET):
@@ -1208,6 +1215,27 @@ def _admin_tokens() -> list[str]:
     return valid
 
 
+def _admin_totp_secret() -> str:
+    return os.environ.get("MESH_ADMIN_TOTP_SECRET", "").strip().upper()
+
+
+def _totp_code(secret: str, counter: int, digits: int = 6) -> str:
+    key = base64.b32decode(secret + "=" * (-len(secret) % 8), casefold=True)
+    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    value = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
+    return str(value % (10 ** digits)).zfill(digits)
+
+
+def _totp_valid(secret: str, supplied: str) -> bool:
+    supplied = str(supplied or "").strip()
+    if not supplied.isdigit() or len(supplied) != 6:
+        return False
+    counter = int(time.time()) // 30
+    return any(tokens_equal(supplied, _totp_code(secret, counter + drift))
+               for drift in (-1, 0, 1))
+
+
 def admin_authorised(request: Request) -> bool:
     supplied = (request.headers.get("x-admin-token") or "").strip()
     tokens = _admin_tokens()
@@ -1219,6 +1247,10 @@ def admin_authorised(request: Request) -> bool:
             logger.warning("Admin API refused from a non-loopback peer")
             return False
     if not any(tokens_equal(supplied, candidate) for candidate in tokens):
+        return False
+    totp_secret = _admin_totp_secret()
+    if totp_secret and not _totp_valid(totp_secret, request.headers.get("x-admin-totp", "")):
+        logger.warning("Admin API refused: missing or invalid TOTP code")
         return False
     logger.warning("Admin API used: %s %s from %s", request.method, request.url.path, client_ip(request))
     return True

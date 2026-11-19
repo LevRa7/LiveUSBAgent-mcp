@@ -143,7 +143,7 @@ def test_a_model_still_waits_to_escalate(monkeypatch):
 def test_read_only_tools_never_queue():
     _approval_mode()
     assert "error" not in mcp_tools.call_tool("list_dir", {})
-    assert "error" not in mcp_tools.call_tool("goal", {"action": "get"})
+    assert "error" not in mcp_tools.call_tool("mesh_status", {})
     assert not control.pending_approvals()
 
 

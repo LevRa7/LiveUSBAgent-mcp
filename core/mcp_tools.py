@@ -932,10 +932,15 @@ def _tool_mesh_status(args: Dict[str, Any]) -> Dict[str, Any]:
         payload["update"] = {"error": str(exc)}
     try:
         # The objective a previous chat left behind, so a fresh session resumes
-        # it instead of asking what was being done.
-        goal_state = goal.get()
-        payload["goal"] = goal_state.get("goal")
-        payload["goal_active"] = bool(goal_state.get("active"))
+        # it instead of asking what was being done. Off by default: a node-wide
+        # note would leak one chat's objective into another.
+        if goal.enabled():
+            goal_state = goal.get()
+            payload["goal"] = goal_state.get("goal")
+            payload["goal_active"] = bool(goal_state.get("active"))
+        else:
+            payload["goal"] = None
+            payload["goal_active"] = False
     except Exception:                          # the note must never break status
         payload["goal"] = None
     try:
@@ -1014,6 +1019,9 @@ def _tool_goal(args: Dict[str, Any]) -> Dict[str, Any]:
     no project file and runs nothing, which is why it is allowed in read-only
     mode.
     """
+    if not goal.enabled():
+        return {"error": "goal is disabled on this node: one objective would be "
+                         "shared by every chat. Set MESH_GOAL=1 to opt in."}
     action = str(args.get("action") or "get").strip().lower()
     actor = str(args.get("_origin") or "mcp").strip().lower()
     note = str(args.get("note") or "")
@@ -3824,6 +3832,13 @@ TOOLS: List[Dict[str, Any]] = [
         ),
     },
 ]
+
+
+if not goal.enabled():
+    # A node-wide objective bleeds across chats: hide the tool from tools/list
+    # unless the operator opted in. The handler stays for `rhm goal clear`.
+    TOOLS[:] = [tool for tool in TOOLS if tool.get("name") != "goal"]
+    TOOL_ANNOTATIONS.pop("goal", None)
 
 
 # Attach the confirmation policy to the advertised specs. Kept out of the literal

@@ -843,13 +843,53 @@ class CabinetNodeControl:
     def online(self, node: str) -> bool:
         return bool(node) and node in active_tunnels
 
-    def claim(self, node: str, credential: str) -> dict:
+    def devices(self) -> dict[str, dict]:
+        """Registry inventory for the cabinet: metadata only, never a credential.
+
+        The account package cannot read ``registry.json`` itself without
+        importing this module (circular), so the bridge hands it a snapshot.
+        ``token_sha256``, ``link_key`` and friends are deliberately left out:
+        the cabinet renders names and states, and a template must not be able to
+        print a key even if it wanted to.
+        """
+        snapshot: dict[str, dict] = {}
+        try:
+            registry = load_registry()
+        except Exception:                        # a corrupt registry is an empty one
+            return snapshot
+        if not isinstance(registry, dict):
+            return snapshot
+        for node, entry in registry.items():
+            if not isinstance(entry, dict):
+                continue
+            name = str(node or "").strip().lower()
+            if not name:
+                continue
+            snapshot[name] = {
+                # Registrations that predate hostnames fall back to the node
+                # name, which is what the installer derived from the machine.
+                "hostname": str(entry.get("hostname") or name),
+                "os": str(entry.get("os") or ""),
+                "arch": str(entry.get("arch") or ""),
+                "owner_subject": str(entry.get("owner_subject") or ""),
+                "account_id": str(entry.get("account_id") or ""),
+                "last_seen": str(entry.get("last_seen") or ""),
+                "online": self.online(name),
+            }
+        return snapshot
+
+    def claim(self, node: str, credential: str, owner_subject: str = "",
+              account_id: str = "") -> dict:
         """Verify that *credential* proves ownership of *node*.
 
         Accepts the node's device token or its link key: the link key is what the
         installer prints for the MCP URL, and proving it means the caller can
         already drive that node's tools. Without either, the cabinet never links
         a device - an account name is not an identity, exactly like a MAC.
+
+        On success the caller's identity is recorded in the registry, which is
+        the source of truth for ownership: the next visit of the same account
+        lists the node without another manual claim.
         """
         node = str(node or "").strip().lower()
         credential = str(credential or "").strip()
@@ -863,6 +903,26 @@ class CabinetNodeControl:
             return {"ok": False, "error": "unknown_node"}
         if not (token_matches_device(entry, credential) or token_matches_link(entry, credential)):
             return {"ok": False, "error": "bad_credential"}
+        subject = str(owner_subject or "").strip()[:200]
+        owner_id = str(account_id or "").strip()[:200]
+        current_subject = str(entry.get("owner_subject") or "")
+        current_owner = str(entry.get("account_id") or "")
+        # A proven key must not move an already-owned node to another account:
+        # the account.db row belongs to the first tenant, and a silent rewrite
+        # here would leave registry and cabinet disagreeing about the owner.
+        if (current_subject and subject and current_subject != subject) or \
+                (current_owner and owner_id and current_owner != owner_id):
+            return {"ok": False, "error": "already_linked"}
+        changed = False
+        if subject and entry.get("owner_subject") != subject:
+            entry["owner_subject"] = subject
+            changed = True
+        if owner_id and entry.get("account_id") != owner_id:
+            entry["account_id"] = owner_id
+            changed = True
+        if changed:
+            registry[node] = entry
+            save_registry(registry)
         return {"ok": True, "node": node}
 
     async def call(self, node: str, payload: dict) -> dict:

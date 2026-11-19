@@ -34,7 +34,10 @@ class FakeBridge:
             "modes": ["read_only", "approval", "full"],
         }
         self.calls = []
+        self.claim_calls = []
         self.claim_answer = {"ok": True, "node": "desk"}
+        #: What the bridge's registry snapshot reports; a test fills it in.
+        self.registry = {}
 
     def available(self):
         return True
@@ -42,7 +45,16 @@ class FakeBridge:
     def online(self, node):
         return True
 
-    def claim(self, node, credential):
+    def devices(self):
+        return {name: dict(entry) for name, entry in self.registry.items()}
+
+    def claim(self, node, credential, owner_subject="", account_id=""):
+        self.claim_calls.append({
+            "node": node,
+            "credential": credential,
+            "owner_subject": owner_subject,
+            "account_id": account_id,
+        })
         return dict(self.claim_answer)
 
     async def call(self, node, payload):
@@ -288,3 +300,91 @@ def test_a_device_cannot_be_claimed_by_a_second_tenant(cabinet, tmp_path):
     second = store.claim_device("tenant-other", "desk")
     assert second is None
     assert store.device(first["id"], "tenant-other") is None
+
+
+# ---------------------------------------------------------------------------
+# P1-A: ownership recorded in the registry and the merged device list
+# ---------------------------------------------------------------------------
+
+OWN_SUBJECT = "google:google-sub-1"
+
+
+def registry_device(**overrides):
+    entry = {
+        "hostname": "desk-pc",
+        "os": "Linux",
+        "arch": "x86_64",
+        "owner_subject": OWN_SUBJECT,
+        "account_id": "",
+        "last_seen": "2026-11-19T07:00:00+00:00",
+        "online": True,
+    }
+    entry.update(overrides)
+    return entry
+
+
+def test_claim_tells_the_bridge_who_owns_the_node(cabinet):
+    client, app, bridge, session = cabinet
+    claim_device(client, session)
+
+    assert bridge.claim_calls
+    call = bridge.claim_calls[-1]
+    assert call["node"] == "desk"
+    assert call["credential"] == "lk_secret"
+    assert call["owner_subject"] == OWN_SUBJECT
+    assert call["account_id"] == session["id"]
+
+
+def test_a_registry_device_with_the_same_owner_is_listed_without_a_manual_claim(cabinet):
+    client, app, bridge, session = cabinet
+    bridge.registry["desk"] = registry_device(
+        link_key="lk_must_not_render", token_sha256="deadbeef")
+
+    page = client.get("/")
+    assert page.status_code == 200
+    # A node the owner already proved (installed/pair-approved) shows up on its
+    # own: no link key needs to be pasted again.
+    assert "desk" in page.text
+    assert "desk-pc" in page.text
+    assert "Linux" in page.text
+    assert "adopted" in page.text
+    assert "lk_must_not_render" not in page.text
+    assert "deadbeef" not in page.text
+
+    devices = app.state.account_store.list_devices(session["tenant_id"])
+    assert [item["node_name"] for item in devices] == ["desk"]
+    assert devices[0]["display_name"] == "desk-pc"
+    assert devices[0]["claimed_at"]
+
+
+def test_a_registry_device_is_adopted_once_not_on_every_visit(cabinet):
+    client, app, bridge, session = cabinet
+    bridge.registry["desk"] = registry_device()
+
+    client.get("/")
+    client.get("/")
+    devices = app.state.account_store.list_devices(session["tenant_id"])
+    assert [item["node_name"] for item in devices] == ["desk"]
+
+
+def test_another_owners_registry_device_is_not_listed(cabinet):
+    client, app, bridge, session = cabinet
+    bridge.registry["stranger"] = registry_device(
+        hostname="stranger-pc", owner_subject="google:someone-else",
+        account_id="account-other")
+
+    page = client.get("/")
+    assert "stranger" not in page.text
+    assert app.state.account_store.list_devices(session["tenant_id"]) == []
+
+
+def test_a_database_row_without_a_registry_entry_is_marked_missing(cabinet):
+    client, app, bridge, session = cabinet
+    claim_device(client, session)                 # registry snapshot stays empty
+    assert bridge.registry == {}
+
+    page = client.get("/")
+    assert page.status_code == 200
+    assert "desk" in page.text
+    assert "нет связи с реестром" in page.text
+

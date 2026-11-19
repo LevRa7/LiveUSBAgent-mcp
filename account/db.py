@@ -179,7 +179,7 @@ class Store:
         key = hashlib.sha256(sid.encode()).hexdigest()
         with self._connect() as conn:
             row = conn.execute(
-                """SELECT s.*, a.id AS id, a.email, a.name,
+                """SELECT s.*, a.id AS id, a.email, a.name, a.google_sub,
                           (SELECT id FROM tenants WHERE owner_account_id=a.id LIMIT 1) AS tenant_id
                    FROM account_sessions s
                    JOIN accounts a ON a.id = s.account_id

@@ -9,6 +9,7 @@ caller proves possession of its token or link key.
 
 import asyncio
 import json
+from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
@@ -297,3 +298,100 @@ def test_claim_does_not_reveal_a_different_error_for_a_wrong_token(relay):
     bridge = gateway.CabinetNodeControl()
     assert bridge.claim("not-registered", TOKEN)["error"] == "unknown_node"
     assert bridge.claim(NODE, "nope")["error"] == "bad_credential"
+
+
+# ---------------------------------------------------------------------------
+# P1-A: the registry snapshot and ownership recorded on claim
+# ---------------------------------------------------------------------------
+
+def _write_registry(data):
+    Path(gateway.REGISTRY_PATH).write_text(json.dumps(data), encoding="utf-8")
+
+
+def _read_registry():
+    return json.loads(Path(gateway.REGISTRY_PATH).read_text(encoding="utf-8"))
+
+
+def test_the_devices_snapshot_carries_metadata_but_no_keys(relay):
+    _write_registry({NODE: {
+        "token_sha256": gateway.hash_secret(TOKEN),
+        "link_key": LINK,
+        "hostname": "node-one-pc",
+        "os": "Windows",
+        "arch": "AMD64",
+        "owner_subject": "google:abc",
+        "account_id": "acc-1",
+        "last_seen": "2026-11-19T07:00:00+00:00",
+    }})
+
+    snapshot = gateway.CabinetNodeControl().devices()
+    entry = snapshot[NODE]
+    assert entry["hostname"] == "node-one-pc"
+    assert entry["os"] == "Windows"
+    assert entry["arch"] == "AMD64"
+    assert entry["owner_subject"] == "google:abc"
+    assert entry["account_id"] == "acc-1"
+    assert entry["last_seen"] == "2026-11-19T07:00:00+00:00"
+    for secret in ("token", "token_sha256", "link_key", "link_key_sha256",
+                   "link_key_prev_sha256"):
+        assert secret not in entry, "the cabinet snapshot must never carry %r" % secret
+
+
+def test_the_devices_snapshot_reflects_the_tunnel_state(relay, monkeypatch):
+    bridge = gateway.CabinetNodeControl()
+    assert bridge.devices()[NODE]["online"] is False
+    monkeypatch.setattr(gateway, "active_tunnels",
+                        {NODE: {"ws": object(), "pending": {}}})
+    assert bridge.devices()[NODE]["online"] is True
+
+
+def test_the_snapshot_falls_back_to_the_node_name_for_a_hostname(relay):
+    _write_registry({NODE: {"token_sha256": gateway.hash_secret(TOKEN)}})
+    assert gateway.CabinetNodeControl().devices()[NODE]["hostname"] == NODE
+
+
+def test_claim_records_the_owner_in_the_registry(relay):
+    bridge = gateway.CabinetNodeControl()
+    result = bridge.claim(NODE, TOKEN, owner_subject="google:abc", account_id="acc-1")
+
+    assert result == {"ok": True, "node": NODE}
+    saved = _read_registry()
+    assert saved[NODE]["owner_subject"] == "google:abc"
+    assert saved[NODE]["account_id"] == "acc-1"
+    # Recording the owner must not disturb the credentials it just verified.
+    assert saved[NODE]["token_sha256"] == gateway.hash_secret(TOKEN)
+    assert saved[NODE]["link_key"] == LINK
+
+
+def test_a_rejected_credential_writes_no_owner(relay):
+    bridge = gateway.CabinetNodeControl()
+    assert bridge.claim(NODE, "nope", owner_subject="google:abc",
+                        account_id="acc-1")["ok"] is False
+    saved = _read_registry()
+    assert "owner_subject" not in saved[NODE]
+    assert "account_id" not in saved[NODE]
+
+
+def test_claim_without_an_owner_leaves_the_registry_alone(relay):
+    bridge = gateway.CabinetNodeControl()
+    assert bridge.claim(NODE, LINK)["ok"] is True
+    saved = _read_registry()
+    assert "owner_subject" not in saved[NODE]
+    assert "account_id" not in saved[NODE]
+
+
+def test_claim_cannot_move_an_owned_node_to_another_account(relay):
+    """A valid key proves access, not the right to steal another tenant's node."""
+    _write_registry({NODE: {
+        "token_sha256": gateway.hash_secret(TOKEN),
+        "owner_subject": "google:first",
+        "account_id": "acc-1",
+    }})
+    result = gateway.CabinetNodeControl().claim(
+        NODE, TOKEN, owner_subject="google:second", account_id="acc-2")
+
+    assert result == {"ok": False, "error": "already_linked"}
+    saved = _read_registry()
+    assert saved[NODE]["owner_subject"] == "google:first"
+    assert saved[NODE]["account_id"] == "acc-1"
+

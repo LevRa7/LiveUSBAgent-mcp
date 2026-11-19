@@ -157,16 +157,96 @@ def create_app(config: Optional[AccountConfig] = None,
     def gateway_ready() -> bool:
         return node_control is not None and bool(getattr(node_control, "available", lambda: False)())
 
-    def nodes_for(account: Dict[str, Any]) -> List[Dict[str, Any]]:
-        if store is None:
-            return []
-        return store.list_devices(account["tenant_id"])
-
     def online(node: str) -> bool:
         try:
             return bool(node_control.online(node))
         except Exception:
             return False
+
+    def owner_subject(account: Dict[str, Any]) -> str:
+        """The registry-side owner id: the Google subject, namespaced.
+
+        ``registry.json`` stores a provider-prefixed subject (``google:<sub>``)
+        rather than a bare sub, so a second identity provider can be added
+        without rewriting existing ownership.
+        """
+        sub = str(account.get("google_sub") or "").strip()
+        return ("google:" + sub) if sub else str(account.get("owner_subject") or "")
+
+    def registry_devices() -> Dict[str, Dict[str, Any]]:
+        """The bridge's registry snapshot; an absent or old bridge means none."""
+        if node_control is None:
+            return {}
+        reader = getattr(node_control, "devices", None)
+        if not callable(reader):
+            return {}
+        try:
+            snapshot = reader()
+        except Exception:                         # a broken registry is not a 500
+            return {}
+        if not isinstance(snapshot, dict):
+            return {}
+        return {str(name): dict(entry) for name, entry in snapshot.items()
+                if isinstance(entry, dict)}
+
+    def merged_device(row: Dict[str, Any], entry: Dict[str, Any], node: str,
+                      source: str) -> Dict[str, Any]:
+        """One list row: the account.db record plus the registry's metadata.
+
+        The account database knows the tenant, the display name and the claim
+        date; the registry knows the hostname, the OS and the tunnel state. A row
+        without a registry entry is kept and flagged (``missing``) instead of
+        disappearing, so a wiped registry does not silently hide a device.
+        """
+        item = dict(row)
+        item["hostname"] = str(entry.get("hostname") or "")
+        item["os"] = str(entry.get("os") or "")
+        item["arch"] = str(entry.get("arch") or "")
+        item["last_seen"] = str(entry.get("last_seen") or "")
+        item["online"] = bool(entry.get("online")) if entry else online(node)
+        item["source"] = source
+        item["missing"] = not entry
+        return item
+
+    def nodes_for(account: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """The one device list: account.db rows plus the registry's owned nodes.
+
+        ``registry.json`` is the truth about ownership and credentials,
+        ``account.db`` about the tenant and the display name. Merging by
+        ``node_name`` makes a node that already carries ``owner_subject`` appear
+        in its owner's cabinet without a manual link-key dance; the first visit
+        creates the account.db row lazily (``adopted``), because every later
+        page and control route addresses devices by their database id.
+        """
+        if store is None:
+            return []
+        tenant = account["tenant_id"]
+        snapshot = registry_devices()
+        subject = owner_subject(account)
+        owner_id = str(account.get("id") or "")
+        merged: List[Dict[str, Any]] = []
+        seen = set()
+        for row in store.list_devices(tenant):
+            node = str(row.get("node_name") or "")
+            seen.add(node)
+            merged.append(merged_device(row, snapshot.get(node) or {}, node, "browser"))
+        for node in sorted(snapshot):
+            if node in seen:
+                continue
+            entry = snapshot[node]
+            owned = ((subject and entry.get("owner_subject") == subject)
+                     or (owner_id and entry.get("account_id") == owner_id))
+            if not owned:
+                continue
+            hostname = str(entry.get("hostname") or "") or node
+            try:
+                row = store.claim_device(tenant, node, display_name=hostname)
+            except Exception:                     # a concurrent first visit already won
+                row = None
+            if row is None:                       # already linked to another tenant
+                continue
+            merged.append(merged_device(row, entry, node, "adopted"))
+        return merged
 
     async def snapshot(node: str) -> Dict[str, Any]:
         """One ``node_control`` status call; never raises."""
@@ -367,19 +447,34 @@ def create_app(config: Optional[AccountConfig] = None,
         for device in devices:
             node = str(device.get("node_name") or "")
             state = await snapshot(node)
+            label = str(device.get("display_name") or node)
+            hostname = str(device.get("hostname") or "") or "—"
+            os_arch = " ".join(str(part) for part in
+                               (device.get("os"), device.get("arch")) if part) or "—"
+            claimed = str(device.get("claimed_at") or "")[:10] or "—"
             lock = (state.get("remote_control") or {}).get("enabled")
             lock_label = ("—" if lock is None else ("включено" if lock else "выключено"))
+            # The registry is the truth about ownership; a row whose entry is
+            # gone cannot be reached or controlled, and the page must say so.
+            missing_note = (" <span class=pill off>нет связи с реестром</span>"
+                            if device.get("missing") else "")
             rows.append(
-                "<tr><td><a href=\"/account/devices/%s\">%s</a></td>"
-                "<td>%s</td><td>%s</td><td>%s</td></tr>"
-                % (_esc(device.get("id")), _esc(node),
-                   "онлайн" if online(node) else "офлайн",
-                   _esc(state.get("access_mode") or "—"), lock_label)
+                "<tr><td><a href=\"/account/devices/%s\">%s</a>%s</td>"
+                "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+                "<td>%s</td><td>%s</td></tr>"
+                % (_esc(device.get("id")), _esc(label), missing_note,
+                   _esc(hostname), _esc(os_arch),
+                   "онлайн" if device.get("online") else "офлайн",
+                   _esc(state.get("access_mode") or "—"),
+                   _esc(lock_label),
+                   _esc(claimed), _esc(device.get("source") or "browser"))
             )
 
         device_table = (
-            "<table><tr><th>Устройство</th><th>Связь</th><th>Режим</th>"
-            "<th>Удалённое управление</th></tr>%s</table>" % "".join(rows)
+            "<table><tr><th>Устройство</th><th>Hostname</th><th>ОС</th>"
+            "<th>Связь</th><th>Режим</th><th>Удалённое управление</th>"
+            "<th>Привязано</th><th>Источник</th></tr>%s</table>"
+            % "".join(rows)
             if rows else
             "<p class=muted>Устройства ещё не привязаны.</p>"
         )
@@ -494,7 +589,11 @@ def create_app(config: Optional[AccountConfig] = None,
         if not gateway_ready():
             return back("/account", {"error": "Шлюз не подключён: привязка недоступна."})
         try:
-            verified = node_control.claim(node, credential)
+            verified = node_control.claim(
+                node, credential,
+                owner_subject=owner_subject(account),
+                account_id=str(account.get("id") or ""),
+            )
         except Exception as exc:
             return back("/account", {"error": "%s: %s" % (type(exc).__name__, exc)})
         if not verified.get("ok"):

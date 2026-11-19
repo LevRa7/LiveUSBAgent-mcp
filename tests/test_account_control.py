@@ -407,3 +407,86 @@ def test_a_database_row_without_a_registry_entry_is_marked_missing(cabinet):
     assert "desk" in page.text
     assert "нет связи с реестром" in page.text
 
+
+# ---------------------------------------------------------------------------
+# P1-C: the opt-in list of unclaimed devices
+# ---------------------------------------------------------------------------
+
+def unclaimed_part(text):
+    """Everything after the section heading; it only exists when the flag is on."""
+    return text.split("Непривязанные устройства", 1)[1]
+
+
+def unclaimed_table(text):
+    """The metadata table alone - the claim form below it is not part of it."""
+    return unclaimed_part(text).split("<form", 1)[0]
+
+
+def test_the_unclaimed_section_is_off_by_default(cabinet, monkeypatch):
+    monkeypatch.delenv("MESH_CABINET_SHOW_UNCLAIMED", raising=False)
+    client, app, bridge, _ = cabinet
+    bridge.registry["spare"] = registry_device(
+        hostname="spare-pc", owner_subject="", account_id="")
+
+    page = client.get("/")
+    assert page.status_code == 200
+    # A shared gateway must not advertise machines nobody has claimed yet.
+    assert "Непривязанн" not in page.text
+    assert "spare" not in page.text
+
+
+def test_the_unclaimed_section_lists_the_node_and_offers_the_claim_form(cabinet, monkeypatch):
+    monkeypatch.setenv("MESH_CABINET_SHOW_UNCLAIMED", "1")
+    client, app, bridge, session = cabinet
+    bridge.registry["spare"] = registry_device(
+        hostname="spare-pc", os="Linux", arch="x86_64", owner_subject="", account_id="")
+
+    page = client.get("/")
+    assert page.status_code == 200
+    section = unclaimed_part(page.text)
+    assert "spare" in section
+    assert "spare-pc" in section
+    assert "Linux x86_64" in section
+    assert "2026-11-19T07:00:00+00:00" in section
+    # The linking form: CSRF, the fixed node name and the proof itself.
+    assert "action=\"/account/devices/claim\"" in section
+    assert "name=csrf" in section
+    assert session["csrf"] in section
+    assert "name=node" in section
+    assert "value=\"spare\" readonly" in section
+    assert "name=credential" in section
+    assert "type=password" in section
+    assert "lk_... или токен устройства" in section
+
+
+def test_a_foreign_owners_node_never_appears_in_the_unclaimed_section(cabinet, monkeypatch):
+    monkeypatch.setenv("MESH_CABINET_SHOW_UNCLAIMED", "1")
+    client, app, bridge, _ = cabinet
+    bridge.registry["stranger"] = registry_device(
+        hostname="stranger-pc", owner_subject="google:someone-else",
+        account_id="account-other")
+
+    page = client.get("/")
+    assert "stranger" not in page.text
+    # Nothing is unclaimed, so the section says exactly that.
+    assert "Непривязанных устройств нет" in page.text
+
+
+def test_the_unclaimed_section_renders_no_keys(cabinet, monkeypatch):
+    monkeypatch.setenv("MESH_CABINET_SHOW_UNCLAIMED", "1")
+    client, app, bridge, _ = cabinet
+    bridge.registry["spare"] = registry_device(
+        hostname="spare-pc", owner_subject="", account_id="",
+        link_key="lk_supersecret_value", token="tok_supersecret_value",
+        token_sha256="sha_supersecret_value")
+
+    page = client.get("/")
+    for secret in ("lk_supersecret_value", "tok_supersecret_value",
+                   "sha_supersecret_value"):
+        assert secret not in page.text
+    # The metadata table carries names and times only, never a credential.
+    table = unclaimed_table(page.text)
+    assert "lk_" not in table
+    assert "token" not in table.lower()
+
+

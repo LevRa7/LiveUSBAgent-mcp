@@ -291,6 +291,82 @@ def create_app(config: Optional[AccountConfig] = None,
             merged.append(merged_device(row, entry, node, "adopted"))
         return merged
 
+    def show_unclaimed() -> bool:
+        """Whether the migration list of ownerless nodes is shown at all.
+
+        Off by default: a shared gateway must not advertise machines that belong
+        to somebody else, and the list only helps while existing devices are
+        being moved into accounts.
+        """
+        return _is_true(os.environ.get("MESH_CABINET_SHOW_UNCLAIMED", ""))
+
+    def unclaimed_devices(limit: int = 50) -> List[Dict[str, Any]]:
+        """Registry nodes with no owner and no account: candidates for a claim.
+
+        A node counts as unclaimed only when both ``owner_subject`` and
+        ``account_id`` are empty - a half-written entry still belongs to
+        somebody, and showing it would leak the existence of a foreign device.
+        Keys never reach this list: the bridge's snapshot carries metadata only.
+        """
+        snapshot = registry_devices()
+        found: List[Dict[str, Any]] = []
+        for node in sorted(snapshot):
+            entry = snapshot[node]
+            if str(entry.get("owner_subject") or "").strip():
+                continue
+            if str(entry.get("account_id") or "").strip():
+                continue
+            found.append({
+                "node": node,
+                "hostname": str(entry.get("hostname") or ""),
+                "os": str(entry.get("os") or ""),
+                "arch": str(entry.get("arch") or ""),
+                "last_seen": str(entry.get("last_seen") or ""),
+            })
+            if len(found) >= limit:
+                break
+        return found
+
+    def unclaimed_card(csrf: str) -> str:
+        """The opt-in section: names and metadata, the proof is still a key."""
+        if not show_unclaimed():
+            return ""
+        items = unclaimed_devices()
+        if not items:
+            return ("<div class=card><h2>Непривязанные устройства</h2>"
+                    "<p class=muted>Непривязанных устройств нет.</p></div>")
+        rows = []
+        for item in items:
+            os_arch = " ".join(part for part in (item.get("os"), item.get("arch"))
+                               if part) or "—"
+            rows.append(
+                "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
+                % (_esc(item.get("node")), _esc(item.get("hostname") or "—"),
+                   _esc(os_arch), _esc(item.get("last_seen") or "—"))
+            )
+        # One form per node: the name is fixed (the key is the proof, not the
+        # name), so a single shared form would leave all but one row unusable.
+        forms = []
+        for item in items:
+            forms.append(
+                "<form method=post action=\"/account/devices/claim\">"
+                "<input type=hidden name=csrf value=\"%s\">"
+                "<div class=row><input type=text name=node value=\"%s\" readonly>"
+                "<input type=password name=credential "
+                "placeholder=\"lk_... или токен устройства\">"
+                "<button class=btn type=submit>Привязать</button></div></form>"
+                % (_esc(csrf), _esc(item.get("node")))
+            )
+        return (
+            "<div class=card><h2>Непривязанные устройства</h2>"
+            "<p class=muted>Эти узлы зарегистрированы на шлюзе, но ещё не принадлежат "
+            "аккаунту. Имя узла уже подставлено; ключ показывает сама машина "
+            "(<code>rhm --once</code>).</p>"
+            "<table><tr><th>Узел</th><th>Hostname</th><th>ОС</th>"
+            "<th>Последняя активность</th></tr>%s</table>%s</div>"
+            % ("".join(rows), "".join(forms))
+        )
+
     async def snapshot(node: str) -> Dict[str, Any]:
         """One ``node_control`` status call; never raises."""
         if not gateway_ready():
@@ -565,7 +641,10 @@ def create_app(config: Optional[AccountConfig] = None,
                "<p class=muted>Не подключён.</p>"
                "<a class=btn href=\"/account/drive/connect\">Подключить Drive</a>")
         )
-        body = feedback(request) + lock_card + account_card + drive_card + devices_card
+        # The migration list sits right below the device table: it is opt-in
+        # (MESH_CABINET_SHOW_UNCLAIMED), so the common page is unchanged.
+        body = (feedback(request) + lock_card + account_card + drive_card
+                + devices_card + unclaimed_card(csrf))
         if request.query_params.get("welcome") == "1":
             # The setting the product asks about right after the login: a modal
             # over the dashboard, with the same controls as the page below.

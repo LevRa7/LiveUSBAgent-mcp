@@ -200,6 +200,21 @@ def test_interactive_frame_fits_the_window(monkeypatch):
     assert "q quit" in frame
 
 
+def test_virtual_keys_are_layout_independent():
+    assert menu._key_from_vk(0x44) == "d"          # physical D
+    assert menu._key_from_vk(0x44, shift=True) == "D"
+    assert menu._key_from_vk(0x25) == "left"
+    assert menu._key_from_vk(0xBF) == "/"
+    assert menu._key_from_vk(0xBF, shift=True) == "?"
+    assert menu._key_from_vk(0x37, shift=True, uchar="?") == "?"
+
+
+def test_cyrillic_character_maps_to_the_latin_key():
+    assert menu._layout_key("в") == "d"
+    assert menu._layout_key("В") == "D"
+    assert menu._layout_key("d") == "d"
+
+
 def test_home_line_has_an_edit_button(monkeypatch):
     monkeypatch.setattr(menu, "read_agent_env", lambda: {"MESH_USER": "n"})
     text = menu.render(menu.read_agent_env())

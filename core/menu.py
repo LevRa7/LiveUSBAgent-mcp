@@ -75,8 +75,125 @@ try:
         _fields_ = [("dwSize", _COORD), ("dwCursorPosition", _COORD),
                     ("wAttributes", ctypes.c_ushort), ("srWindow", _SMALL_RECT),
                     ("dwMaximumWindowSize", _COORD)]
+
+    class _KEY_EVENT_RECORD(ctypes.Structure):
+        _fields_ = [("bKeyDown", wintypes.BOOL), ("wRepeatCount", wintypes.WORD),
+                    ("wVirtualKeyCode", wintypes.WORD),
+                    ("wVirtualScanCode", wintypes.WORD),
+                    ("uChar", wintypes.WCHAR),
+                    ("dwControlKeyState", wintypes.DWORD)]
+
+    class _EVENT_UNION(ctypes.Union):
+        _fields_ = [("KeyEvent", _KEY_EVENT_RECORD), ("_pad", ctypes.c_byte * 16)]
+
+    class _INPUT_RECORD(ctypes.Structure):
+        _fields_ = [("EventType", wintypes.WORD), ("Event", _EVENT_UNION)]
 except Exception:                                  # pragma: no cover
     _COORD = _SMALL_RECT = _CONSOLE_SCREEN_BUFFER_INFO = None
+    _KEY_EVENT_RECORD = _EVENT_UNION = _INPUT_RECORD = None
+
+#: Physical keys are read as Win32 virtual-key codes, so a binding fires on the
+#: same key whatever the active layout is: pressing the physical D key with the
+#: Russian layout yields "в" as a character but still VK_D here.
+_CYRILLIC_TO_LATIN = str.maketrans(
+    "йцукенгшщзхъфывапролджэячсмитьбю",
+    "qwertyuiop[]asdfghjkl;'zxcvbnm,.")
+_CYRILLIC_TO_LATIN_UPPER = str.maketrans(
+    "ЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ",
+    "QWERTYUIOP[]ASDFGHJKL;'ZXCVBNM,.")
+_VK_KEYS = {0x09: "tab", 0x0D: "enter", 0x1B: "escape", 0x20: " ",
+            0x25: "left", 0x27: "right", 0x26: "up", 0x28: "down",
+            0x08: "backspace", 0x2E: "delete"}
+_NO_CONSOLE = object()
+_WIN_INPUT = None
+
+
+def _layout_key(ch: str) -> str:
+    """Map a Cyrillic character typed on a Latin key back to that Latin key."""
+    if not ch:
+        return ch
+    mapped = ch.translate(_CYRILLIC_TO_LATIN)
+    if mapped != ch:
+        return mapped
+    return ch.translate(_CYRILLIC_TO_LATIN_UPPER)
+
+
+def _key_from_vk(code: int, shift: bool = False, uchar: str = "") -> Optional[str]:
+    """Turn a virtual-key code into the menu's logical key, layout-independently."""
+    if 0x41 <= code <= 0x5A:                     # A-Z
+        return chr(code) if shift else chr(code + 32)
+    if 0x30 <= code <= 0x39:                     # 0-9 and their shifted symbols
+        if uchar and uchar.isprintable():
+            return uchar
+        return chr(code)
+    if code == 0xBF:                             # / and ?
+        return "?" if shift or uchar == "?" else "/"
+    named = _VK_KEYS.get(code)
+    if named:
+        return named
+    if uchar and uchar.isprintable():
+        return uchar
+    return None
+
+
+def _win_input_handle():
+    if os.name != "nt" or _INPUT_RECORD is None:
+        return None
+    try:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetStdHandle.argtypes = [wintypes.DWORD]
+        kernel32.GetStdHandle.restype = wintypes.HANDLE
+        handle = kernel32.GetStdHandle(-10)     # STD_INPUT_HANDLE
+        mode = wintypes.DWORD()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return None
+        return handle
+    except Exception:
+        return None
+
+
+def _read_win_key(timeout: float):
+    """A logical key, ``None`` on timeout, or ``_NO_CONSOLE`` when unsupported."""
+    global _WIN_INPUT
+    if _WIN_INPUT is None:
+        _WIN_INPUT = _win_input_handle() or False
+    handle = _WIN_INPUT
+    if not handle:
+        return _NO_CONSOLE
+    try:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.ReadConsoleInputW.argtypes = [
+            wintypes.HANDLE, ctypes.POINTER(_INPUT_RECORD), wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD)]
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            wait_ms = max(0, int((deadline - time.time()) * 1000))
+            ready = kernel32.WaitForSingleObject(handle, wait_ms)
+            if ready == 0x102:                  # WAIT_TIMEOUT
+                return None
+            if ready != 0:                      # abandoned/invalid handle
+                return _NO_CONSOLE
+            records = (_INPUT_RECORD * 32)()
+            read = wintypes.DWORD()
+            if not kernel32.ReadConsoleInputW(
+                    handle, records, 32, ctypes.byref(read)):
+                return _NO_CONSOLE
+            for index in range(read.value):
+                record = records[index]
+                if record.EventType != 1:       # KEY_EVENT
+                    continue
+                event = record.Event.KeyEvent
+                if not event.bKeyDown:
+                    continue
+                shift = bool(event.dwControlKeyState & 0x0010)
+                key = _key_from_vk(event.wVirtualKeyCode, shift,
+                                   event.uChar or "")
+                if key:
+                    return key
+        return None
+    except Exception:
+        return _NO_CONSOLE
 
 
 def config_dir() -> str:
@@ -290,6 +407,10 @@ class Keys:
 
     def read(self, timeout: float = 0.5) -> Optional[str]:
         if self._windows:
+            # Virtual-key codes first: the same physical key, any layout.
+            key = _read_win_key(timeout)
+            if key is not _NO_CONSOLE:
+                return key
             import msvcrt
 
             end = time.time() + timeout
@@ -301,7 +422,7 @@ class Keys:
                         return {"K": "left", "M": "right", "H": "up", "P": "down"}.get(code)
                     if ch == "\t":
                         return "tab"
-                    return ch
+                    return _layout_key(ch)
                 time.sleep(0.03)
             return None
         try:

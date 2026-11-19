@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import copy
 from collections import deque
 from contextlib import asynccontextmanager
 import datetime
@@ -307,6 +308,12 @@ RESERVED_NAMES = {
 
 _REGISTRY_LOCK = threading.Lock()
 _REGISTRY_CORRUPT = False
+#: (path, mtime_ns, size) -> parsed registry. Every unauthenticated request
+#: used to re-read and re-parse the file inside the event loop; a cache keyed by
+#: the file's identity keeps the disk out of the request path while a save or an
+#: external rewrite invalidates it. Callers get a deep copy, so one request can
+#: never observe or mutate another request's view.
+_REGISTRY_CACHE: dict = {"key": None, "data": None}
 
 
 def registry_corrupt() -> bool:
@@ -323,17 +330,25 @@ def load_registry() -> dict:
     global _REGISTRY_CORRUPT
     if not os.path.exists(REGISTRY_PATH):
         _REGISTRY_CORRUPT = False
+        _REGISTRY_CACHE["key"] = None
         return {}
     try:
+        stat = os.stat(REGISTRY_PATH)
+        key = (REGISTRY_PATH, stat.st_mtime_ns, stat.st_size)
+        if _REGISTRY_CACHE["key"] == key and _REGISTRY_CACHE["data"] is not None:
+            return copy.deepcopy(_REGISTRY_CACHE["data"])
         with open(REGISTRY_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
         if not isinstance(data, dict):
             raise ValueError("registry root is not a JSON object")
         _REGISTRY_CORRUPT = False
-        return data
+        _REGISTRY_CACHE["key"] = key
+        _REGISTRY_CACHE["data"] = data
+        return copy.deepcopy(data)
     except Exception as e:
         logger.error("Failed to read registry (%s): %s - control-plane writes are disabled", REGISTRY_PATH, e)
         _REGISTRY_CORRUPT = True
+        _REGISTRY_CACHE["key"] = None
         return {}
 
 
@@ -367,6 +382,7 @@ def save_registry(data: dict):
             except OSError:
                 pass
             _REGISTRY_CORRUPT = False
+            _REGISTRY_CACHE["key"] = None
         finally:
             if os.path.exists(tmp):
                 try:

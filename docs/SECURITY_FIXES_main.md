@@ -9,7 +9,7 @@
 эксплуатировать и чем это подтверждено**. Для находок, которые к основному проекту не применимы
 (другая архитектура) или закрыты ранее, это сказано явно.
 
-**Проверка:** `python -m pytest tests -q` → **1534 passed, 8 skipped** (2026-11-19: 1520 после первого пакета, 1532 после второго, 1534 после третьего).
+**Проверка:** `python -m pytest tests -q` → **1535 passed, 8 skipped** (2026-11-19: 1520 после первого пакета, 1532 после второго, 1534 после третьего, 1535 после четвёртого).
 Новый файл регрессий: `tests/test_security_audit_2026_11_19.py` (23 теста).
 
 ---
@@ -162,13 +162,14 @@
 | DELETE чужой сессии | зная/подобрав `mcp-session-id`, клиент закрывал SSE-поток другого узла | DELETE проверяет владельца в `active_sessions` и очередь в `active_sse_subscribers[user]`, иначе `404` | `test_delete_of_a_foreign_session_is_refused` |
 | Админ-секрет: один короткий токен | утечка одного значения = ротация/отзыв всех устройств | список токенов через запятую, каждый ≥32 символов; опция `MESH_ADMIN_REQUIRE_LOCALHOST=1`; лог с IP | `test_admin_accepts_a_token_list_and_ignores_short_entries`, `test_short_admin_token_disables_the_admin_api` |
 | Flood по catch-all шар | анонимный поток запросов с любым слагом занимал event loop чтением реестра и relay | бакет `MESH_SHARE_RATE_LIMIT` (600/мин/IP) → `429 Retry-After` | `test_share_route_is_rate_limited` |
+| Чтение registry на каждый запрос | тысячи анонимных запросов к `/sse`, `/mcp`, шарам заставляли шлюз читать и парсить файл в event loop | mtime-кэш реестра с `deepcopy` на вызывающего; инвалидация при `save_registry` и внешней перезаписи | `test_registry_reads_are_cached_but_isolated` |
 | Обход hooks | `rm  -rf  /`, `cat rhm_""tasks.json`, `curl … \| sh` не совпадали с узкими шаблонами | нормализация кавычек/бэкслешей/пробелов до сравнения; добавлены `rm -rf /`, `shutdown/reboot`, `Remove-Item -Recurse`, `curl\|sh`, `chmod` по системным путям, `mv` каталога агента | `test_hooks_normalise_quotes_before_matching` |
 | Установщик без проверки целостности | подмена ответа хоста установщика давала RCE на машине пользователя | `RHM_INSTALLER_SHA256` — CLI сверяет SHA-256 скачанного установщика и отказывается запускать при расхождении | `test_cli_supports_installer_hash_pinning` |
 | OAuth-кабинет: фиксация входа | ссылка с чужим `state` в другом браузере привязывала чужую личность к сессии; любой Google-аккаунт мог войти; вход не был ограничен по частоте | binding-cookie `__Host-rhm-login` + `binding_hash` в `auth_flows`; проверка `Origin` в CSRF; лимит 20/мин на start и callback; allowlist `MESH_OWNER_EMAILS`/`MESH_OWNER_DOMAINS` | `test_login_flow_is_bound_to_the_browser_that_started_it`, `test_cabinet_posts_reject_a_foreign_origin`, `test_login_start_is_rate_limited`, `test_owner_allowlist_blocks_other_google_accounts` |
 | Админ-API без второго фактора | утечка админ-токена давала ротацию/отзыв всех устройств | опциональный TOTP (`MESH_ADMIN_TOTP_SECRET`, окно ±30 с) поверх списка токенов; при заданном секрете запрос без кода отклоняется | `test_admin_totp_is_required_when_configured` |
 | Открытая регистрация при кабинете | при `MESH_ACCOUNT=1` любой мог зарегистрировать узел рядом с аккаунтами | `MESH_CLOSE_REGISTER_WITH_ACCOUNT=1` закрывает `/api/register`, оставляя пары и enrollment-секрет | `test_account_cabinet_can_close_self_registration` |
 
-Проверка после второго пакета: `python -m pytest tests -q` → **1532 passed, 8 skipped**; после третьего (TOTP и кабинет) → **1534 passed, 8 skipped**.
+Проверка после второго пакета: `python -m pytest tests -q` → **1532 passed, 8 skipped**; после третьего (TOTP и кабинет) → **1534**; после четвёртого (кэш реестра) → **1535 passed, 8 skipped**.
 
 ---
 
@@ -176,7 +177,7 @@
 
 ```bash
 python -m pytest tests -q
-# 1534 passed, 8 skipped
+# 1535 passed, 8 skipped
 ```
 
 Ручные проверки после выката:

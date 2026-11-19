@@ -425,3 +425,21 @@ def test_account_cabinet_can_close_self_registration(monkeypatch):
     monkeypatch.setenv("MESH_CLOSE_REGISTER_WITH_ACCOUNT", "1")
     refusal = gateway.enrolment_refusal(_request(method="POST"))
     assert "cabinet" in refusal.lower()
+
+
+def test_registry_reads_are_cached_but_isolated(tmp_path, monkeypatch):
+    path = tmp_path / "registry.json"
+    path.write_text(json.dumps({"node-one": {"token_sha256": "a" * 64}}))
+    monkeypatch.setattr(gateway, "REGISTRY_PATH", str(path))
+    monkeypatch.setattr(gateway, "_REGISTRY_CACHE", {"key": None, "data": None})
+
+    first = gateway.load_registry()
+    first["injected"] = {"token_sha256": "b" * 64}
+    second = gateway.load_registry()
+    assert "injected" not in second, "each caller gets its own copy"
+
+    gateway.save_registry({"node-two": {"token_sha256": "c" * 64}})
+    assert set(gateway.load_registry()) == {"node-two"}, "a save invalidates the cache"
+
+    path.write_text(json.dumps({"node-three": {"token_sha256": "d" * 64}}))
+    assert set(gateway.load_registry()) == {"node-three"}, "an external write is noticed"

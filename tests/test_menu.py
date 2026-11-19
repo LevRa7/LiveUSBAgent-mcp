@@ -1,5 +1,6 @@
 """Console menu (``rhm``): endpoint, mode switch, log, JSON snapshot."""
 
+import io
 import json
 import os
 
@@ -114,24 +115,17 @@ def test_pause_and_resume_subcommands(capsys):
     assert control.paused() is False
 
 
-def test_goal_command_sets_shows_and_closes(capsys):
-    assert menu.main(["goal", "finish the MCP update"]) == 0
-    assert "finish the MCP update" in capsys.readouterr().out
-
-    assert menu.main(["goal"]) == 0
-    shown = capsys.readouterr().out
-    assert "finish the MCP update" in shown
-    assert "active" in shown
-
-    assert menu.main(["goal", "done", "shipped"]) == 0
-    closed = capsys.readouterr().out
-    assert "Goal: none" in closed
-    assert "done" in closed
+def test_goal_commands_are_disabled_by_default(capsys):
+    """A node-wide objective leaks between chats, so it is opt-in."""
+    assert menu.main(["goal", "finish the MCP update"]) == 2
+    assert "disabled" in capsys.readouterr().err
+    assert menu.main(["goal"]) == 2
+    assert "disabled" in capsys.readouterr().err
 
 
-def test_goal_set_without_text_is_refused(capsys):
-    assert menu.main(["goal", "set"]) == 2
-    assert "needs the objective" in capsys.readouterr().err
+def test_goal_clear_still_works_when_disabled(capsys):
+    assert menu.main(["goal", "clear"]) == 0
+    assert "cleared" in capsys.readouterr().out
 
 
 def test_approvals_command_allows_and_revokes(capsys):
@@ -164,15 +158,57 @@ def test_render_shows_the_approval_state(monkeypatch, tmp_path):
     menu.main(["approvals", "off"])
 
 
-def test_render_shows_the_goal_line(monkeypatch, tmp_path):
+def test_render_hides_the_disabled_goal(monkeypatch, tmp_path):
+    monkeypatch.delenv("MESH_GOAL", raising=False)
     monkeypatch.setattr(menu, "read_agent_env", lambda: {"MESH_USER": "n"})
     monkeypatch.setattr(menu, "agent_log_path", lambda: str(tmp_path / "agent.log"))
-    menu.main(["goal", "keep the node updated"])
     text = menu.render(menu.read_agent_env())
-    assert "Goal: keep the node updated" in text
+    assert "Goal:" not in text
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX launcher")
 def test_posix_launcher_is_executable():
     launcher = os.path.join(os.path.dirname(os.path.dirname(__file__)), "bin", "rhm")
     assert os.path.exists(launcher)
+
+
+def test_keys_is_a_context_manager(monkeypatch):
+    """`rhm` used to crash with TypeError: Keys has no __exit__."""
+    restored = []
+    monkeypatch.setattr(menu.Keys, "_enable_ansi", lambda self: None)
+    monkeypatch.setattr(menu.Keys, "restore", lambda self: restored.append(True))
+    with menu.Keys() as keys:
+        assert isinstance(keys, menu.Keys)
+    assert restored == [True]
+
+
+def test_render_keeps_the_full_text_for_scripts(monkeypatch):
+    monkeypatch.setattr(menu, "read_agent_env", lambda: {
+        "MESH_USER": "node-one", "MESH_LINK_KEY": "lk_" + "a" * 32})
+    text = menu.render(menu.read_agent_env())
+    assert "MCP endpoint:" in text
+    assert "Agent log (" in text
+
+
+def test_interactive_frame_fits_the_window(monkeypatch):
+    env = {"MESH_USER": "node-one", "MESH_LINK_KEY": "lk_" + "a" * 32,
+           "MESH_GATEWAY": "gw.test"}
+    frame = menu._frame(env, columns=60, rows=12)
+    lines = frame.splitlines()
+    assert len(lines) <= 12, "a frame taller than the window scrolls the screen"
+    assert all(len(line) <= 60 for line in lines), "wrapped lines smear the menu"
+    assert "q quit" in frame
+
+
+def test_draw_clears_the_screen_before_each_frame(monkeypatch):
+    env = {"MESH_USER": "node-one", "MESH_LINK_KEY": "lk_" + "a" * 32,
+           "MESH_GATEWAY": "gw.test"}
+    out = io.StringIO()
+    monkeypatch.setattr(menu, "_ANSI", True)
+    monkeypatch.setattr(menu, "_terminal_size", lambda: (80, 24))
+    monkeypatch.setattr(menu.sys, "stdout", out)
+    menu.draw(env)
+    written = out.getvalue()
+    assert written.startswith("\x1b[2J\x1b[H")
+    assert written.endswith("\x1b[J")
+    assert "MCP endpoint:" not in written, "the QR/endpoint block belongs to `e`"

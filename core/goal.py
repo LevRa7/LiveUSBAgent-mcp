@@ -43,6 +43,17 @@ MAX_HISTORY = 20
 STATUSES = ("active", "done", "blocked", "replaced")
 
 
+def enabled() -> bool:
+    """The goal surface is opt-in and off by default.
+
+    A single objective stored on the node is global to every chat that talks to
+    it: one client's "download the models" leaks into another client's session.
+    Per-chat scoping needs a chat identifier the node cannot see, so the feature
+    is disabled unless the operator explicitly sets ``MESH_GOAL=1``.
+    """
+    return os.environ.get("MESH_GOAL", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _path() -> str:
     return os.path.join(control.control_dir(), GOAL_FILE)
 

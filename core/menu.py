@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """``rhm`` - the node's console menu and one-shot settings commands.
 
-Shows the agent log, the MCP endpoint and its QR code, and switches the live
-access mode with Tab / Left / Right:
+Shows the node status and the switches, and switches the live access mode with
+Tab / Left / Right:
 
     read_only   observation only
     approval    mutating calls wait for "approve" in this menu
@@ -50,6 +50,9 @@ _NOTICE = ""
 # ---------------------------------------------------------------------------
 # Config, URL and log
 # ---------------------------------------------------------------------------
+
+_ANSI = os.name != "nt"
+
 
 def config_dir() -> str:
     base = paths.config_dir()
@@ -193,7 +196,8 @@ def snapshot() -> Dict[str, Any]:
         "pending": control.pending_approvals(),
         "isolation": sandbox.status(),
         "remote_control": state.get("remote_control") or control.remote_control_state(),
-        "goal": goal.get(),
+        "goal": goal.get() if goal.enabled() else None,
+        "goal_enabled": goal.enabled(),
         "usage": usage.summary(days=1),
     }
 
@@ -211,9 +215,13 @@ class Keys:
         self._windows = os.name == "nt"
 
     def __enter__(self) -> "Keys":
+        global _ANSI
         if self._windows:
-            self._enable_ansi()
-            return self
+            _ANSI = self._enable_ansi()
+        if _ANSI:
+            sys.stdout.write("\x1b[?25l")
+            sys.stdout.flush()
+        return self
         try:
             import termios
             import tty
@@ -224,6 +232,16 @@ class Keys:
         except Exception:
             self._fd = None
         return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        # The raw-mode setting must be restored on every path, including a
+        # Ctrl+C inside the menu: without this method `with Keys()` raised
+        # TypeError before the first frame was ever drawn.
+        if _ANSI:
+            sys.stdout.write("\x1b[?25h")
+            sys.stdout.flush()
+        self.restore()
+        return False
 
     def restore(self) -> None:
         if self._fd is not None and self._settings is not None:
@@ -282,7 +300,7 @@ class Keys:
             return None
 
     @staticmethod
-    def _enable_ansi() -> None:
+    def _enable_ansi() -> bool:
         try:
             import ctypes
 
@@ -291,15 +309,19 @@ class Keys:
             mode = ctypes.c_uint32()
             if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
                 kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+                return True
         except Exception:
             pass
+        return False
 
 
 # ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
 
-def render(env: Dict[str, str]) -> str:
+def _render_lines(env: Dict[str, str], *, include_endpoint: bool = True,
+                  include_log: bool = True,
+                  columns: Optional[int] = None) -> List[str]:
     env = dict(env)
     if not env.get("MESH_LINK_KEY"):
         link = ensure_link_key(env)
@@ -339,7 +361,8 @@ def render(env: Dict[str, str]) -> str:
         lines.append("Remote control: ON  (cabinet/MCP may change the switches; r — turn off)")
     else:
         lines.append("Remote control: OFF  (r — turn on; only this console can re-enable it)")
-    lines.append(goal.summary_line())
+    if goal.enabled():
+        lines.append(goal.summary_line())
     try:
         summary = schedule_module.summary()
     except Exception:
@@ -364,21 +387,22 @@ def render(env: Dict[str, str]) -> str:
     if _NOTICE:
         lines.append("Note:  %s" % _NOTICE)
     lines.append("")
-    if url:
-        lines.append("MCP endpoint:")
-        lines.append(url)
-        qr = qr_lines(url)
-        if qr:
-            lines.append("")
-            lines.extend(qr)
-    else:
-        if env.get("MESH_USER"):
-            lines.append("MCP endpoint: link key missing for '%s' (gateway unreachable or rotate failed)."
-                         % env.get("MESH_USER"))
-            lines.append("Run the installer again, or POST /v1/devices/%s/rotate with the device token."
-                         % env.get("MESH_USER"))
+    if include_endpoint:
+        if url:
+            lines.append("MCP endpoint:")
+            lines.append(url)
+            qr = qr_lines(url)
+            if qr:
+                lines.append("")
+                lines.extend(qr)
         else:
-            lines.append("MCP endpoint: (no MESH_USER / MESH_LINK_KEY in agent.env)")
+            if env.get("MESH_USER"):
+                lines.append("MCP endpoint: link key missing for '%s' (gateway unreachable or rotate failed)."
+                             % env.get("MESH_USER"))
+                lines.append("Run the installer again, or POST /v1/devices/%s/rotate with the device token."
+                             % env.get("MESH_USER"))
+            else:
+                lines.append("MCP endpoint: (no MESH_USER / MESH_LINK_KEY in agent.env)")
     pending = control.pending_approvals()
     if pending:
         lines.append("")
@@ -386,17 +410,117 @@ def render(env: Dict[str, str]) -> str:
         for item in pending[-3:]:
             lines.append("  %s  %-14s  %s" % (item.get("id"), item.get("tool"), item.get("summary", "")))
     lines.append("")
-    lines.append("Agent log (%s):" % agent_log_path())
-    lines.extend("  " + line for line in tail(agent_log_path(), 10))
-    lines.append("")
+    if include_log:
+        lines.append("Agent log (%s):" % agent_log_path())
+        lines.extend("  " + line for line in tail(agent_log_path(), 10))
+        lines.append("")
     lines.append("-" * 72)
-    lines.append("Tab/Left/Right mode   d directory   i isolation   I network   r remote   a approve   A always   R revoke   x deny   p pause   o log   q quit")
-    return "\n".join(lines)
+    lines.append("q quit   ? help   e endpoint   o log")
+    if columns:
+        lines = [_fit(line, columns) for line in lines]
+    return lines
+
+def render(env: Dict[str, str]) -> str:
+    """Full menu text: ``--once`` and scripts get everything, no terminal fit."""
+    return "\n".join(_render_lines(env))
+
+
+def _terminal_size() -> tuple:
+    size = shutil.get_terminal_size(fallback=(80, 24))
+    return max(20, size.columns), max(8, size.lines)
+
+
+def _fit(text: str, columns: int) -> str:
+    """One display line, never wider than the terminal."""
+    if columns <= 1 or len(text) <= columns:
+        return text[:columns]
+    return text[:max(0, columns - 1)] + "\u2026"
+
+
+def _frame(env: Dict[str, str], columns: int, rows: int) -> str:
+    """The interactive frame: no QR, no log tail, fitted to the window.
+
+    The old draw() wrote a frame taller than the terminal and never cleared it,
+    so every keypress scrolled the screen and the QR/log blocks smeared over the
+    menu. A frame is now at most ``rows`` lines and each line at most ``columns``.
+    """
+    lines = _render_lines(env, include_endpoint=False, include_log=False, columns=columns)
+    hint = lines[-1] if lines else ""
+    body = lines[:-1]
+    budget = max(1, rows - 1)
+    if len(body) > budget:
+        body = body[:max(0, budget - 1)] + [
+            "\u2026 window is %dx%d: resize it, or run `rhm status`" % (columns, rows)
+        ]
+    return "\n".join([_fit(line, columns) for line in body + [hint]])
 
 
 def draw(env: Dict[str, str]) -> None:
-    sys.stdout.write("\x1b[H" + render(env) + "\x1b[J")
+    columns, rows = _terminal_size()
+    body = _frame(env, columns, rows)
+    if _ANSI:
+        sys.stdout.write("\x1b[2J\x1b[H" + body + "\x1b[J")
+    else:
+        os.system("cls" if os.name == "nt" else "clear")
+        sys.stdout.write(body)
     sys.stdout.flush()
+
+
+def _show_endpoint(keys: "Keys", env: Dict[str, str]) -> None:
+    """Endpoint + QR on a screen of their own; any key returns to the menu."""
+    columns, rows = _terminal_size()
+    url = build_mcp_url(env)
+    lines = ["MCP endpoint:", ""]
+    if url:
+        lines.append(url)
+        qr = qr_lines(url)
+        if qr and max(len(row) for row in qr) <= columns and len(lines) + len(qr) + 3 <= rows:
+            lines += [""] + qr
+        elif qr:
+            lines += ["", "(window too small for the QR code)"]
+    else:
+        lines.append("not configured: no MESH_USER / MESH_LINK_KEY")
+    lines += ["", "press any key to return"]
+    body = "\n".join(_fit(line, columns) for line in lines[:rows])
+    if _ANSI:
+        sys.stdout.write("\x1b[2J\x1b[H" + body + "\x1b[J")
+    else:
+        os.system("cls" if os.name == "nt" else "clear")
+        sys.stdout.write(body)
+    sys.stdout.flush()
+    while not keys.read(0.5):
+        pass
+
+
+def _show_help(keys: "Keys", env: Dict[str, str]) -> None:
+    """One screen with every key; any key returns. Keeps the frame short."""
+    columns, rows = _terminal_size()
+    lines = [
+        "keys",
+        "",
+        "  Tab / Left / Right   access mode (read-only / approval / full)",
+        "  d                    working directory",
+        "  i                    isolation on/off (strict)",
+        "  I                    isolation with network",
+        "  r                    remote control on/off",
+        "  a / x                approve / deny the waiting call",
+        "  A / R                allow every mutating call / revoke that",
+        "  p                    pause or resume calls",
+        "  e                    MCP endpoint and QR code",
+        "  o                    open the agent log",
+        "  q                    quit",
+        "",
+        "press any key to return",
+    ]
+    body = "\n".join(_fit(line, columns) for line in lines[:rows])
+    if _ANSI:
+        sys.stdout.write("\x1b[2J\x1b[H" + body + "\x1b[J")
+    else:
+        os.system("cls" if os.name == "nt" else "clear")
+        sys.stdout.write(body)
+    sys.stdout.flush()
+    while not keys.read(0.5):
+        pass
 
 
 def _open_log() -> None:
@@ -508,6 +632,10 @@ def run_menu() -> int:
                 _NOTICE = str(result.get("message") or result.get("error") or "")
             elif key == "o":
                 _open_log()
+            elif key == "e":
+                _show_endpoint(keys, env)
+            elif key == "?":
+                _show_help(keys, env)
             draw(env)
     sys.stdout.write("\n")
     return 0
@@ -703,6 +831,15 @@ def _run_command(args: Any) -> int:
 def _run_goal(value: str, text: str, as_json: bool) -> int:
     """``rhm goal`` show; ``rhm goal <text>`` set; ``done``/``blocked``/``clear``."""
     word = value.strip().lower()
+    if not goal.enabled():
+        if word in ("clear", "reset", "forget"):
+            goal.clear(actor="cli")
+            print("goal cleared (the feature is disabled)")
+            return 0
+        print("rhm: goal is disabled: one objective would be shared by every chat. "
+              "Use `rhm goal clear` to delete a stored one, or set MESH_GOAL=1.",
+              file=sys.stderr)
+        return 2
     try:
         if not value:
             data = goal.get()

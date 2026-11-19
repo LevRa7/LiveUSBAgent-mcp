@@ -1,4 +1,4 @@
-"""Device-token rotation: the pending token, and the moment the old one dies.
+﻿"""Device-token rotation: the pending token, and the moment the old one dies.
 
 The device token is the node's identity, so rotating it is the one operation that
 can lock a machine out of its own gateway. The design under test:
@@ -48,7 +48,7 @@ def _request(query: str = "", method: str = "GET", body: bytes = b"",
 @pytest.fixture(autouse=True)
 def _clean(tmp_path, monkeypatch):
     monkeypatch.setattr(gateway, "REGISTRY_PATH", str(tmp_path / "registry.json"))
-    monkeypatch.setattr(gateway, "ADMIN_TOKEN", "admin-secret")
+    monkeypatch.setattr(gateway, "ADMIN_TOKEN", "admin-secret-0123456789abcdef0123456789")
     gateway._rate_windows.clear()
     yield
     gateway._rate_windows.clear()
@@ -93,12 +93,12 @@ def test_rotation_needs_the_current_token_or_admin():
     # The link key runs tools; it must not be able to rotate the identity.
     assert _rotate("node-one", data["link_key"]).status_code == 403
     assert _rotate("node-one", data["token"]).status_code == 200
-    assert _rotate("node-one", "", headers={"X-Admin-Token": "admin-secret"}).status_code == 200
+    assert _rotate("node-one", "", headers={"X-Admin-Token": "admin-secret-0123456789abcdef0123456789"}).status_code == 200
 
 
 def test_rotation_of_an_unknown_node_is_404():
     assert _rotate("ghost", "whatever").status_code == 404
-    assert _finish("ghost", {"X-Admin-Token": "admin-secret"}).status_code == 404
+    assert _finish("ghost", {"X-Admin-Token": "admin-secret-0123456789abcdef0123456789"}).status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -189,10 +189,11 @@ def test_a_rotation_also_drops_legacy_plaintext_credentials():
     assert entry["token_sha256"] == gateway.hash_secret("brand-new-token")
 
 
-def test_rotating_the_link_key_does_not_touch_the_legacy_token_url():
+def test_rotating_the_link_key_does_not_touch_the_legacy_token_url(monkeypatch):
     """Two credentials, two rotations: retiring a leaked LINK must not also
     invalidate the device-token URL the node was installed with (that is what
     the user would experience as "the reinstall broke my connector")."""
+    monkeypatch.setattr(gateway, "ALLOW_LEGACY_QUERY", True)
     gateway.save_registry({"old-node": {
         "token": "legacy-token",
         "allow_legacy_query": True,
@@ -210,3 +211,4 @@ def test_rotating_the_link_key_does_not_touch_the_legacy_token_url():
     ok, _message, _user = gateway.verify_token(_request("?user=old-node&token=legacy-token"))
     assert ok is True
     assert _registry()["old-node"].get("allow_legacy_query") is True
+

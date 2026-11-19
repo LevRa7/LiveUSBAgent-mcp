@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS auth_flows (
     next_path TEXT NOT NULL,
     kind TEXT NOT NULL DEFAULT 'login',
     account_id TEXT,
+    binding_hash TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     used_at TEXT
@@ -106,6 +107,7 @@ class Store:
             for column, ddl in (
                 ("kind", "ALTER TABLE auth_flows ADD COLUMN kind TEXT NOT NULL DEFAULT 'login'"),
                 ("account_id", "ALTER TABLE auth_flows ADD COLUMN account_id TEXT"),
+                ("binding_hash", "ALTER TABLE auth_flows ADD COLUMN binding_hash TEXT NOT NULL DEFAULT ''"),
             ):
                 existing = {row["name"] for row in conn.execute("PRAGMA table_info(auth_flows)")}
                 if column not in existing:
@@ -177,7 +179,7 @@ class Store:
         key = hashlib.sha256(sid.encode()).hexdigest()
         with self._connect() as conn:
             row = conn.execute(
-                """SELECT s.*, a.id AS id, a.email, a.name,
+                """SELECT s.*, a.id AS id, a.email, a.name, a.google_sub,
                           (SELECT id FROM tenants WHERE owner_account_id=a.id LIMIT 1) AS tenant_id
                    FROM account_sessions s
                    JOIN accounts a ON a.id = s.account_id
@@ -202,14 +204,16 @@ class Store:
 
     # -- OAuth flows ------------------------------------------------------
     def create_flow(self, state: str, nonce: str, verifier: str, next_path: str,
-                    kind: str = "login", account_id: str = "") -> None:
+                    kind: str = "login", account_id: str = "",
+                    binding_hash: str = "") -> None:
         with self._connect() as conn:
             conn.execute(
                 """INSERT INTO auth_flows
-                   (state, nonce, verifier, next_path, kind, account_id, created_at, expires_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (state, nonce, verifier, next_path, kind, account_id, binding_hash,
+                    created_at, expires_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (state, nonce, verifier, next_path, kind, account_id or None,
-                 now_iso(), _future(600)),
+                 binding_hash or "", now_iso(), _future(600)),
             )
 
     def consume_flow(self, state: str) -> Optional[Dict[str, Any]]:

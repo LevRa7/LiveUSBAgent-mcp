@@ -1,4 +1,4 @@
-"""Credentials: a device token for the tunnel, a link key for URLs.
+﻿"""Credentials: a device token for the tunnel, a link key for URLs.
 
 The regression this file guards:
 
@@ -91,7 +91,8 @@ def test_new_registration_stores_the_device_token_only_as_a_hash():
     assert "token" not in entry, "the device token must never be stored in plaintext"
     assert entry["token_sha256"] == gateway.hash_secret(data["token"])
     assert data["link_key"].startswith("lk_")
-    assert entry["link_key"] == data["link_key"]
+    assert entry["link_key_sha256"] == gateway.hash_secret(data["link_key"])
+    assert "link_key" not in entry, "the link key must never be stored in plaintext"
     assert data["token"] not in data["sse_url"]
 
 
@@ -114,7 +115,8 @@ def test_re_registration_by_mac_and_name_alone_is_refused():
 
     assert attempt["status_code"] == 409
     assert "token" not in attempt
-    assert "suggested_username" in attempt
+    assert "suggested_username" not in attempt, (
+        "a conflict answer must not confirm which name already exists")
 
 
 def test_re_registration_with_the_device_token_reuses_the_same_node():
@@ -124,7 +126,12 @@ def test_re_registration_with_the_device_token_reuses_the_same_node():
     assert again["status_code"] == 200
     assert again["reused"] is True
     assert again["username"] == "node-one"
-    assert again["link_key"] == first["link_key"], "a re-register must not rotate the link key"
+    # A reinstall gets a fresh key; the old digest stays as an overlap so the
+    # connector the user already pasted keeps working until an explicit rotate.
+    assert again["link_key"] != first["link_key"]
+    entry = _registry()["node-one"]
+    assert gateway.token_matches_link(entry, first["link_key"]) is True
+    assert gateway.token_matches_link(entry, again["link_key"]) is True
     assert set(_registry()) == {"node-one"}
 
 
@@ -166,12 +173,12 @@ def test_link_key_is_not_accepted_where_the_device_token_belongs():
 # ---------------------------------------------------------------------------
 
 def test_rotate_replaces_the_link_key_and_kills_the_old_url(monkeypatch):
-    monkeypatch.setattr(gateway, "ADMIN_TOKEN", "admin-secret")
+    monkeypatch.setattr(gateway, "ADMIN_TOKEN", "admin-secret-0123456789abcdef0123456789")
     data = _register("node-alpha")
 
     response = asyncio.run(gateway.device_rotate(_request(
         method="POST",
-        headers={"X-Admin-Token": "admin-secret"},
+        headers={"X-Admin-Token": "admin-secret-0123456789abcdef0123456789"},
         path_params={"user": "node-alpha"},
     )))
     rotated = json.loads(response.body)
@@ -185,7 +192,7 @@ def test_rotate_replaces_the_link_key_and_kills_the_old_url(monkeypatch):
 
 
 def test_rotation_requires_the_device_token_or_admin(monkeypatch):
-    monkeypatch.setattr(gateway, "ADMIN_TOKEN", "admin-secret")
+    monkeypatch.setattr(gateway, "ADMIN_TOKEN", "admin-secret-0123456789abcdef0123456789")
     data = _register("node-alpha")
 
     denied = asyncio.run(gateway.device_rotate(_request(
@@ -204,7 +211,7 @@ def test_rotation_requires_the_device_token_or_admin(monkeypatch):
 
 
 def test_revoke_removes_the_node(monkeypatch):
-    monkeypatch.setattr(gateway, "ADMIN_TOKEN", "admin-secret")
+    monkeypatch.setattr(gateway, "ADMIN_TOKEN", "admin-secret-0123456789abcdef0123456789")
     data = _register("node-alpha")
 
     response = asyncio.run(gateway.device_revoke(_request(
@@ -241,7 +248,7 @@ def test_pairing_issues_nothing_before_an_admin_approves():
 
 
 def test_pairing_refuses_to_approve_without_admin_rights(monkeypatch):
-    monkeypatch.setattr(gateway, "ADMIN_TOKEN", "admin-secret")
+    monkeypatch.setattr(gateway, "ADMIN_TOKEN", "admin-secret-0123456789abcdef0123456789")
     code = _pair_start()["pair_code"]
     body = json.dumps({"username": "workstation"}).encode()
 
@@ -254,13 +261,13 @@ def test_pairing_refuses_to_approve_without_admin_rights(monkeypatch):
 
 
 def test_pairing_hands_the_credentials_out_exactly_once(monkeypatch):
-    monkeypatch.setattr(gateway, "ADMIN_TOKEN", "admin-secret")
+    monkeypatch.setattr(gateway, "ADMIN_TOKEN", "admin-secret-0123456789abcdef0123456789")
     code = _pair_start()["pair_code"]
     body = json.dumps({"username": "workstation"}).encode()
 
     approved = asyncio.run(gateway.device_pair_approve(_request(
         method="POST", body=body, path_params={"code": code},
-        headers={"X-Admin-Token": "admin-secret"},
+        headers={"X-Admin-Token": "admin-secret-0123456789abcdef0123456789"},
     )))
     assert approved.status_code == 200
 
@@ -286,8 +293,9 @@ def test_a_leaked_pair_code_is_not_enough_to_get_credentials():
 # Legacy registries and logs
 # ---------------------------------------------------------------------------
 
-def test_a_pre_0_4_6_registry_entry_still_authenticates():
+def test_a_pre_0_4_6_registry_entry_still_authenticates(monkeypatch):
     """Upgrading the gateway must not disconnect nodes that already exist."""
+    monkeypatch.setattr(gateway, "ALLOW_LEGACY_QUERY", True)
     gateway.save_registry({"old-node": {"token": "legacy-token", "created_at": "2025-01-01"}})
     ok, _message, user = gateway.verify_token(_request("?user=old-node&token=legacy-token"))
     assert ok is True and user == "old-node"
@@ -297,7 +305,23 @@ def test_a_pre_0_4_6_registry_entry_still_authenticates():
     assert ok_header is True
 
 
-def test_reinstalling_a_legacy_node_keeps_its_existing_url_working():
+def test_legacy_query_credential_is_refused_by_default(monkeypatch):
+    """A device token in the URL is an upgrade path, not a default."""
+    monkeypatch.setattr(gateway, "ALLOW_LEGACY_QUERY", False)
+    gateway.save_registry({"old-node": {
+        "token_sha256": gateway.hash_secret("legacy-token"),
+        "link_key_sha256": gateway.hash_secret("lk_" + "0" * 32),
+        "allow_legacy_query": True,
+    }})
+    ok, _message, _user = gateway.verify_token(_request("?user=old-node&token=legacy-token"))
+    assert ok is False
+    ok_header, _message, _user = gateway.verify_token(
+        _request("?user=old-node", headers={"Authorization": "Bearer legacy-token"})
+    )
+    assert ok_header is True
+
+
+def test_reinstalling_a_legacy_node_keeps_its_existing_url_working(monkeypatch):
     """Re-running the installer must not break the connector already configured.
 
     A pre-0.4.6 node is re-registered with the token it already has: the token is
@@ -307,6 +331,7 @@ def test_reinstalling_a_legacy_node_keeps_its_existing_url_working():
     was the silent breakage this test exists to prevent; `rotate-token` is what
     ends it, deliberately.
     """
+    monkeypatch.setattr(gateway, "ALLOW_LEGACY_QUERY", True)
     gateway.save_registry({"old-node": {"token": "legacy-token", "created_at": "2025-01-01"}})
 
     again = _register("old-node", token="legacy-token")
@@ -336,3 +361,4 @@ def test_access_log_records_are_scrubbed():
     rendered = record.getMessage()
     assert "lk_deadbeef" not in rendered
     assert "token=<redacted>" in rendered
+

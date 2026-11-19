@@ -232,6 +232,7 @@ def test_initialize_closes_the_stream_of_the_superseded_session(tmp_path, monkey
 
 def test_health_reports_last_tunnel_seen_and_tunnel_events(monkeypatch):
     monkeypatch.setattr(gateway, "active_tunnels", {})
+    monkeypatch.setenv("MESH_PUBLIC_HEALTH", "1")   # operator opted in
     _clean_sse_state(monkeypatch)
 
     response = asyncio.run(gateway.health(_request("user=%s" % USER)))

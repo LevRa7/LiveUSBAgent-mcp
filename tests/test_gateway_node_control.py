@@ -9,6 +9,7 @@ caller proves possession of its token or link key.
 
 import asyncio
 import json
+from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
@@ -21,22 +22,27 @@ TOKEN = "0123456789abcdef0123456789abcdef"
 LINK = "lk_0123456789abcdef0123456789abcdef"
 
 
-def _post_request(path, body):
+def _post_request(path, body, headers=None, path_params=None):
     raw = json.dumps(body).encode()
+    raw_headers = [(b"host", b"smart-server.online"),
+                   (b"content-type", b"application/json"),
+                   (b"accept", b"application/json, text/event-stream")]
+    for key, value in (headers or {}).items():
+        raw_headers.append((key.lower().encode(), value.encode()))
     scope = {
         "type": "http",
         "method": "POST",
         "path": path,
         "raw_path": path.encode(),
         "root_path": "",
-        "headers": [(b"host", b"smart-server.online"),
-                    (b"content-type", b"application/json"),
-                    (b"accept", b"application/json, text/event-stream")],
+        "headers": raw_headers,
         "query_string": urlparse(path).query.encode(),
         "scheme": "https",
         "server": ("smart-server.online", 443),
         "client": ("127.0.0.1", 12345),
     }
+    if path_params:
+        scope["path_params"] = path_params
 
     async def receive():
         return {"type": "http.request", "body": raw, "more_body": False}
@@ -171,12 +177,13 @@ def _initialize(relay_result):
     return json.loads(response.body)["result"]["instructions"]
 
 
-def test_initialize_replays_the_active_goal(relay):
+def test_initialize_never_injects_a_node_wide_goal(relay):
+    """Goal is opt-in and node-wide, so the handshake does not carry one."""
     relay.result = {"ok": True, "goal": {"text": "finish the deploy",
                                          "status": "active"}, "active": True}
     instructions = _initialize(relay.result)
-    assert "ACTIVE GOAL" in instructions
-    assert "finish the deploy" in instructions
+    assert "ACTIVE GOAL" not in instructions
+    assert "finish the deploy" not in instructions
 
 
 def test_initialize_without_a_goal_has_no_goal_block(relay):
@@ -297,3 +304,225 @@ def test_claim_does_not_reveal_a_different_error_for_a_wrong_token(relay):
     bridge = gateway.CabinetNodeControl()
     assert bridge.claim("not-registered", TOKEN)["error"] == "unknown_node"
     assert bridge.claim(NODE, "nope")["error"] == "bad_credential"
+
+
+# ---------------------------------------------------------------------------
+# P1-A: the registry snapshot and ownership recorded on claim
+# ---------------------------------------------------------------------------
+
+def _write_registry(data):
+    Path(gateway.REGISTRY_PATH).write_text(json.dumps(data), encoding="utf-8")
+
+
+def _read_registry():
+    return json.loads(Path(gateway.REGISTRY_PATH).read_text(encoding="utf-8"))
+
+
+def test_the_devices_snapshot_carries_metadata_but_no_keys(relay):
+    _write_registry({NODE: {
+        "token_sha256": gateway.hash_secret(TOKEN),
+        "link_key": LINK,
+        "hostname": "node-one-pc",
+        "os": "Windows",
+        "arch": "AMD64",
+        "owner_subject": "google:abc",
+        "account_id": "acc-1",
+        "last_seen": "2026-11-19T07:00:00+00:00",
+    }})
+
+    snapshot = gateway.CabinetNodeControl().devices()
+    entry = snapshot[NODE]
+    assert entry["hostname"] == "node-one-pc"
+    assert entry["os"] == "Windows"
+    assert entry["arch"] == "AMD64"
+    assert entry["owner_subject"] == "google:abc"
+    assert entry["account_id"] == "acc-1"
+    assert entry["last_seen"] == "2026-11-19T07:00:00+00:00"
+    for secret in ("token", "token_sha256", "link_key", "link_key_sha256",
+                   "link_key_prev_sha256"):
+        assert secret not in entry, "the cabinet snapshot must never carry %r" % secret
+
+
+def test_the_devices_snapshot_reflects_the_tunnel_state(relay, monkeypatch):
+    bridge = gateway.CabinetNodeControl()
+    assert bridge.devices()[NODE]["online"] is False
+    monkeypatch.setattr(gateway, "active_tunnels",
+                        {NODE: {"ws": object(), "pending": {}}})
+    assert bridge.devices()[NODE]["online"] is True
+
+
+def test_the_snapshot_falls_back_to_the_node_name_for_a_hostname(relay):
+    _write_registry({NODE: {"token_sha256": gateway.hash_secret(TOKEN)}})
+    assert gateway.CabinetNodeControl().devices()[NODE]["hostname"] == NODE
+
+
+def test_claim_records_the_owner_in_the_registry(relay):
+    bridge = gateway.CabinetNodeControl()
+    result = bridge.claim(NODE, TOKEN, owner_subject="google:abc", account_id="acc-1")
+
+    assert result == {"ok": True, "node": NODE}
+    saved = _read_registry()
+    assert saved[NODE]["owner_subject"] == "google:abc"
+    assert saved[NODE]["account_id"] == "acc-1"
+    # Recording the owner must not disturb the credentials it just verified.
+    assert saved[NODE]["token_sha256"] == gateway.hash_secret(TOKEN)
+    assert saved[NODE]["link_key"] == LINK
+
+
+def test_a_rejected_credential_writes_no_owner(relay):
+    bridge = gateway.CabinetNodeControl()
+    assert bridge.claim(NODE, "nope", owner_subject="google:abc",
+                        account_id="acc-1")["ok"] is False
+    saved = _read_registry()
+    assert "owner_subject" not in saved[NODE]
+    assert "account_id" not in saved[NODE]
+
+
+def test_claim_without_an_owner_leaves_the_registry_alone(relay):
+    bridge = gateway.CabinetNodeControl()
+    assert bridge.claim(NODE, LINK)["ok"] is True
+    saved = _read_registry()
+    assert "owner_subject" not in saved[NODE]
+    assert "account_id" not in saved[NODE]
+
+
+def test_claim_cannot_move_an_owned_node_to_another_account(relay):
+    """A valid key proves access, not the right to steal another tenant's node."""
+    _write_registry({NODE: {
+        "token_sha256": gateway.hash_secret(TOKEN),
+        "owner_subject": "google:first",
+        "account_id": "acc-1",
+    }})
+    result = gateway.CabinetNodeControl().claim(
+        NODE, TOKEN, owner_subject="google:second", account_id="acc-2")
+
+    assert result == {"ok": False, "error": "already_linked"}
+    saved = _read_registry()
+    assert saved[NODE]["owner_subject"] == "google:first"
+    assert saved[NODE]["account_id"] == "acc-1"
+
+
+# ---------------------------------------------------------------------------
+# P1-B: the cabinet approves a pairing code
+# ---------------------------------------------------------------------------
+
+PAIR_BODY = {"hostname": "desk-pc", "os": "Linux", "arch": "x86_64"}
+
+
+@pytest.fixture()
+def pair_code(relay):
+    """A pending pairing that nobody has approved yet."""
+    gateway.pending_pairs.clear()
+    gateway._rate_windows.clear()
+    response = asyncio.run(gateway.device_pair_start(
+        _post_request("/v1/devices/pair", PAIR_BODY)))
+    assert response.status_code == 201
+    try:
+        yield json.loads(response.body)["pair_code"]
+    finally:
+        gateway.pending_pairs.clear()
+        gateway._rate_windows.clear()
+
+
+def test_the_pair_metadata_carries_no_credentials(pair_code):
+    """The browser asks "connect desk-pc?"; it never receives a key."""
+    metadata = gateway.CabinetNodeControl().pair(pair_code)
+
+    assert metadata["hostname"] == "desk-pc"
+    assert metadata["os"] == "Linux"
+    assert metadata["arch"] == "x86_64"
+    assert metadata["approved"] is False
+    assert metadata["owner_subject"] == ""
+    assert metadata["created_at"]
+    assert metadata["expires_in"] > 0
+    assert set(metadata) == {"hostname", "os", "arch", "created_at", "expires_in",
+                             "approved", "owner_subject"}
+    for secret in ("token", "token_sha256", "link_key", "link_key_sha256",
+                   "device_secret", "issued"):
+        assert secret not in metadata
+
+
+def test_an_unknown_pair_code_has_no_metadata():
+    assert gateway.CabinetNodeControl().pair("NOPE-0000") is None
+
+
+def test_approve_pair_creates_the_registry_entry_with_its_owner(pair_code):
+    result = gateway.CabinetNodeControl().approve_pair(
+        pair_code, owner_subject="google:abc", account_id="acc-1")
+
+    assert result["ok"] is True
+    assert result["username"] == "desk-pc"
+    assert "token" not in result and "link_key" not in result
+    saved = _read_registry()
+    entry = saved["desk-pc"]
+    assert entry["owner_subject"] == "google:abc"
+    assert entry["account_id"] == "acc-1"
+    assert entry["hostname"] == "desk-pc"
+    assert entry["os"] == "Linux"
+    assert entry["arch"] == "x86_64"
+    assert entry["token_sha256"] and entry["link_key_sha256"]
+    # The credentials wait for the device that asked for the code, exactly once.
+    issued = gateway.pending_pairs[pair_code]["issued"]
+    assert issued["username"] == "desk-pc"
+    assert issued["link_key"].startswith("lk_")
+    assert issued["token"] not in issued["sse_url"]
+
+
+def test_a_second_approval_is_refused(pair_code):
+    bridge = gateway.CabinetNodeControl()
+    assert bridge.approve_pair(pair_code, owner_subject="google:abc")["ok"] is True
+
+    again = bridge.approve_pair(pair_code, owner_subject="google:other",
+                                account_id="acc-2")
+    assert again == {"ok": False, "error": "already_approved"}
+    saved = _read_registry()
+    assert saved["desk-pc"]["owner_subject"] == "google:abc"
+    assert "desk-pc-2" not in saved, "a refused approval must not create a node"
+
+
+def test_approving_an_unknown_code_is_refused(relay):
+    result = gateway.CabinetNodeControl().approve_pair(
+        "NOPE-0000", owner_subject="google:abc", account_id="acc-1")
+    assert result == {"ok": False, "error": "unknown_pair"}
+    assert "desk-pc" not in _read_registry()
+
+
+def test_an_anonymous_admin_approval_records_no_owner(pair_code, monkeypatch):
+    """The admin API may approve without an account, exactly as before."""
+    monkeypatch.setattr(gateway, "ADMIN_TOKEN", "admin-secret-0123456789abcdef0123456789")
+
+    response = asyncio.run(gateway.device_pair_approve(
+        _post_request("/v1/devices/pair/%s/approve" % pair_code,
+                      {"username": "workstation"},
+                      headers={"x-admin-token": "admin-secret-0123456789abcdef0123456789"},
+                      path_params={"code": pair_code})))
+
+    assert response.status_code == 200
+    assert json.loads(response.body) == {"status": "approved", "username": "workstation"}
+    saved = _read_registry()
+    assert saved["workstation"]["hostname"] == "desk-pc"
+    assert "owner_subject" not in saved["workstation"]
+    assert "account_id" not in saved["workstation"]
+
+
+def test_the_admin_api_still_answers_404_and_409(pair_code, monkeypatch):
+    monkeypatch.setattr(gateway, "ADMIN_TOKEN", "admin-secret-0123456789abcdef0123456789")
+    headers = {"x-admin-token": "admin-secret-0123456789abcdef0123456789"}
+
+    missing = asyncio.run(gateway.device_pair_approve(
+        _post_request("/v1/devices/pair/NOPE-0000/approve", {},
+                      headers=headers, path_params={"code": "NOPE-0000"})))
+    assert missing.status_code == 404
+    assert json.loads(missing.body) == {"error": "unknown_pair"}
+
+    approved = asyncio.run(gateway.device_pair_approve(
+        _post_request("/v1/devices/pair/%s/approve" % pair_code, {},
+                      headers=headers, path_params={"code": pair_code})))
+    assert approved.status_code == 200
+
+    again = asyncio.run(gateway.device_pair_approve(
+        _post_request("/v1/devices/pair/%s/approve" % pair_code, {},
+                      headers=headers, path_params={"code": pair_code})))
+    assert again.status_code == 409
+    assert json.loads(again.body) == {"error": "already_approved"}
+

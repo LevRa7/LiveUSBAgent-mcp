@@ -34,7 +34,14 @@ class FakeBridge:
             "modes": ["read_only", "approval", "full"],
         }
         self.calls = []
+        self.claim_calls = []
         self.claim_answer = {"ok": True, "node": "desk"}
+        #: What the bridge's registry snapshot reports; a test fills it in.
+        self.registry = {}
+        #: Pending pairing codes the bridge knows, and the approvals it saw.
+        self.pairs = {}
+        self.approve_calls = []
+        self.approve_answer = {"ok": True, "username": "desk-pc", "hostname": "desk-pc"}
 
     def available(self):
         return True
@@ -42,8 +49,32 @@ class FakeBridge:
     def online(self, node):
         return True
 
-    def claim(self, node, credential):
+    def devices(self):
+        return {name: dict(entry) for name, entry in self.registry.items()}
+
+    def claim(self, node, credential, owner_subject="", account_id=""):
+        self.claim_calls.append({
+            "node": node,
+            "credential": credential,
+            "owner_subject": owner_subject,
+            "account_id": account_id,
+        })
         return dict(self.claim_answer)
+
+    def pair(self, code):
+        entry = self.pairs.get(code)
+        return dict(entry) if entry else None
+
+    def approve_pair(self, code, owner_subject="", account_id=""):
+        self.approve_calls.append({
+            "code": code,
+            "owner_subject": owner_subject,
+            "account_id": account_id,
+        })
+        answer = dict(self.approve_answer)
+        if answer.get("ok") and code in self.pairs:
+            self.pairs[code]["approved"] = True
+        return answer
 
     async def call(self, node, payload):
         self.calls.append((node, dict(payload)))
@@ -288,3 +319,174 @@ def test_a_device_cannot_be_claimed_by_a_second_tenant(cabinet, tmp_path):
     second = store.claim_device("tenant-other", "desk")
     assert second is None
     assert store.device(first["id"], "tenant-other") is None
+
+
+# ---------------------------------------------------------------------------
+# P1-A: ownership recorded in the registry and the merged device list
+# ---------------------------------------------------------------------------
+
+OWN_SUBJECT = "google:google-sub-1"
+
+
+def registry_device(**overrides):
+    entry = {
+        "hostname": "desk-pc",
+        "os": "Linux",
+        "arch": "x86_64",
+        "owner_subject": OWN_SUBJECT,
+        "account_id": "",
+        "last_seen": "2026-11-19T07:00:00+00:00",
+        "online": True,
+    }
+    entry.update(overrides)
+    return entry
+
+
+def test_claim_tells_the_bridge_who_owns_the_node(cabinet):
+    client, app, bridge, session = cabinet
+    claim_device(client, session)
+
+    assert bridge.claim_calls
+    call = bridge.claim_calls[-1]
+    assert call["node"] == "desk"
+    assert call["credential"] == "lk_secret"
+    assert call["owner_subject"] == OWN_SUBJECT
+    assert call["account_id"] == session["id"]
+
+
+def test_a_registry_device_with_the_same_owner_is_listed_without_a_manual_claim(cabinet):
+    client, app, bridge, session = cabinet
+    bridge.registry["desk"] = registry_device(
+        link_key="lk_must_not_render", token_sha256="deadbeef")
+
+    page = client.get("/")
+    assert page.status_code == 200
+    # A node the owner already proved (installed/pair-approved) shows up on its
+    # own: no link key needs to be pasted again.
+    assert "desk" in page.text
+    assert "desk-pc" in page.text
+    assert "Linux" in page.text
+    assert "adopted" in page.text
+    assert "lk_must_not_render" not in page.text
+    assert "deadbeef" not in page.text
+
+    devices = app.state.account_store.list_devices(session["tenant_id"])
+    assert [item["node_name"] for item in devices] == ["desk"]
+    assert devices[0]["display_name"] == "desk-pc"
+    assert devices[0]["claimed_at"]
+
+
+def test_a_registry_device_is_adopted_once_not_on_every_visit(cabinet):
+    client, app, bridge, session = cabinet
+    bridge.registry["desk"] = registry_device()
+
+    client.get("/")
+    client.get("/")
+    devices = app.state.account_store.list_devices(session["tenant_id"])
+    assert [item["node_name"] for item in devices] == ["desk"]
+
+
+def test_another_owners_registry_device_is_not_listed(cabinet):
+    client, app, bridge, session = cabinet
+    bridge.registry["stranger"] = registry_device(
+        hostname="stranger-pc", owner_subject="google:someone-else",
+        account_id="account-other")
+
+    page = client.get("/")
+    assert "stranger" not in page.text
+    assert app.state.account_store.list_devices(session["tenant_id"]) == []
+
+
+def test_a_database_row_without_a_registry_entry_is_marked_missing(cabinet):
+    client, app, bridge, session = cabinet
+    claim_device(client, session)                 # registry snapshot stays empty
+    assert bridge.registry == {}
+
+    page = client.get("/")
+    assert page.status_code == 200
+    assert "desk" in page.text
+    assert "нет связи с реестром" in page.text
+
+
+# ---------------------------------------------------------------------------
+# P1-C: the opt-in list of unclaimed devices
+# ---------------------------------------------------------------------------
+
+def unclaimed_part(text):
+    """Everything after the section heading; it only exists when the flag is on."""
+    return text.split("Непривязанные устройства", 1)[1]
+
+
+def unclaimed_table(text):
+    """The metadata table alone - the claim form below it is not part of it."""
+    return unclaimed_part(text).split("<form", 1)[0]
+
+
+def test_the_unclaimed_section_is_off_by_default(cabinet, monkeypatch):
+    monkeypatch.delenv("MESH_CABINET_SHOW_UNCLAIMED", raising=False)
+    client, app, bridge, _ = cabinet
+    bridge.registry["spare"] = registry_device(
+        hostname="spare-pc", owner_subject="", account_id="")
+
+    page = client.get("/")
+    assert page.status_code == 200
+    # A shared gateway must not advertise machines nobody has claimed yet.
+    assert "Непривязанн" not in page.text
+    assert "spare" not in page.text
+
+
+def test_the_unclaimed_section_lists_the_node_and_offers_the_claim_form(cabinet, monkeypatch):
+    monkeypatch.setenv("MESH_CABINET_SHOW_UNCLAIMED", "1")
+    client, app, bridge, session = cabinet
+    bridge.registry["spare"] = registry_device(
+        hostname="spare-pc", os="Linux", arch="x86_64", owner_subject="", account_id="")
+
+    page = client.get("/")
+    assert page.status_code == 200
+    section = unclaimed_part(page.text)
+    assert "spare" in section
+    assert "spare-pc" in section
+    assert "Linux x86_64" in section
+    assert "2026-11-19T07:00:00+00:00" in section
+    # The linking form: CSRF, the fixed node name and the proof itself.
+    assert "action=\"/account/devices/claim\"" in section
+    assert "name=csrf" in section
+    assert session["csrf"] in section
+    assert "name=node" in section
+    assert "value=\"spare\" readonly" in section
+    assert "name=credential" in section
+    assert "type=password" in section
+    assert "lk_... или токен устройства" in section
+
+
+def test_a_foreign_owners_node_never_appears_in_the_unclaimed_section(cabinet, monkeypatch):
+    monkeypatch.setenv("MESH_CABINET_SHOW_UNCLAIMED", "1")
+    client, app, bridge, _ = cabinet
+    bridge.registry["stranger"] = registry_device(
+        hostname="stranger-pc", owner_subject="google:someone-else",
+        account_id="account-other")
+
+    page = client.get("/")
+    assert "stranger" not in page.text
+    # Nothing is unclaimed, so the section says exactly that.
+    assert "Непривязанных устройств нет" in page.text
+
+
+def test_the_unclaimed_section_renders_no_keys(cabinet, monkeypatch):
+    monkeypatch.setenv("MESH_CABINET_SHOW_UNCLAIMED", "1")
+    client, app, bridge, _ = cabinet
+    bridge.registry["spare"] = registry_device(
+        hostname="spare-pc", owner_subject="", account_id="",
+        link_key="lk_supersecret_value", token="tok_supersecret_value",
+        token_sha256="sha_supersecret_value")
+
+    page = client.get("/")
+    for secret in ("lk_supersecret_value", "tok_supersecret_value",
+                   "sha_supersecret_value"):
+        assert secret not in page.text
+    # The metadata table carries names and times only, never a credential.
+    table = unclaimed_table(page.text)
+    assert "lk_" not in table
+    assert "token" not in table.lower()
+
+

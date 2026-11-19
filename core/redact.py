@@ -20,8 +20,10 @@ REDACTED = "<REDACTED>"
 
 # A value that is a shell variable reference or a placeholder is not a
 # credential, so it is left as it is: the command stays readable, and redaction
-# is stable when it runs twice over the same string.
-_NOT_A_SECRET = re.compile(r"^[$<]")
+# is stable when it runs twice over the same string. The check is anchored to a
+# whole variable name: a generated password that merely starts with "$" is still
+# a secret and must be masked.
+_NOT_A_SECRET = re.compile(r"^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$|^<[^>]*>$")
 
 # Every pattern exposes the same three groups - prefix, value, suffix - so one
 # replacement function can serve all of them and keep the surrounding syntax
@@ -40,7 +42,7 @@ _PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"(?P<prefix>(?i:\b(?:password|passwd|passphrase|secret|token|api[_-]?key"
         r"|access[_-]?key|client[_-]?secret|auth[_-]?token)\b\s*[:=]\s*(?P<quote>['\"]?)))"
-        r"(?P<value>[^\s'\"]{8,})"
+        r"(?P<value>[^\s'\"]{3,})"
         r"(?P<suffix>(?P=quote))"
     ),
     # Google OAuth: access token, refresh token, client secret.

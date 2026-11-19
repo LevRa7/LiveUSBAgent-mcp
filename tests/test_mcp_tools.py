@@ -89,9 +89,8 @@ def test_tools_surface_contains_all_tools():
         # the remote-control lock). Sits next to self-update: both change the
         # node itself rather than the files on it.
         "node_control",
-        # The persistent objective, set from the chat: a note that outlives the
-        # session, next to the switches it usually accompanies.
-        "goal",
+        # The persistent objective is opt-in (MESH_GOAL=1): one node-wide note
+        # would leak between chats, so it is absent from tools/list by default.
         # Timers: long work continues after the chat's call budget ends.
         "schedule",
         # The device branch (the node's own phone or laptop), added in the same

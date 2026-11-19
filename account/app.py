@@ -10,7 +10,10 @@ a node's settings itself.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import html
+import os
 import time
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
@@ -66,6 +69,11 @@ CLAIM_ERRORS = {
     "rate_limited": "Слишком много попыток привязки. Подождите несколько минут.",
 }
 
+PAIR_ERRORS = {
+    "unknown_pair": "Код привязки не найден или истёк.",
+    "already_approved": "Этот код уже подтверждён.",
+}
+
 
 def _headers(response: Response) -> Response:
     response.headers["Cache-Control"] = "no-store"
@@ -104,6 +112,43 @@ def create_app(config: Optional[AccountConfig] = None,
     #: Per-tenant claim attempts: a code or credential is guessable only if the
     #: caller may try forever, so the cabinet slows the obvious attack down.
     claim_guard: Dict[str, List[float]] = {}
+    #: Per-IP windows for the OAuth start/callback. Without them a login loop
+    #: fills the auth_flows table and turns /account into a CPU burner.
+    login_hits: Dict[str, List[float]] = {}
+
+    def login_rate_limited(request: Request, bucket: str, limit: int = 20,
+                           window: float = 60.0) -> bool:
+        key = "%s:%s" % (bucket, request.client.host if request.client else "unknown")
+        now = time.time()
+        if len(login_hits) > 4096:
+            for stale in [k for k, stamps in login_hits.items()
+                          if not stamps or now - stamps[-1] > 300]:
+                login_hits.pop(stale, None)
+        seen = [stamp for stamp in login_hits.get(key, []) if now - stamp < window]
+        if len(seen) >= limit:
+            login_hits[key] = seen
+            return True
+        seen.append(now)
+        login_hits[key] = seen
+        return False
+
+    def owner_allowed(claims: Dict[str, Any]) -> bool:
+        """Optional allowlist: only these Google accounts may sign in.
+
+        Empty MESH_OWNER_EMAILS/MESH_OWNER_DOMAINS keeps the old behaviour
+        (any verified Google account), which is fine for a personal gateway but
+        not for a shared one.
+        """
+        emails = {item.strip().lower() for item in
+                  os.environ.get("MESH_OWNER_EMAILS", "").split(",") if item.strip()}
+        domains = {item.strip().lower() for item in
+                   os.environ.get("MESH_OWNER_DOMAINS", "").split(",") if item.strip()}
+        if not emails and not domains:
+            return True
+        email = str(claims.get("email") or "").lower()
+        if not email:
+            return False
+        return email in emails or any(email.endswith("@" + domain) for domain in domains)
 
     def current(request: Request) -> Optional[Dict[str, Any]]:
         if store is None or not cfg.configured:
@@ -117,16 +162,210 @@ def create_app(config: Optional[AccountConfig] = None,
     def gateway_ready() -> bool:
         return node_control is not None and bool(getattr(node_control, "available", lambda: False)())
 
-    def nodes_for(account: Dict[str, Any]) -> List[Dict[str, Any]]:
-        if store is None:
-            return []
-        return store.list_devices(account["tenant_id"])
-
     def online(node: str) -> bool:
         try:
             return bool(node_control.online(node))
         except Exception:
             return False
+
+    def owner_subject(account: Dict[str, Any]) -> str:
+        """The registry-side owner id: the Google subject, namespaced.
+
+        ``registry.json`` stores a provider-prefixed subject (``google:<sub>``)
+        rather than a bare sub, so a second identity provider can be added
+        without rewriting existing ownership.
+        """
+        sub = str(account.get("google_sub") or "").strip()
+        return ("google:" + sub) if sub else str(account.get("owner_subject") or "")
+
+    def registry_devices() -> Dict[str, Dict[str, Any]]:
+        """The bridge's registry snapshot; an absent or old bridge means none."""
+        if node_control is None:
+            return {}
+        reader = getattr(node_control, "devices", None)
+        if not callable(reader):
+            return {}
+        try:
+            snapshot = reader()
+        except Exception:                         # a broken registry is not a 500
+            return {}
+        if not isinstance(snapshot, dict):
+            return {}
+        return {str(name): dict(entry) for name, entry in snapshot.items()
+                if isinstance(entry, dict)}
+
+    def pair_code_from(request: Request) -> str:
+        """The pairing code from the query or the path, reduced to its alphabet.
+
+        Codes are generated as ``XXXX-XXXX`` from an unambiguous alphabet. Only
+        those characters survive here, which keeps the value safe to echo into a
+        redirect and an HTML form even when the URL was typed by hand.
+        """
+        raw = str(request.query_params.get("code")
+                  or request.path_params.get("code") or "")
+        return "".join(ch for ch in raw.strip().upper()
+                       if ch.isalnum() or ch == "-")[:32]
+
+    def pair_metadata(code: str) -> Optional[Dict[str, Any]]:
+        """The bridge's metadata for a pending code; no key ever passes through.
+
+        An absent or failing bridge means "unknown code", which the page answers
+        with a 404 - a bridge exception must not become a 500 on a public page.
+        """
+        if not code or node_control is None:
+            return None
+        reader = getattr(node_control, "pair", None)
+        if not callable(reader):
+            return None
+        try:
+            metadata = reader(code)
+        except Exception:                     # a broken bridge is an unknown code
+            return None
+        return dict(metadata) if isinstance(metadata, dict) else None
+
+    def pair_problem_page(status: int, heading: str, hint: str) -> HTMLResponse:
+        return page(
+            heading,
+            "<div class=card><h1>%s</h1><p class=muted>%s</p>"
+            "<p><a class=btn href=\"/account\">В кабинет</a></p></div>"
+            % (_esc(heading), _esc(hint)),
+            status,
+        )
+
+    def merged_device(row: Dict[str, Any], entry: Dict[str, Any], node: str,
+                      source: str) -> Dict[str, Any]:
+        """One list row: the account.db record plus the registry's metadata.
+
+        The account database knows the tenant, the display name and the claim
+        date; the registry knows the hostname, the OS and the tunnel state. A row
+        without a registry entry is kept and flagged (``missing``) instead of
+        disappearing, so a wiped registry does not silently hide a device.
+        """
+        item = dict(row)
+        item["hostname"] = str(entry.get("hostname") or "")
+        item["os"] = str(entry.get("os") or "")
+        item["arch"] = str(entry.get("arch") or "")
+        item["last_seen"] = str(entry.get("last_seen") or "")
+        item["online"] = bool(entry.get("online")) if entry else online(node)
+        item["source"] = source
+        item["missing"] = not entry
+        return item
+
+    def nodes_for(account: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """The one device list: account.db rows plus the registry's owned nodes.
+
+        ``registry.json`` is the truth about ownership and credentials,
+        ``account.db`` about the tenant and the display name. Merging by
+        ``node_name`` makes a node that already carries ``owner_subject`` appear
+        in its owner's cabinet without a manual link-key dance; the first visit
+        creates the account.db row lazily (``adopted``), because every later
+        page and control route addresses devices by their database id.
+        """
+        if store is None:
+            return []
+        tenant = account["tenant_id"]
+        snapshot = registry_devices()
+        subject = owner_subject(account)
+        owner_id = str(account.get("id") or "")
+        merged: List[Dict[str, Any]] = []
+        seen = set()
+        for row in store.list_devices(tenant):
+            node = str(row.get("node_name") or "")
+            seen.add(node)
+            merged.append(merged_device(row, snapshot.get(node) or {}, node, "browser"))
+        for node in sorted(snapshot):
+            if node in seen:
+                continue
+            entry = snapshot[node]
+            owned = ((subject and entry.get("owner_subject") == subject)
+                     or (owner_id and entry.get("account_id") == owner_id))
+            if not owned:
+                continue
+            hostname = str(entry.get("hostname") or "") or node
+            try:
+                row = store.claim_device(tenant, node, display_name=hostname)
+            except Exception:                     # a concurrent first visit already won
+                row = None
+            if row is None:                       # already linked to another tenant
+                continue
+            merged.append(merged_device(row, entry, node, "adopted"))
+        return merged
+
+    def show_unclaimed() -> bool:
+        """Whether the migration list of ownerless nodes is shown at all.
+
+        Off by default: a shared gateway must not advertise machines that belong
+        to somebody else, and the list only helps while existing devices are
+        being moved into accounts.
+        """
+        return _is_true(os.environ.get("MESH_CABINET_SHOW_UNCLAIMED", ""))
+
+    def unclaimed_devices(limit: int = 50) -> List[Dict[str, Any]]:
+        """Registry nodes with no owner and no account: candidates for a claim.
+
+        A node counts as unclaimed only when both ``owner_subject`` and
+        ``account_id`` are empty - a half-written entry still belongs to
+        somebody, and showing it would leak the existence of a foreign device.
+        Keys never reach this list: the bridge's snapshot carries metadata only.
+        """
+        snapshot = registry_devices()
+        found: List[Dict[str, Any]] = []
+        for node in sorted(snapshot):
+            entry = snapshot[node]
+            if str(entry.get("owner_subject") or "").strip():
+                continue
+            if str(entry.get("account_id") or "").strip():
+                continue
+            found.append({
+                "node": node,
+                "hostname": str(entry.get("hostname") or ""),
+                "os": str(entry.get("os") or ""),
+                "arch": str(entry.get("arch") or ""),
+                "last_seen": str(entry.get("last_seen") or ""),
+            })
+            if len(found) >= limit:
+                break
+        return found
+
+    def unclaimed_card(csrf: str) -> str:
+        """The opt-in section: names and metadata, the proof is still a key."""
+        if not show_unclaimed():
+            return ""
+        items = unclaimed_devices()
+        if not items:
+            return ("<div class=card><h2>Непривязанные устройства</h2>"
+                    "<p class=muted>Непривязанных устройств нет.</p></div>")
+        rows = []
+        for item in items:
+            os_arch = " ".join(part for part in (item.get("os"), item.get("arch"))
+                               if part) or "—"
+            rows.append(
+                "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
+                % (_esc(item.get("node")), _esc(item.get("hostname") or "—"),
+                   _esc(os_arch), _esc(item.get("last_seen") or "—"))
+            )
+        # One form per node: the name is fixed (the key is the proof, not the
+        # name), so a single shared form would leave all but one row unusable.
+        forms = []
+        for item in items:
+            forms.append(
+                "<form method=post action=\"/account/devices/claim\">"
+                "<input type=hidden name=csrf value=\"%s\">"
+                "<div class=row><input type=text name=node value=\"%s\" readonly>"
+                "<input type=password name=credential "
+                "placeholder=\"lk_... или токен устройства\">"
+                "<button class=btn type=submit>Привязать</button></div></form>"
+                % (_esc(csrf), _esc(item.get("node")))
+            )
+        return (
+            "<div class=card><h2>Непривязанные устройства</h2>"
+            "<p class=muted>Эти узлы зарегистрированы на шлюзе, но ещё не принадлежат "
+            "аккаунту. Имя узла уже подставлено; ключ показывает сама машина "
+            "(<code>rhm --once</code>).</p>"
+            "<table><tr><th>Узел</th><th>Hostname</th><th>ОС</th>"
+            "<th>Последняя активность</th></tr>%s</table>%s</div>"
+            % ("".join(rows), "".join(forms))
+        )
 
     async def snapshot(node: str) -> Dict[str, Any]:
         """One ``node_control`` status call; never raises."""
@@ -176,7 +415,12 @@ def create_app(config: Optional[AccountConfig] = None,
 
     def csrf_ok(request: Request, account: Dict[str, Any], form: Any) -> bool:
         supplied = str(form.get("csrf") or "")
-        return bool(supplied) and supplied == str(account.get("csrf") or "")
+        if not supplied or supplied != str(account.get("csrf") or ""):
+            return False
+        # A browser always sends Origin on a cross-site POST; a mismatch means
+        # the form was submitted from another site even if the token leaked.
+        origin = request.headers.get("origin")
+        return origin is None or origin == cfg.base_url.rstrip("/")
 
     # -- rendering ---------------------------------------------------------
 
@@ -322,19 +566,34 @@ def create_app(config: Optional[AccountConfig] = None,
         for device in devices:
             node = str(device.get("node_name") or "")
             state = await snapshot(node)
+            label = str(device.get("display_name") or node)
+            hostname = str(device.get("hostname") or "") or "—"
+            os_arch = " ".join(str(part) for part in
+                               (device.get("os"), device.get("arch")) if part) or "—"
+            claimed = str(device.get("claimed_at") or "")[:10] or "—"
             lock = (state.get("remote_control") or {}).get("enabled")
             lock_label = ("—" if lock is None else ("включено" if lock else "выключено"))
+            # The registry is the truth about ownership; a row whose entry is
+            # gone cannot be reached or controlled, and the page must say so.
+            missing_note = (" <span class=pill off>нет связи с реестром</span>"
+                            if device.get("missing") else "")
             rows.append(
-                "<tr><td><a href=\"/account/devices/%s\">%s</a></td>"
-                "<td>%s</td><td>%s</td><td>%s</td></tr>"
-                % (_esc(device.get("id")), _esc(node),
-                   "онлайн" if online(node) else "офлайн",
-                   _esc(state.get("access_mode") or "—"), lock_label)
+                "<tr><td><a href=\"/account/devices/%s\">%s</a>%s</td>"
+                "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+                "<td>%s</td><td>%s</td></tr>"
+                % (_esc(device.get("id")), _esc(label), missing_note,
+                   _esc(hostname), _esc(os_arch),
+                   "онлайн" if device.get("online") else "офлайн",
+                   _esc(state.get("access_mode") or "—"),
+                   _esc(lock_label),
+                   _esc(claimed), _esc(device.get("source") or "browser"))
             )
 
         device_table = (
-            "<table><tr><th>Устройство</th><th>Связь</th><th>Режим</th>"
-            "<th>Удалённое управление</th></tr>%s</table>" % "".join(rows)
+            "<table><tr><th>Устройство</th><th>Hostname</th><th>ОС</th>"
+            "<th>Связь</th><th>Режим</th><th>Удалённое управление</th>"
+            "<th>Привязано</th><th>Источник</th></tr>%s</table>"
+            % "".join(rows)
             if rows else
             "<p class=muted>Устройства ещё не привязаны.</p>"
         )
@@ -382,7 +641,10 @@ def create_app(config: Optional[AccountConfig] = None,
                "<p class=muted>Не подключён.</p>"
                "<a class=btn href=\"/account/drive/connect\">Подключить Drive</a>")
         )
-        body = feedback(request) + lock_card + account_card + drive_card + devices_card
+        # The migration list sits right below the device table: it is opt-in
+        # (MESH_CABINET_SHOW_UNCLAIMED), so the common page is unchanged.
+        body = (feedback(request) + lock_card + account_card + drive_card
+                + devices_card + unclaimed_card(csrf))
         if request.query_params.get("welcome") == "1":
             # The setting the product asks about right after the login: a modal
             # over the dashboard, with the same controls as the page below.
@@ -427,6 +689,102 @@ def create_app(config: Optional[AccountConfig] = None,
         )
         return page("Настройки — %s" % node, body)
 
+    async def pair_page(request: Request) -> Response:
+        """The one page that turns a pairing code into a device of this account."""
+        code = pair_code_from(request)
+        account = await require(request)
+        if account is None:
+            # The code survives the login round-trip: the device is polling and
+            # the person must land back on the same confirmation.
+            return RedirectResponse("/account/login?next=/account/pair?code=" + code,
+                                    status_code=303)
+        metadata = pair_metadata(code)
+        if metadata is None:
+            return pair_problem_page(
+                404, "Код привязки не найден",
+                "Код действует 10 минут. Запустите привязку на устройстве заново "
+                "и подтвердите новый код.")
+        hostname = str(metadata.get("hostname") or "") or "устройство"
+        os_arch = " ".join(str(part) for part in
+                           (metadata.get("os"), metadata.get("arch")) if part) or "неизвестно"
+        if metadata.get("approved"):
+            return pair_problem_page(
+                409, "Этот код уже подтверждён",
+                "Коды одноразовые: устройство, которому он выдавался, уже получило "
+                "доступ. Если это не ваше устройство, ничего не делайте.")
+        minutes = max(0, int(metadata.get("expires_in") or 0)) // 60
+        body = (
+            "%s<div class=card><h1>%s</h1>"
+            "<p class=muted>Устройство просит подключить его к вашему кабинету. "
+            "Код <code>%s</code> действует ещё %d мин.</p>"
+            "<p>Система: %s</p>"
+            "<p class=muted>Подтверждайте только ту машину, которую вы сами только что "
+            "подключали: после подтверждения она получит доступ к вашему кабинету.</p>"
+            "<form method=post action=\"/account/pair/%s/approve\">"
+            "<input type=hidden name=csrf value=\"%s\">"
+            "<button class=btn type=submit>Подключить</button></form>"
+            "<p><a class=\"btn secondary\" href=\"/account\">В кабинет</a></p></div>"
+            % (feedback(request), _esc(hostname), _esc(code), minutes, _esc(os_arch),
+               _esc(code), _esc(account.get("csrf")))
+        )
+        return page("Привязка — %s" % hostname, body)
+
+    async def pair_approve(request: Request) -> Response:
+        """Confirm a code: a session, a CSRF token and a matching Origin are required."""
+        code = pair_code_from(request)
+        account = await require(request)
+        if account is None:
+            return RedirectResponse("/account/login?next=/account/pair?code=" + code,
+                                    status_code=303)
+        if request.method != "POST" or store is None:
+            return _headers(Response("Use POST", status_code=405))
+        form = await request.form()
+        if not csrf_ok(request, account, form):
+            return page("Ошибка", "<div class=card><h1>CSRF-токен неверен</h1></div>", 403)
+        metadata = pair_metadata(code)
+        if metadata is None:
+            return pair_problem_page(
+                404, "Код привязки не найден",
+                "Код действует 10 минут. Запустите привязку на устройстве заново.")
+        if metadata.get("approved"):
+            return pair_problem_page(
+                409, "Этот код уже подтверждён",
+                "Коды одноразовые: второй раз один и тот же код не срабатывает.")
+        if not gateway_ready():
+            return back("/account", {"error": "Шлюз не подключён: привязка недоступна."})
+        try:
+            result = node_control.approve_pair(
+                code,
+                owner_subject=owner_subject(account),
+                account_id=str(account.get("id") or ""),
+            )
+        except Exception as exc:
+            return back("/account", {"error": "%s: %s" % (type(exc).__name__, exc)})
+        if not result.get("ok"):
+            error = str(result.get("error") or "")
+            if error == "unknown_pair":
+                return pair_problem_page(
+                    404, "Код привязки не найден",
+                    "Код действует 10 минут. Запустите привязку на устройстве заново.")
+            if error == "already_approved":
+                return pair_problem_page(
+                    409, "Этот код уже подтверждён",
+                    "Коды одноразовые: второй раз один и тот же код не срабатывает.")
+            return back("/account", {"error": PAIR_ERRORS.get(
+                error, "Не удалось подтвердить привязку.")})
+        node = str(result.get("username") or "").strip()
+        if not node:
+            return back("/account", {"error": "Шлюз не вернул имя устройства."})
+        hostname = str(result.get("hostname") or metadata.get("hostname") or "") or node
+        # The registry now carries the owner; the cabinet row is what every later
+        # page addresses by id, so a successful approval always writes one.
+        device = store.claim_device(account["tenant_id"], node, display_name=hostname)
+        if device is None:
+            return back("/account", {"error": CLAIM_ERRORS["already_linked"]})
+        # Keys are not shown on purpose: the device that asked for the code
+        # collects its token and link key itself.
+        return back("/account", {"message": "Устройство %s привязано." % node})
+
     async def claim(request: Request) -> Response:
         account = await require(request)
         if account is None:
@@ -449,7 +807,11 @@ def create_app(config: Optional[AccountConfig] = None,
         if not gateway_ready():
             return back("/account", {"error": "Шлюз не подключён: привязка недоступна."})
         try:
-            verified = node_control.claim(node, credential)
+            verified = node_control.claim(
+                node, credential,
+                owner_subject=owner_subject(account),
+                account_id=str(account.get("id") or ""),
+            )
         except Exception as exc:
             return back("/account", {"error": "%s: %s" % (type(exc).__name__, exc)})
         if not verified.get("ok"):
@@ -542,13 +904,17 @@ def create_app(config: Optional[AccountConfig] = None,
         state = auth.new_state()
         nonce = auth.new_nonce()
         verifier = auth.new_verifier()
+        binding = auth.new_state()
         store.create_flow(state, nonce, verifier, "/account/drive",
-                          kind="drive", account_id=account["id"])
-        return RedirectResponse(
+                          kind="drive", account_id=account["id"],
+                          binding_hash=hashlib.sha256(binding.encode()).hexdigest())
+        response = RedirectResponse(
             auth.build_auth_url(cfg, state, nonce, verifier, scopes=auth.DRIVE_SCOPES,
                                 access_type="offline", prompt="consent"),
             status_code=302,
         )
+        sessions.set_login_cookie(response, binding, cfg.base_url)
+        return response
 
     async def drive_disconnect(request: Request) -> Response:
         account = await require(request)
@@ -578,15 +944,29 @@ def create_app(config: Optional[AccountConfig] = None,
     async def start(request: Request) -> Response:
         if not cfg.configured:
             return page("Не настроено", "<div class=card><h1>OAuth не настроен</h1></div>", 503)
+        if login_rate_limited(request, "start"):
+            return page("Подождите", "<div class=card><h1>Слишком много попыток входа</h1>"
+                                     "<p class=muted>Повторите через минуту.</p></div>", 429)
         state = auth.new_state()
         nonce = auth.new_nonce()
         verifier = auth.new_verifier()
-        store.create_flow(state, nonce, verifier, auth.sanitize_next(request.query_params.get("next")))
-        return RedirectResponse(auth.build_auth_url(cfg, state, nonce, verifier), status_code=302)
+        binding = auth.new_state()
+        store.create_flow(
+            state, nonce, verifier, auth.sanitize_next(request.query_params.get("next")),
+            binding_hash=hashlib.sha256(binding.encode()).hexdigest(),
+        )
+        response = RedirectResponse(auth.build_auth_url(cfg, state, nonce, verifier), status_code=302)
+        # The callback must arrive in the same browser that started the flow:
+        # otherwise a link with somebody else's state can attach their identity
+        # to this session.
+        sessions.set_login_cookie(response, binding, cfg.base_url)
+        return response
 
     async def callback(request: Request) -> Response:
         if not cfg.configured:
             return page("Не настроено", "<div class=card><h1>OAuth не настроен</h1></div>", 503)
+        if login_rate_limited(request, "callback"):
+            return page("Подождите", "<div class=card><h1>Слишком много попыток входа</h1></div>", 429)
         error = request.query_params.get("error")
         state = request.query_params.get("state", "")
         if error:
@@ -596,6 +976,15 @@ def create_app(config: Optional[AccountConfig] = None,
         if flow is None:
             return page("Вход отклонён", "<div class=card><h1>Сессия входа истекла</h1>"
                         "<p class=muted>Повторите вход.</p><a class=btn href=\"/account/login\">Войти</a></div>", 400)
+        binding = sessions.login_binding(request, cfg.base_url)
+        expected = str(flow.get("binding_hash") or "")
+        if expected and (not binding or not hmac.compare_digest(
+                hashlib.sha256(binding.encode()).hexdigest(), expected)):
+            response = page("Вход отклонён", "<div class=card><h1>Ссылка входа открыта в другом браузере</h1>"
+                                             "<p class=muted>Начните вход заново из кабинета.</p>"
+                                             "<a class=btn href=\"/account/login\">Войти</a></div>", 400)
+            sessions.clear_login_cookie(response, cfg.base_url)
+            return response
         code = request.query_params.get("code", "")
         if not code:
             return page("Вход отклонён", "<div class=card><h1>Нет кода авторизации</h1></div>", 400)
@@ -624,6 +1013,11 @@ def create_app(config: Optional[AccountConfig] = None,
         if claims is None:
             return page("Ошибка входа", "<div class=card><h1>Токен отклонён</h1>"
                         "<p class=muted>%s</p></div>" % html.escape(problem), 400)
+        if not owner_allowed(claims):
+            response = page("Доступ закрыт", "<div class=card><h1>Этот аккаунт не в списке владельцев</h1>"
+                                             "<p class=muted>Обратитесь к оператору шлюза.</p></div>", 403)
+            sessions.clear_login_cookie(response, cfg.base_url)
+            return response
         account = store.upsert_account(claims)
         session = store.create_session(account["id"])
         target = flow.get("next_path") or "/account"
@@ -633,6 +1027,7 @@ def create_app(config: Optional[AccountConfig] = None,
             target = "/account?welcome=1"
         response = RedirectResponse(target, status_code=303)
         sessions.set_cookie(response, session["id"], cfg.session_secret, cfg.base_url)
+        sessions.clear_login_cookie(response, cfg.base_url)
         return _headers(response)
 
     async def logout(request: Request) -> Response:
@@ -653,6 +1048,9 @@ def create_app(config: Optional[AccountConfig] = None,
 
     app = Starlette(routes=[
         Route("/", root, methods=["GET", "HEAD"]),
+        # Pairing: the code is typed by the device, the confirmation by the owner.
+        Route("/pair", pair_page, methods=["GET", "HEAD"]),
+        Route("/pair/{code}/approve", pair_approve, methods=["POST"]),
         Route("/devices/claim", claim, methods=["POST"]),
         Route("/devices/{device_id}", device_page, methods=["GET", "HEAD"]),
         Route("/devices/{device_id}/control", device_control, methods=["POST"]),

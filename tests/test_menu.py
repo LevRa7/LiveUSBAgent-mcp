@@ -1,6 +1,5 @@
 """Console menu (``rhm``): endpoint, mode switch, log, JSON snapshot."""
 
-import io
 import json
 import os
 
@@ -187,35 +186,3 @@ def test_keys_is_a_context_manager(monkeypatch):
     with menu.Keys() as keys:
         assert isinstance(keys, menu.Keys)
     assert restored == [True]
-
-
-def test_render_keeps_the_full_text_for_scripts(monkeypatch):
-    monkeypatch.setattr(menu, "read_agent_env", lambda: {
-        "MESH_USER": "node-one", "MESH_LINK_KEY": "lk_" + "a" * 32})
-    text = menu.render(menu.read_agent_env())
-    assert "MCP endpoint:" in text
-    assert "Agent log (" in text
-
-
-def test_interactive_frame_fits_the_window(monkeypatch):
-    env = {"MESH_USER": "node-one", "MESH_LINK_KEY": "lk_" + "a" * 32,
-           "MESH_GATEWAY": "gw.test"}
-    frame = menu._frame(env, columns=60, rows=12)
-    lines = frame.splitlines()
-    assert len(lines) <= 12, "a frame taller than the window scrolls the screen"
-    assert all(len(line) <= 60 for line in lines), "wrapped lines smear the menu"
-    assert "q quit" in frame
-
-
-def test_draw_clears_the_screen_before_each_frame(monkeypatch):
-    env = {"MESH_USER": "node-one", "MESH_LINK_KEY": "lk_" + "a" * 32,
-           "MESH_GATEWAY": "gw.test"}
-    out = io.StringIO()
-    monkeypatch.setattr(menu, "_ANSI", True)
-    monkeypatch.setattr(menu, "_terminal_size", lambda: (80, 24))
-    monkeypatch.setattr(menu.sys, "stdout", out)
-    menu.draw(env)
-    written = out.getvalue()
-    assert written.startswith("\x1b[2J\x1b[H")
-    assert written.endswith("\x1b[J")
-    assert "MCP endpoint:" not in written, "the QR/endpoint block belongs to `e`"

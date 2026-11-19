@@ -200,6 +200,22 @@ def test_interactive_frame_fits_the_window(monkeypatch):
     assert "q quit" in frame
 
 
+def test_frame_shows_token_and_qr_in_a_large_window():
+    env = {"MESH_USER": "node-one", "MESH_LINK_KEY": "lk_" + "a" * 32,
+           "MESH_GATEWAY": "gw.test"}
+    frame = menu._frame(env, columns=120, rows=40)
+    assert "Token: lk_" in frame
+    assert "\u2588" in frame, "the QR code belongs in a window that fits it"
+
+
+def test_frame_shows_token_and_qr_hint_in_a_small_window():
+    env = {"MESH_USER": "node-one", "MESH_LINK_KEY": "lk_" + "a" * 32,
+           "MESH_GATEWAY": "gw.test"}
+    frame = menu._frame(env, columns=80, rows=24)
+    assert "Token: lk_" in frame
+    assert "QR: press e" in frame
+
+
 def test_draw_repaints_only_when_the_frame_changes(monkeypatch):
     env = {"MESH_USER": "node-one", "MESH_LINK_KEY": "lk_" + "a" * 32,
            "MESH_GATEWAY": "gw.test"}
@@ -211,7 +227,7 @@ def test_draw_repaints_only_when_the_frame_changes(monkeypatch):
     assert len(painted) == 1, "an unchanged frame must not be repainted"
     menu.draw(env, force=True)
     assert len(painted) == 2
-    assert "MCP endpoint:" not in painted[-1], "the QR/endpoint block belongs to `e`"
+    assert "Token: lk_" in painted[-1], "the live token belongs in the frame"
 
 
 def test_paint_falls_back_to_ansi(monkeypatch):

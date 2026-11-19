@@ -354,6 +354,7 @@ def _render_lines(env: Dict[str, str], *, include_endpoint: bool = True,
             env["MESH_LINK_KEY"] = link
     state = control.state()
     url = build_mcp_url(env)
+    token = (env.get("MESH_LINK_KEY") or "").strip()
     lines: List[str] = []
     lines.append("Remote Harness MCP  ·  rhm")
     lines.append("=" * 72)
@@ -416,6 +417,8 @@ def _render_lines(env: Dict[str, str], *, include_endpoint: bool = True,
         if url:
             lines.append("MCP endpoint:")
             lines.append(url)
+            if token:
+                lines.append("Token: %s" % token)
             qr = qr_lines(url)
             if qr:
                 lines.append("")
@@ -463,21 +466,63 @@ def _fit(text: str, columns: int) -> str:
 
 
 def _frame(env: Dict[str, str], columns: int, rows: int) -> str:
-    """The interactive frame: no QR, no log tail, fitted to the window.
+    """The interactive frame, fitted to the window, with the live key and QR.
 
-    The old draw() wrote a frame taller than the terminal and never cleared it,
-    so every keypress scrolled the screen and the QR/log blocks smeared over the
-    menu. A frame is now at most ``rows`` lines and each line at most ``columns``.
+    The QR is placed beside the status block when the window is wide enough, or
+    under it when it is tall enough; if neither fits, the frame says which key
+    opens it full-screen. The token and URL are always visible.
     """
-    lines = _render_lines(env, include_endpoint=False, include_log=False, columns=columns)
-    hint = lines[-1] if lines else ""
-    body = lines[:-1]
-    budget = max(1, rows - 1)
-    if len(body) > budget:
-        body = body[:max(0, budget - 1)] + [
-            "\u2026 window is %dx%d: resize it, or run `rhm status`" % (columns, rows)
-        ]
-    return "\n".join([_fit(line, columns) for line in body + [hint]])
+    env = dict(env)
+    if not (env.get("MESH_LINK_KEY") or "").strip():
+        link = ensure_link_key(env)
+        if link:
+            env["MESH_LINK_KEY"] = link
+    base = _render_lines(env, include_endpoint=False, include_log=False, columns=columns)
+    lines_ok = len(base) >= 2
+    hint = base[-1] if base else ""
+    footer = base[-2:] if lines_ok else list(base)
+    body = base[:-2] if lines_ok else []
+
+    url = build_mcp_url(env)
+    token = (env.get("MESH_LINK_KEY") or "").strip()
+    endpoint = ["", "MCP endpoint:"]
+    if url:
+        endpoint.append(_fit(url, columns))
+    else:
+        endpoint.append("not configured: no MESH_USER / MESH_LINK_KEY")
+    if token:
+        endpoint.append("Token: %s" % _fit(token, max(8, columns - 7)))
+    qr = qr_lines(url) if url else []
+    qr_width = max((len(line) for line in qr), default=0)
+
+    def assemble(composed: List[str]) -> str:
+        if len(composed) > rows:
+            # Keep the footer (separator + key hint) no matter how small the
+            # window is: without it the menu gives no way to quit.
+            footer_keep = composed[-2:] if len(composed) >= 2 else composed
+            room = max(0, rows - len(footer_keep) - 1)
+            composed = composed[:room] + [
+                "\u2026 window is %dx%d: resize it, or run `rhm status`" % (columns, rows)
+            ] + footer_keep
+        return "\n".join(_fit(line, columns) for line in composed)
+
+    left_width = max((len(line) for line in body), default=0)
+    if qr and columns >= left_width + qr_width + 4 \
+            and rows >= max(len(body), len(qr)) + len(endpoint) + 2:
+        merged = []
+        for index in range(max(len(body), len(qr))):
+            left = body[index] if index < len(body) else ""
+            right = qr[index] if index < len(qr) else ""
+            merged.append(left.ljust(left_width) + "  " + right)
+        return assemble(merged + endpoint + footer)
+
+    if qr and columns >= qr_width \
+            and rows >= len(body) + len(endpoint) + len(qr) + 2:
+        return assemble(body + endpoint + [""] + qr + footer)
+
+    if qr:
+        endpoint.append("QR: press e (window is too small to show it here)")
+    return assemble(body + endpoint + footer)
 
 
 def _win_console() -> bool:
@@ -548,12 +593,20 @@ def draw(env: Dict[str, str], force: bool = False) -> None:
 
 
 def _show_endpoint(keys: "Keys", env: Dict[str, str]) -> None:
-    """Endpoint + QR on a screen of their own; any key returns to the menu."""
+    """Endpoint, token and QR on a screen of their own; any key returns."""
     columns, rows = _terminal_size()
+    env = dict(env)
+    if not (env.get("MESH_LINK_KEY") or "").strip():
+        link = ensure_link_key(env)
+        if link:
+            env["MESH_LINK_KEY"] = link
     url = build_mcp_url(env)
+    token = (env.get("MESH_LINK_KEY") or "").strip()
     lines = ["MCP endpoint:", ""]
     if url:
         lines.append(url)
+        if token:
+            lines.append("Token: %s" % token)
         qr = qr_lines(url)
         if qr and max(len(row) for row in qr) <= columns and len(lines) + len(qr) + 3 <= rows:
             lines += [""] + qr

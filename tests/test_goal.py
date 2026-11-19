@@ -36,6 +36,12 @@ def configured_tools(tmp_path):
 # The store
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _goal_enabled(monkeypatch):
+    """The goal surface is opt-in; these tests exercise it switched on."""
+    monkeypatch.setenv("MESH_GOAL", "1")
+
+
 def test_there_is_no_goal_by_default():
     data = goal.get()
     assert data["goal"] is None

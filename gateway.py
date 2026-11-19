@@ -667,10 +667,7 @@ MANDATORY GROUNDING & EXECUTION DIRECTIVES:
    never claim a switch is off-limits without trying `node_control`: a refusal
    (`read_only`, `remote_control_disabled`) is a real answer with a fix - report
    it instead of working around it.
-6. GOAL: when the user states an objective meant to outlive this turn, record it
-   with `goal(action=set, text=...)`. The node keeps it across reconnects and the
-   gateway puts it back into the session instructions, so the next chat resumes
-   the same work; close it with `goal(action=complete|blocked, note=...)`.
+6. GOAL: node-wide objectives are disabled in this build; do not record one.
 7. AUTONOMY: an instruction (or an active goal) is the authorization. Do not ask
    "shall I start?" or "continue?" - execute, report, and only stop for a real
    error, a finished task or an `approval_required` id you must wait for.
@@ -1832,7 +1829,7 @@ async def messages_endpoint(request: Request):
             f"you are waiting for the confirmation, do not end the task, and retry the same call "
             f"after it is approved in rhm (a = once, A = always, or `rhm mode full`).\n"
             f"AUTONOMY (mandatory): when the user has stated the task - in this message or as an "
-            f"active goal - EXECUTE it end to end. Never answer with 'shall I start?', 'run the "
+            f"task - EXECUTE it end to end. Never answer with 'shall I start?', 'run the "
             f"pipeline?', 'continue?' or 'confirm and I will proceed': asking again for "
             f"permission the user already gave is a failed turn. End a turn only when (a) the "
             f"task is complete, (b) a tool returned a concrete error you cannot fix, or (c) a "
@@ -1853,16 +1850,6 @@ async def messages_endpoint(request: Request):
             f"the node's own MESH_DEVICE / MESH_DEVICE_ACTIONS / MESH_DEVICE_PIM switches are what "
             f"decides whether the call is allowed."
         )
-        carried_goal = await node_goal_brief(user)
-        if carried_goal:
-            # The objective a previous chat recorded on the node: resume it, do
-            # not ask the user to repeat what they already said.
-            instructions += (
-                "\nACTIVE GOAL (persisted on the node; the user set it earlier): "
-                + carried_goal
-                + "\nContinue it unless the user changes direction, and close it with "
-                  "goal(action=complete|blocked).\n"
-            )
         fired_timers = await node_schedule_brief(user)
         if fired_timers:
             # Work that finished (or started) while nobody was looking: report it
@@ -2071,43 +2058,6 @@ async def messages_endpoint(request: Request):
                                 "description": ("sandbox: allow network access inside the container "
                                                 "(default false; in approval mode this asks the "
                                                 "operator first).")
-                            }
-                        },
-                        "required": ["action"],
-                        "additionalProperties": False
-                    }
-                },
-                # The persistent objective: a chat that reconnects must resume the
-                # same goal instead of starting over.
-                {
-                    "name": "goal",
-                    "description": (
-                        "Record the objective this chat is working on, so it survives a "
-                        "reconnect, an agent restart or a new session: the node stores it and "
-                        "the gateway puts it back into the session instructions (and into "
-                        "mesh_status). action=set with text starts or replaces the objective; "
-                        "get reads it; complete or blocked closes it (note optional); clear "
-                        "forgets it. Use it when the user states a goal that outlives this "
-                        "turn, not for every message. The note is metadata: it runs nothing "
-                        "and works in read-only mode. An active goal is the operator's "
-                        "standing authorization: proceed with its steps without asking."
-                    ),
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "action": {
-                                "type": "string",
-                                "enum": ["set", "get", "complete", "blocked", "clear"],
-                                "description": "What to do (default: get)."
-                            },
-                            "text": {
-                                "type": "string",
-                                "description": "set: the objective, as one sentence."
-                            },
-                            "note": {
-                                "type": "string",
-                                "description": ("complete/blocked: what was achieved, or what "
-                                                "stops it.")
                             }
                         },
                         "required": ["action"],
@@ -3776,15 +3726,6 @@ TOOL_ANNOTATIONS = {
     # client may ask before a switch is thrown, and the cabinet - which has no
     # such prompt - is a logged-in person pressing a button.
     "node_control": {
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": False,
-        "openWorldHint": False,
-    },
-    # The persistent objective writes one note and starts nothing, but it does
-    # change what the next session sees, so the honest hint stays "not read-only"
-    # exactly like the node's own surface (tools/list parity is tested).
-    "goal": {
         "readOnlyHint": False,
         "destructiveHint": False,
         "idempotentHint": False,

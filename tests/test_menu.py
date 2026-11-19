@@ -115,24 +115,17 @@ def test_pause_and_resume_subcommands(capsys):
     assert control.paused() is False
 
 
-def test_goal_command_sets_shows_and_closes(capsys):
-    assert menu.main(["goal", "finish the MCP update"]) == 0
-    assert "finish the MCP update" in capsys.readouterr().out
-
-    assert menu.main(["goal"]) == 0
-    shown = capsys.readouterr().out
-    assert "finish the MCP update" in shown
-    assert "active" in shown
-
-    assert menu.main(["goal", "done", "shipped"]) == 0
-    closed = capsys.readouterr().out
-    assert "Goal: none" in closed
-    assert "done" in closed
+def test_goal_commands_are_disabled_by_default(capsys):
+    """A node-wide objective leaks between chats, so it is opt-in."""
+    assert menu.main(["goal", "finish the MCP update"]) == 2
+    assert "disabled" in capsys.readouterr().err
+    assert menu.main(["goal"]) == 2
+    assert "disabled" in capsys.readouterr().err
 
 
-def test_goal_set_without_text_is_refused(capsys):
-    assert menu.main(["goal", "set"]) == 2
-    assert "needs the objective" in capsys.readouterr().err
+def test_goal_clear_still_works_when_disabled(capsys):
+    assert menu.main(["goal", "clear"]) == 0
+    assert "cleared" in capsys.readouterr().out
 
 
 def test_approvals_command_allows_and_revokes(capsys):
@@ -165,12 +158,12 @@ def test_render_shows_the_approval_state(monkeypatch, tmp_path):
     menu.main(["approvals", "off"])
 
 
-def test_render_shows_the_goal_line(monkeypatch, tmp_path):
+def test_render_hides_the_disabled_goal(monkeypatch, tmp_path):
+    monkeypatch.delenv("MESH_GOAL", raising=False)
     monkeypatch.setattr(menu, "read_agent_env", lambda: {"MESH_USER": "n"})
     monkeypatch.setattr(menu, "agent_log_path", lambda: str(tmp_path / "agent.log"))
-    menu.main(["goal", "keep the node updated"])
     text = menu.render(menu.read_agent_env())
-    assert "Goal: keep the node updated" in text
+    assert "Goal:" not in text
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX launcher")

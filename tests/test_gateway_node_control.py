@@ -171,12 +171,13 @@ def _initialize(relay_result):
     return json.loads(response.body)["result"]["instructions"]
 
 
-def test_initialize_replays_the_active_goal(relay):
+def test_initialize_never_injects_a_node_wide_goal(relay):
+    """Goal is opt-in and node-wide, so the handshake does not carry one."""
     relay.result = {"ok": True, "goal": {"text": "finish the deploy",
                                          "status": "active"}, "active": True}
     instructions = _initialize(relay.result)
-    assert "ACTIVE GOAL" in instructions
-    assert "finish the deploy" in instructions
+    assert "ACTIVE GOAL" not in instructions
+    assert "finish the deploy" not in instructions
 
 
 def test_initialize_without_a_goal_has_no_goal_block(relay):

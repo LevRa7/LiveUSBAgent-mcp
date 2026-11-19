@@ -196,7 +196,8 @@ def snapshot() -> Dict[str, Any]:
         "pending": control.pending_approvals(),
         "isolation": sandbox.status(),
         "remote_control": state.get("remote_control") or control.remote_control_state(),
-        "goal": goal.get(),
+        "goal": goal.get() if goal.enabled() else None,
+        "goal_enabled": goal.enabled(),
         "usage": usage.summary(days=1),
     }
 
@@ -360,7 +361,8 @@ def _render_lines(env: Dict[str, str], *, include_endpoint: bool = True,
         lines.append("Remote control: ON  (cabinet/MCP may change the switches; r — turn off)")
     else:
         lines.append("Remote control: OFF  (r — turn on; only this console can re-enable it)")
-    lines.append(goal.summary_line())
+    if goal.enabled():
+        lines.append(goal.summary_line())
     try:
         summary = schedule_module.summary()
     except Exception:
@@ -829,6 +831,15 @@ def _run_command(args: Any) -> int:
 def _run_goal(value: str, text: str, as_json: bool) -> int:
     """``rhm goal`` show; ``rhm goal <text>`` set; ``done``/``blocked``/``clear``."""
     word = value.strip().lower()
+    if not goal.enabled():
+        if word in ("clear", "reset", "forget"):
+            goal.clear(actor="cli")
+            print("goal cleared (the feature is disabled)")
+            return 0
+        print("rhm: goal is disabled: one objective would be shared by every chat. "
+              "Use `rhm goal clear` to delete a stored one, or set MESH_GOAL=1.",
+              file=sys.stderr)
+        return 2
     try:
         if not value:
             data = goal.get()

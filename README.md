@@ -244,20 +244,18 @@ A fired timer becomes a **continuation**: it appears in `mesh_status` and is inj
 
 From the console: `rhm schedule`, `rhm schedule cancel <id>`, `rhm schedule ack [id]`.
 
-### Goal from the chat (`goal`)
+### Goal from the chat (`goal`) — disabled by default
 
-A chat has no memory of the previous session: the client closes and the next turn starts from nothing. The node holds the objective instead.
+One objective stored on the node would be shared by every chat: one client's task
+would leak into another session. The feature is therefore off unless the operator
+sets `MESH_GOAL=1`. While it is off the `goal` tool is absent from `tools/list`,
+`mesh_status` returns `goal: null`, and `rhm goal` refuses to record anything
+(`rhm goal clear` still deletes an already stored objective).
 
-| Action | What it does |
-| :--- | :--- |
-| `set` (`text`) | Records the objective (or replaces the previous one, which moves to history). |
-| `get` | Reads the current objective and the last closed ones. |
-| `complete` / `blocked` (`note`) | Closes the objective as done or blocked. |
-| `clear` | Forgets it. |
-
-The objective lives in `<ConfigDir>/goal.json`, so it survives an agent restart and a new chat. On `initialize` the gateway puts it back into the session instructions (`ACTIVE GOAL: …`), and `mesh_status` returns it as `goal` — a reconnecting client continues where it left off instead of asking "what were we doing?". It is a note, not a command: it runs nothing and works even in read-only mode.
-
-From the console: `rhm goal "text"`, `rhm goal`, `rhm goal done "what was done"`, `rhm goal blocked "what stops it"`, `rhm goal clear`.
+When enabled it is the legacy global note: `set`/`get`/`complete`/`blocked`/
+`clear`, stored in `<ConfigDir>/goal.json`, injected into `initialize` and
+`mesh_status`. Per-chat scoping is not implemented: the node cannot see a chat
+identity.
 
 ### Publishing files and web pages
 

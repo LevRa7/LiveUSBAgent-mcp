@@ -200,15 +200,26 @@ def test_interactive_frame_fits_the_window(monkeypatch):
     assert "q quit" in frame
 
 
-def test_draw_clears_the_screen_before_each_frame(monkeypatch):
+def test_draw_repaints_only_when_the_frame_changes(monkeypatch):
     env = {"MESH_USER": "node-one", "MESH_LINK_KEY": "lk_" + "a" * 32,
            "MESH_GATEWAY": "gw.test"}
+    painted = []
+    monkeypatch.setattr(menu, "_terminal_size", lambda: (80, 24))
+    monkeypatch.setattr(menu, "_paint", painted.append)
+    menu.draw(env)
+    menu.draw(env)
+    assert len(painted) == 1, "an unchanged frame must not be repainted"
+    menu.draw(env, force=True)
+    assert len(painted) == 2
+    assert "MCP endpoint:" not in painted[-1], "the QR/endpoint block belongs to `e`"
+
+
+def test_paint_falls_back_to_ansi(monkeypatch):
     out = io.StringIO()
     monkeypatch.setattr(menu, "_ANSI", True)
-    monkeypatch.setattr(menu, "_terminal_size", lambda: (80, 24))
+    monkeypatch.setattr(menu, "_WIN_CONSOLE", False)
     monkeypatch.setattr(menu.sys, "stdout", out)
-    menu.draw(env)
+    menu._paint("hello")
     written = out.getvalue()
-    assert written.startswith("\x1b[2J\x1b[H")
+    assert written.startswith("\x1b[H")
     assert written.endswith("\x1b[J")
-    assert "MCP endpoint:" not in written, "the QR/endpoint block belongs to `e`"

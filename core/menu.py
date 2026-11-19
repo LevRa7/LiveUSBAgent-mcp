@@ -53,6 +53,31 @@ _NOTICE = ""
 
 _ANSI = os.name != "nt"
 
+#: Last painted frame. A one-second status refresh must not reprint an identical
+#: screen: on a console where clearing silently fails that looked like an
+#: infinite scroll of menus.
+_LAST_FRAME: Optional[str] = None
+#: None = not probed yet, True = Win32 console painting works, False = use ANSI.
+_WIN_CONSOLE: Optional[bool] = None
+
+try:
+    import ctypes
+    from ctypes import wintypes
+
+    class _COORD(ctypes.Structure):
+        _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
+
+    class _SMALL_RECT(ctypes.Structure):
+        _fields_ = [("Left", ctypes.c_short), ("Top", ctypes.c_short),
+                    ("Right", ctypes.c_short), ("Bottom", ctypes.c_short)]
+
+    class _CONSOLE_SCREEN_BUFFER_INFO(ctypes.Structure):
+        _fields_ = [("dwSize", _COORD), ("dwCursorPosition", _COORD),
+                    ("wAttributes", ctypes.c_ushort), ("srWindow", _SMALL_RECT),
+                    ("dwMaximumWindowSize", _COORD)]
+except Exception:                                  # pragma: no cover
+    _COORD = _SMALL_RECT = _CONSOLE_SCREEN_BUFFER_INFO = None
+
 
 def config_dir() -> str:
     base = paths.config_dir()
@@ -415,7 +440,7 @@ def _render_lines(env: Dict[str, str], *, include_endpoint: bool = True,
         lines.extend("  " + line for line in tail(agent_log_path(), 10))
         lines.append("")
     lines.append("-" * 72)
-    lines.append("q quit   ? help   e endpoint   o log")
+    lines.append("q quit   ? help   e QR/endpoint   o log")
     if columns:
         lines = [_fit(line, columns) for line in lines]
     return lines
@@ -455,15 +480,71 @@ def _frame(env: Dict[str, str], columns: int, rows: int) -> str:
     return "\n".join([_fit(line, columns) for line in body + [hint]])
 
 
-def draw(env: Dict[str, str]) -> None:
-    columns, rows = _terminal_size()
-    body = _frame(env, columns, rows)
+def _win_console() -> bool:
+    """True when this stdout is a Win32 console buffer we can repaint directly."""
+    if os.name != "nt" or _CONSOLE_SCREEN_BUFFER_INFO is None:
+        return False
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)
+        info = _CONSOLE_SCREEN_BUFFER_INFO()
+        return bool(kernel32.GetConsoleScreenBufferInfo(handle, ctypes.byref(info)))
+    except Exception:
+        return False
+
+
+def _paint_win(body: str) -> bool:
+    """Repaint through the console API: no ANSI, no reliance on `cls`.
+
+    Windows 10 consoles only honour ANSI when VT processing is enabled, and some
+    launchers hand the process a handle where ``cls``/``\\x1b[2J`` does nothing.
+    Clearing the buffer and homing the cursor here works on plain conhost too.
+    """
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)
+        info = _CONSOLE_SCREEN_BUFFER_INFO()
+        if not kernel32.GetConsoleScreenBufferInfo(handle, ctypes.byref(info)):
+            return False
+        cells = info.dwSize.X * info.dwSize.Y
+        written = wintypes.DWORD()
+        origin = _COORD(0, 0)
+        kernel32.FillConsoleOutputCharacterW(
+            handle, ctypes.c_wchar(" "), cells, origin, ctypes.byref(written))
+        kernel32.FillConsoleOutputAttribute(
+            handle, info.wAttributes, cells, origin, ctypes.byref(written))
+        kernel32.SetConsoleCursorPosition(handle, origin)
+        sys.stdout.write(body)
+        sys.stdout.flush()
+        return True
+    except Exception:
+        return False
+
+
+def _paint(body: str) -> None:
+    """Show *body* as the whole screen, whatever this terminal supports."""
+    global _WIN_CONSOLE
+    if os.name == "nt":
+        if _WIN_CONSOLE is None:
+            _WIN_CONSOLE = _win_console()
+        if _WIN_CONSOLE and _paint_win(body):
+            return
     if _ANSI:
-        sys.stdout.write("\x1b[2J\x1b[H" + body + "\x1b[J")
+        sys.stdout.write("\x1b[H" + body + "\x1b[J")
     else:
         os.system("cls" if os.name == "nt" else "clear")
         sys.stdout.write(body)
     sys.stdout.flush()
+
+
+def draw(env: Dict[str, str], force: bool = False) -> None:
+    global _LAST_FRAME
+    columns, rows = _terminal_size()
+    body = _frame(env, columns, rows)
+    if not force and body == _LAST_FRAME:
+        return          # identical frame: repainting it only risks duplication
+    _LAST_FRAME = body
+    _paint(body)
 
 
 def _show_endpoint(keys: "Keys", env: Dict[str, str]) -> None:
@@ -482,12 +563,9 @@ def _show_endpoint(keys: "Keys", env: Dict[str, str]) -> None:
         lines.append("not configured: no MESH_USER / MESH_LINK_KEY")
     lines += ["", "press any key to return"]
     body = "\n".join(_fit(line, columns) for line in lines[:rows])
-    if _ANSI:
-        sys.stdout.write("\x1b[2J\x1b[H" + body + "\x1b[J")
-    else:
-        os.system("cls" if os.name == "nt" else "clear")
-        sys.stdout.write(body)
-    sys.stdout.flush()
+    global _LAST_FRAME
+    _LAST_FRAME = None
+    _paint(body)
     while not keys.read(0.5):
         pass
 
@@ -513,12 +591,9 @@ def _show_help(keys: "Keys", env: Dict[str, str]) -> None:
         "press any key to return",
     ]
     body = "\n".join(_fit(line, columns) for line in lines[:rows])
-    if _ANSI:
-        sys.stdout.write("\x1b[2J\x1b[H" + body + "\x1b[J")
-    else:
-        os.system("cls" if os.name == "nt" else "clear")
-        sys.stdout.write(body)
-    sys.stdout.flush()
+    global _LAST_FRAME
+    _LAST_FRAME = None
+    _paint(body)
     while not keys.read(0.5):
         pass
 
@@ -554,7 +629,7 @@ def run_menu() -> int:
     global _NOTICE
     env = read_agent_env()
     with Keys() as keys:
-        draw(env)
+        draw(env, force=True)
         while True:
             key = keys.read(1.0)
             if key:
@@ -636,7 +711,9 @@ def run_menu() -> int:
                 _show_endpoint(keys, env)
             elif key == "?":
                 _show_help(keys, env)
-            draw(env)
+            # Input prompts and external viewers leave their own text on screen,
+            # so those keys force a repaint even when the frame is unchanged.
+            draw(env, force=key in ("d", "I", "o", "e", "?"))
     sys.stdout.write("\n")
     return 0
 
@@ -901,7 +978,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.json:
         print(json.dumps(snapshot(), ensure_ascii=False, default=str))
         return 0
-    if args.once or not sys.stdin.isatty():
+    if args.once or not sys.stdin.isatty() or not sys.stdout.isatty():
+        # No interactive screen (pipe, redirect, service): print once instead of
+        # repainting into a stream that cannot be cleared.
         print(render(read_agent_env()))
         return 0
     try:

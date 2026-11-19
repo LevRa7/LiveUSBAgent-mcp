@@ -176,3 +176,13 @@ def test_render_shows_the_goal_line(monkeypatch, tmp_path):
 def test_posix_launcher_is_executable():
     launcher = os.path.join(os.path.dirname(os.path.dirname(__file__)), "bin", "rhm")
     assert os.path.exists(launcher)
+
+
+def test_keys_is_a_context_manager(monkeypatch):
+    """`rhm` used to crash with TypeError: Keys has no __exit__."""
+    restored = []
+    monkeypatch.setattr(menu.Keys, "_enable_ansi", lambda self: None)
+    monkeypatch.setattr(menu.Keys, "restore", lambda self: restored.append(True))
+    with menu.Keys() as keys:
+        assert isinstance(keys, menu.Keys)
+    assert restored == [True]

@@ -225,6 +225,13 @@ class Keys:
             self._fd = None
         return self
 
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        # The raw-mode setting must be restored on every path, including a
+        # Ctrl+C inside the menu: without this method `with Keys()` raised
+        # TypeError before the first frame was ever drawn.
+        self.restore()
+        return False
+
     def restore(self) -> None:
         if self._fd is not None and self._settings is not None:
             try:

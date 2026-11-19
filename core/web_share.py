@@ -609,11 +609,41 @@ def handle_http_request(args: Dict[str, Any]) -> Dict[str, Any]:
 # MCP tools
 # ---------------------------------------------------------------------------
 
+_PROTECTED_NAMES = ("agent.env", "domain.env", "registry.json", "web.token",
+                    "control.token", "onboarding.pending.json")
+
+
+def _exposes_credentials(path: str, *, directory: bool = False) -> bool:
+    """True when publishing *path* would expose the node's own secrets.
+
+    ``share_file`` used to accept ``~/.config/remote-harness-mcp/agent.env`` and
+    turn the device token into a URL anyone can read. Both tools now refuse the
+    configuration directory (and any directory that contains it), plus the
+    well-known credential file names.
+    """
+    real = os.path.realpath(os.path.expanduser(str(path)))
+    protected = []
+    for candidate in (paths.config_dir(), paths.etc_dir()):
+        protected.append(os.path.realpath(candidate))
+    for root in protected:
+        if _inside(real, root):
+            return True
+        if directory and _inside(root, real):
+            # Publishing a parent (the home directory, /etc) exposes the config.
+            return True
+    name = os.path.basename(real).lower()
+    if name in _PROTECTED_NAMES:
+        return True
+    return name.endswith((".env", ".db", ".token"))
+
+
 def share_file(path: Any, name: Any = None, overwrite: Any = False) -> Dict[str, Any]:
     """Publish one file: copy it into the share root and return its public URL."""
     if not path:
         return {"error": "'path' is required"}
     source = os.path.realpath(os.path.expanduser(str(path)))
+    if _exposes_credentials(source):
+        return {"error": "refusing to publish the node's configuration or credentials"} 
     if not os.path.isfile(source):
         if os.path.isdir(source):
             return {"error": "not a file: %s (use serve_dir to publish a directory)" % path}
@@ -688,6 +718,8 @@ def serve_dir(path: Any, name: Any = None) -> Dict[str, Any]:
     root = os.path.realpath(os.path.expanduser(str(path)))
     if not os.path.isdir(root):
         return {"error": "not a directory: %s" % path}
+    if _exposes_credentials(root, directory=True):
+        return {"error": "refusing to publish the node's configuration or credentials"}
     # Refuse the share storage itself (and any ancestor of it): publishing the
     # web dir would expose shares.json - every slug and every source path.
     for storage in (_web_dir(), _public_root()):

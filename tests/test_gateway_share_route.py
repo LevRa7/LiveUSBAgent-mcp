@@ -510,16 +510,21 @@ def test_unknown_user_is_not_found(tmp_path, monkeypatch):
     assert response.body == b"not found\n"
 
 
-def test_an_offline_node_fails_fast_with_503(tmp_path, monkeypatch):
-    """A share on a disconnected node must not hang on the tunnel retry loop."""
+def test_an_offline_node_answers_like_an_unknown_one(tmp_path, monkeypatch):
+    """A share on a disconnected node must not hang on the tunnel retry loop.
+
+    It must also not answer differently from "no such node": a distinct status
+    or message would let an anonymous caller enumerate registered nodes.
+    """
     _registry(tmp_path, monkeypatch)
     monkeypatch.setattr(gateway, "active_tunnels", {})
     fake = _relay(monkeypatch, {"status": 200, "body_b64": "", "headers": {}})
 
     response = _call(_share_request())
 
-    assert response.status_code == 503
-    assert b"node offline" in response.body
+    assert response.status_code == 404
+    assert response.body == b"not found\n"
+    assert b"node" not in response.body
     assert fake.calls == [], "an offline node must not be dialled at all"
 
 
@@ -718,7 +723,8 @@ def test_health_and_mcp_still_answer_through_the_app(tmp_path, monkeypatch):
 
     status, _, body = _asgi("GET", "/health", b"?user=node-one")
     assert status == 200
-    assert json.loads(body)["service"] == "remote_harness_mcp_gateway"
+    assert json.loads(body) == {"status": "healthy"}, (
+        "anonymous /health must not name nodes or expose diagnostics")
 
     # An unauthenticated POST /mcp must be answered by the MCP endpoint (401),
     # never by the share catch-all (which would answer 404 "not found").

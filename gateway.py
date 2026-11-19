@@ -444,9 +444,40 @@ def token_matches_device(entry: dict, token: str) -> bool:
 
 
 def token_matches_link(entry: dict, token: str) -> bool:
-    """True when *token* is this node's link key (the URL-safe credential)."""
-    stored = entry.get("link_key") or ""
-    return bool(stored) and bool(token) and tokens_equal(token, stored)
+    """True when *token* is this node's link key (the URL-safe credential).
+
+    A re-registration issues a new key and keeps the previous digest as an
+    overlap, so an already-configured connector is not broken by a reinstall;
+    an explicit rotate drops the overlap.
+    """
+    if not token:
+        return False
+    digest = hash_secret(token)
+    for field in ("link_key_sha256", "link_key_prev_sha256"):
+        stored = str(entry.get(field) or "")
+        if stored and tokens_equal(digest, stored):
+            return True
+    # Registry written before link keys were hashed at rest.
+    legacy = entry.get("link_key") or ""
+    return bool(legacy) and tokens_equal(token, legacy)
+
+
+def migrate_link_keys(registry: dict) -> bool:
+    """Replace plaintext link keys with their digest; True when anything changed.
+
+    Called once at startup: an existing connector keeps working because the
+    digest of the key it holds still matches, while a copy of registry.json no
+    longer hands an attacker every device.
+    """
+    changed = False
+    for entry in registry.values():
+        if not isinstance(entry, dict):
+            continue
+        plain = entry.pop("link_key", None)
+        if plain and not entry.get("link_key_sha256"):
+            entry["link_key_sha256"] = hash_secret(plain)
+            changed = True
+    return changed
 
 
 def request_credential(request: Request) -> tuple[str, str]:
@@ -474,7 +505,7 @@ def get_request_token(request: Request) -> str:
 
 def credential_denial(entry: dict, source: str) -> str:
     if source == "query":
-        if entry.get("link_key"):
+        if entry.get("link_key_sha256") or entry.get("link_key"):
             return (
                 "The device token is not accepted in a URL: use this node's link key "
                 "('lk_...') or send the device token in an Authorization: Bearer header."
@@ -560,7 +591,9 @@ def verify_token(request: Request) -> tuple[bool, str, str]:
         return False, "The gateway registry is unreadable; restore it before using this node.", user
     entry = registry.get(user)
     if not entry:
-        return False, f"User '{user}' is not registered.", user
+        # The same message as a wrong credential: "user X is not registered"
+        # turned /sse and /mcp into a free oracle for every device name.
+        return False, credential_denial({}, request_credential(request)[1]), user
     token, source = request_credential(request)
     if not token:
         return False, credential_denial(entry, source), user
@@ -576,8 +609,13 @@ def verify_token(request: Request) -> tuple[bool, str, str]:
         # so an upgrade does not disconnect an already-configured node, but the
         # warning says how to move it off the old secret.
         ok = token_matches_link(entry, token)
-        if not ok and (entry.get("allow_legacy_query") or not entry.get("link_key")) \
-                and token_matches_device(entry, token):
+        has_link_material = bool(entry.get("link_key") or entry.get("link_key_sha256")
+                                 or entry.get("link_key_prev_sha256"))
+        # A registry written before link keys existed has nothing else to check
+        # against, so its device token is still accepted in the URL; once a link
+        # key exists, that path needs the explicit MESH_ALLOW_LEGACY_QUERY opt-in.
+        if not ok and token_matches_device(entry, token) and (
+                ALLOW_LEGACY_QUERY and entry.get("allow_legacy_query") or not has_link_material):
             ok = True
             logger.warning(
                 "Legacy ?token= credential accepted for '%s' (pre-0.4.6 node). "
@@ -821,6 +859,14 @@ class CabinetNodeControl:
 async def health(request: Request):
     if request.method == "OPTIONS":
         return Response(status_code=204, headers={"Allow": "GET, HEAD, OPTIONS", "Access-Control-Allow-Origin": "*"})
+    # Anonymous callers get liveness only. The detailed document names the nodes
+    # with open streams, the last tunnel events (names and reasons) and the
+    # gateway host, which is exactly the inventory an attacker needs before a
+    # targeted attack. Set MESH_PUBLIC_HEALTH=1 only for a monitoring setup that
+    # is not exposed to the internet.
+    if not _health_may_be_detailed(request):
+        return JSONResponse({"status": "healthy"},
+                            headers={"Access-Control-Allow-Origin": "*", "cache-control": "no-store"})
     user = get_target_user(request)
     is_online = (user in active_tunnels) if user != "anonymous" else False
     return JSONResponse({
@@ -842,7 +888,19 @@ async def health(request: Request):
         # `tunnel_events` keeps the last 10 connect/disconnect events and why.
         "last_tunnel_seen": last_tunnel_seen,
         "tunnel_events": list(tunnel_events),
-    }, headers={"Access-Control-Allow-Origin": "*"})
+    }, headers={"Access-Control-Allow-Origin": "*", "cache-control": "no-store"})
+
+
+def _health_may_be_detailed(request: Request) -> bool:
+    """True for the operator, a valid node credential, or an explicit opt-in."""
+    if os.environ.get("MESH_PUBLIC_HEALTH", "0").strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    if admin_authorised(request):
+        return True
+    try:
+        return bool(verify_token(request)[0])
+    except Exception:
+        return False
 
 def node_mcp_url(user: str, link_key: str) -> str:
     """Public MCP endpoint for one node: the link key, never the device token."""
@@ -859,8 +917,12 @@ def unique_node_name(registry: dict, wanted: str) -> str:
     return cand
 
 
-def new_node_entry(mac: str, os_name: str, arch: str, now_iso: str, token: str) -> dict:
-    """A fresh registration: hashed device token, plaintext link key, metadata.
+def new_node_entry(mac: str, os_name: str, arch: str, now_iso: str, token: str,
+                   link_key: str) -> dict:
+    """A fresh registration: hashed device token, hashed link key, metadata.
+
+    Neither credential is stored in plaintext. The caller keeps the link key it
+    just generated and returns it to the installer exactly once.
 
     ``mac_address`` is kept as an inventory detail only. It is NOT an identity: a
     MAC is visible to the whole LAN, is trivially spoofed, and on its own used to
@@ -868,7 +930,7 @@ def new_node_entry(mac: str, os_name: str, arch: str, now_iso: str, token: str) 
     """
     return {
         "token_sha256": hash_secret(token),
-        "link_key": new_link_key(),
+        "link_key_sha256": hash_secret(link_key),
         "created_at": now_iso,
         "last_seen": now_iso,
         "mode": "tunnel",
@@ -879,8 +941,15 @@ def new_node_entry(mac: str, os_name: str, arch: str, now_iso: str, token: str) 
     }
 
 
-REGISTER_MODE = os.environ.get("MESH_REGISTER_MODE", "open").strip().lower()
+_REGISTER_MODES = {"open", "pair", "closed"}
+_REQUESTED_REGISTER_MODE = os.environ.get("MESH_REGISTER_MODE", "open").strip().lower()
+# Fail closed: an unknown value ("pairs", "disabled", "0") used to mean "open".
+REGISTER_MODE = _REQUESTED_REGISTER_MODE if _REQUESTED_REGISTER_MODE in _REGISTER_MODES else "closed"
 ENROLL_SECRET = os.environ.get("MESH_ENROLL_SECRET", "").strip()
+#: Accepting a device token in the query string is a legacy upgrade path, not a
+#: default: a URL is logged by the proxy and kept in the client's connector. Set
+#: MESH_ALLOW_LEGACY_QUERY=1 only while migrating a pre-0.4.6 node.
+ALLOW_LEGACY_QUERY = os.environ.get("MESH_ALLOW_LEGACY_QUERY", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 def enrolment_refusal(request: Request) -> str:
@@ -890,6 +959,9 @@ def enrolment_refusal(request: Request) -> str:
     pairing endpoints as the only way in. ``MESH_ENROLL_SECRET`` keeps
     self-registration but requires a shared secret the installer was given.
     """
+    if REGISTER_MODE == "closed":
+        return ("Self-registration is disabled on this gateway. "
+                "Use POST /v1/devices/pair and approve the code.")
     if REGISTER_MODE == "pair":
         return (
             "Self-registration is disabled on this gateway (MESH_REGISTER_MODE=pair). "
@@ -906,10 +978,22 @@ def enrolment_refusal(request: Request) -> str:
 
 
 def client_ip(request: Request) -> str:
-    forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    if forwarded:
-        return forwarded
-    return request.client.host if request.client else "unknown"
+    """The caller's address, without trusting a header the caller can set.
+
+    ``X-Forwarded-For`` is honoured only when the TCP peer is one of
+    ``MESH_TRUSTED_PROXIES`` (comma-separated). Behind nginx the proxy appends
+    the real peer to the end, so the last element is the one to use; taking the
+    first element let any client pick its own rate-limit bucket.
+    """
+    peer = request.client.host if request.client else "unknown"
+    trusted = [item.strip() for item in
+               os.environ.get("MESH_TRUSTED_PROXIES", "").split(",") if item.strip()]
+    if trusted and peer in trusted:
+        forwarded = [item.strip() for item in
+                     (request.headers.get("x-forwarded-for") or "").split(",") if item.strip()]
+        if forwarded:
+            return forwarded[-1]
+    return peer
 
 
 _rate_windows: dict[str, list[float]] = {}
@@ -923,6 +1007,14 @@ def rate_limited(bucket: str, key: str, limit: int, window: float = 60.0) -> boo
     machine for a botnet either. One process, one bucket map.
     """
     now = time.time()
+    # A bucket key comes from the caller's address, and a long-running gateway
+    # would otherwise keep one dict entry per address it has ever seen.
+    if len(_rate_windows) > 4096:
+        for key, stamps in list(_rate_windows.items()):
+            if not stamps or now - stamps[-1] > 300:
+                _rate_windows.pop(key, None)
+        while len(_rate_windows) > 8192:
+            _rate_windows.pop(next(iter(_rate_windows)), None)
     seen = [t for t in _rate_windows.get(f"{bucket}:{key}", []) if now - t < window]
     if len(seen) >= limit:
         _rate_windows[f"{bucket}:{key}"] = seen
@@ -953,6 +1045,10 @@ async def api_register(request: Request):
     clean_user = re.sub(r"[^a-z0-9_-]", "", raw_user.lower())
     if not clean_user or len(clean_user) < 2:
         return JSONResponse({"error": "Invalid username (min 2 alphanumeric chars)"}, status_code=400)
+    if len(clean_user) > 40:
+        # The registry is rewritten as one JSON document and parsed on every
+        # request; a megabyte-long name would slow every other tenant down.
+        return JSONResponse({"error": "Invalid username (max 40 alphanumeric chars)"}, status_code=400)
 
     if clean_user in RESERVED_NAMES:
         return JSONResponse({
@@ -999,19 +1095,15 @@ async def api_register(request: Request):
             if not auto_suffix:
                 return JSONResponse({
                     "error": "conflict",
-                    "message": (
-                        f"Node '{clean_user}' already exists and this request did not "
-                        "prove possession of its device token. Send it in an "
-                        "Authorization: Bearer header, or ask for auto_suffix."
-                    ),
-                    "suggested_username": unique_node_name(registry, clean_user),
+                    "message": "This node name is already registered.",
                 }, status_code=409)
             clean_user = unique_node_name(registry, clean_user)
             entry = None
 
     if entry is None:
         token_plain = new_device_token()
-        entry = new_node_entry(clean_mac, clean_os, clean_arch, now_iso, token_plain)
+        link_key = new_link_key()
+        entry = new_node_entry(clean_mac, clean_os, clean_arch, now_iso, token_plain, link_key)
         registry[clean_user] = entry
         created = True
     else:
@@ -1023,10 +1115,18 @@ async def api_register(request: Request):
         if clean_arch:
             entry["arch"] = clean_arch
         entry["last_seen"] = now_iso
-        if not entry.get("link_key"):
-            # Upgrade a pre-0.4.6 node: give it a rotatable link key, so the
-            # installer can hand out a URL whose credential is revocable.
-            entry["link_key"] = new_link_key()
+        # A reinstall gets a fresh link key. The previous digest stays valid as
+        # an overlap so the connector the user already pasted keeps working;
+        # an explicit rotate (owner action) drops the overlap.
+        previous = entry.get("link_key_sha256") or (
+            hash_secret(entry["link_key"]) if entry.get("link_key") else "")
+        link_key = new_link_key()
+        entry["link_key_sha256"] = hash_secret(link_key)
+        entry.pop("link_key", None)
+        if previous:
+            entry["link_key_prev_sha256"] = previous
+        else:
+            entry.pop("link_key_prev_sha256", None)
         if entry.get("token") and supplied and token_matches_device(entry, supplied):
             # Move the device token off plaintext storage. The credential the
             # node was installed with keeps working in the query string until an
@@ -1047,11 +1147,11 @@ async def api_register(request: Request):
         "status": "success",
         "username": clean_user,
         "token": token_plain,
-        "link_key": entry["link_key"],
+        "link_key": link_key,
         "gateway": PUBLIC_HOST,
         # The URL a client pastes carries the link key. The device token stays
         # in the caller's own config and in Authorization headers only.
-        "sse_url": node_mcp_url(clean_user, entry["link_key"]),
+        "sse_url": node_mcp_url(clean_user, link_key),
         "tunnel_url": f"wss://{PUBLIC_HOST}/ws/tunnel?user={clean_user}",
         "reused": not created,
         "token_use": "Authorization: Bearer <token> (the tunnel and CLI use this; never put it in a URL)",
@@ -1077,6 +1177,7 @@ async def api_register(request: Request):
 # bot that can reach the endpoint can at worst ask for codes.
 PAIR_TTL_SECONDS = 600
 PAIR_MAX_PENDING = 200
+PAIR_MAX_PER_IP = max(1, int(os.environ.get("MESH_PAIR_MAX_PER_IP", "3").strip() or 3))
 PAIR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # no 0/O/1/I confusables
 ADMIN_TOKEN = os.environ.get("MESH_ADMIN_TOKEN", "").strip()
 
@@ -1085,7 +1186,17 @@ pending_pairs: dict[str, dict] = {}
 
 def admin_authorised(request: Request) -> bool:
     supplied = (request.headers.get("x-admin-token") or "").strip()
-    return bool(ADMIN_TOKEN) and bool(supplied) and tokens_equal(supplied, ADMIN_TOKEN)
+    if not ADMIN_TOKEN or not supplied:
+        return False
+    if len(ADMIN_TOKEN) < 32:
+        # One short shared secret used to be enough to rotate every device. A
+        # short value is refused instead of silently protecting nothing.
+        logger.error("MESH_ADMIN_TOKEN is shorter than 32 characters; admin API disabled")
+        return False
+    if not tokens_equal(supplied, ADMIN_TOKEN):
+        return False
+    logger.warning("Admin API used: %s %s from %s", request.method, request.url.path, client_ip(request))
+    return True
 
 
 def purge_pairs() -> None:
@@ -1112,11 +1223,19 @@ async def device_pair_start(request: Request):
             status_code=429,
         )
     purge_pairs()
-    if len(pending_pairs) >= PAIR_MAX_PENDING:
+    ip = client_ip(request)
+    # One address may not hold the whole pool: 20 requests a minute for ten
+    # minutes filled all 200 slots and every other installation got 503.
+    if sum(1 for pending in pending_pairs.values() if pending.get("ip") == ip) >= PAIR_MAX_PER_IP:
         return JSONResponse(
-            {"error": "too_many_pending", "message": "Too many pending pairings; try again shortly."},
-            status_code=503,
+            {"error": "too_many_pending", "message": "Too many pending pairings from this address."},
+            status_code=429,
         )
+    if len(pending_pairs) >= PAIR_MAX_PENDING:
+        # Evict the oldest request instead of refusing everybody: a legitimate
+        # installation must not be blocked by someone else's abandoned codes.
+        oldest = min(pending_pairs, key=lambda key: pending_pairs[key]["created_at"])
+        pending_pairs.pop(oldest, None)
     try:
         data = await request.json()
     except Exception:
@@ -1127,6 +1246,7 @@ async def device_pair_start(request: Request):
     pending_pairs[code] = {
         "created_at": time.time(),
         "expires_at": time.time() + PAIR_TTL_SECONDS,
+        "ip": ip,
         "hostname": str(data.get("hostname") or "")[:100],
         "os": str(data.get("os") or "")[:100],
         "arch": str(data.get("arch") or "")[:40],
@@ -1180,36 +1300,42 @@ async def device_pair_approve(request: Request):
     pair = pending_pairs.get(code)
     if pair is None:
         return JSONResponse({"error": "unknown_pair"}, status_code=404)
-    if pair["approved"]:
+    if pair["approved"] or pair.get("approving"):
         return JSONResponse({"error": "already_approved"}, status_code=409)
-
+    # Claim the request before the first await: two concurrent approvals used to
+    # pass this check, create two registry entries and lose the first token.
+    pair["approving"] = True
     try:
-        data = await request.json()
-    except Exception:
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-    wanted = re.sub(r"[^a-z0-9_-]", "", str(data.get("username") or pair.get("hostname") or "node").lower())[:40]
-    if not wanted or len(wanted) < 2:
-        wanted = "node"
-    registry = load_registry()
-    if wanted in registry or wanted in RESERVED_NAMES:
-        wanted = unique_node_name(registry, wanted)
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        wanted = re.sub(r"[^a-z0-9_-]", "", str(data.get("username") or pair.get("hostname") or "node").lower())[:40]
+        if not wanted or len(wanted) < 2:
+            wanted = "node"
+        registry = load_registry()
+        if wanted in registry or wanted in RESERVED_NAMES:
+            wanted = unique_node_name(registry, wanted)
 
-    token = new_device_token()
-    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    entry = new_node_entry("", pair["os"], pair["arch"], now_iso, token)
-    entry["hostname"] = pair["hostname"]
-    registry[wanted] = entry
-    save_registry(registry)
+        token = new_device_token()
+        link_key = new_link_key()
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        entry = new_node_entry("", pair["os"], pair["arch"], now_iso, token, link_key)
+        entry["hostname"] = pair["hostname"]
+        registry[wanted] = entry
+        save_registry(registry)
 
-    pair["approved"] = True
+        pair["approved"] = True
+    finally:
+        pair.pop("approving", None)
     pair["issued"] = {
         "username": wanted,
         "token": token,
-        "link_key": entry["link_key"],
+        "link_key": link_key,
         "gateway": PUBLIC_HOST,
-        "sse_url": node_mcp_url(wanted, entry["link_key"]),
+        "sse_url": node_mcp_url(wanted, link_key),
         "tunnel_url": f"wss://{PUBLIC_HOST}/ws/tunnel?user={wanted}",
         "token_use": "Authorization: Bearer <token> (the tunnel and CLI use this; never in a URL)",
     }
@@ -1227,7 +1353,12 @@ async def device_rotate(request: Request):
     supplied, _source = request_credential(request)
     if not (admin_authorised(request) or token_matches_device(entry, supplied)):
         return JSONResponse({"error": "forbidden"}, status_code=403)
-    entry["link_key"] = new_link_key()
+    link_key = new_link_key()
+    entry["link_key_sha256"] = hash_secret(link_key)
+    entry.pop("link_key", None)
+    # An explicit rotation retires the overlap a reinstall left behind: the
+    # whole point is that the old URL stops working now.
+    entry.pop("link_key_prev_sha256", None)
     if entry.get("token"):
         # Move a pre-0.4.6 plaintext token to its hash before dropping it: the
         # credential must keep verifying, or rotating the link key would also
@@ -1243,8 +1374,8 @@ async def device_rotate(request: Request):
     return JSONResponse({
         "status": "rotated",
         "username": user,
-        "link_key": entry["link_key"],
-        "sse_url": node_mcp_url(user, entry["link_key"]),
+        "link_key": link_key,
+        "sse_url": node_mcp_url(user, link_key),
         "message": "The previous URL no longer works. Update the client connector.",
     })
 
@@ -1350,8 +1481,8 @@ async def oauth_discovery(request: Request):
     a bearer token in the URL, so the honest answer is metadata that advertises
     no authorization server and no bearer requirement for discovery.
     """
-    host = request.headers.get("host", PUBLIC_HOST)
-    base = f"https://{host}"
+    host = PUBLIC_HOST
+    base = PUBLIC_BASE_URL.rstrip("/") or f"https://{host}"
     return JSONResponse(
         {
             "resource": base,
@@ -3111,6 +3242,22 @@ _RELAY_HEADERS = (
 )
 _HEADER_VALUE_RE = re.compile(r"[\x00-\x1f\x7f]")
 _CONTENT_LENGTH_RE = re.compile(r"^\d{1,12}$")
+
+
+def _env_int(name: str, default: int, low: int, high: int) -> int:
+    try:
+        value = int(os.environ.get(name, "").strip() or default)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, value))
+
+
+#: One share response is buffered whole in this process. 16 MiB is enough for
+#: the files the product advertises and small enough that a few parallel
+#: requests cannot exhaust the gateway's memory.
+SHARE_RELAY_MAX_BYTES = _env_int("MESH_SHARE_RELAY_MAX_BYTES", 16 * 1024 * 1024,
+                                 64 * 1024, 256 * 1024 * 1024)
+_SHARE_RELAY_SLOTS = asyncio.Semaphore(_env_int("MESH_SHARE_RELAY_CONCURRENCY", 4, 1, 32))
 #: Content types that are text but do not start with ``text/``.
 _TEXTUAL_TYPES = (
     "application/json",
@@ -3152,11 +3299,40 @@ def _relay_headers(raw) -> dict:
             continue
         text = _HEADER_VALUE_RE.sub("", str(value))[:4096]
         text = text.encode("latin-1", "replace").decode("latin-1")
-        if name == "location" and not text.startswith("/"):
-            continue  # a redirect must stay inside this domain's share namespace
+        if name == "location":
+            # A redirect must stay inside this domain's share namespace. A
+            # protocol-relative "//evil.example" and a backslash form
+            # "/\\evil.example" also start with "/" but leave the origin, so
+            # they are rejected here rather than passed to the browser.
+            if not text.startswith("/") or text.startswith("//") or "\\" in text:
+                continue
         if name == "content-type":
             text = _with_charset(text)
         headers[name] = text
+    return headers
+
+
+#: Applied to every share response. The sandbox directive gives the document an
+#: opaque origin: pages and their scripts keep working, but they cannot read the
+#: cabinet (or any other same-site response) because same-origin requests from an
+#: opaque origin are cross-origin. Without this a user-published HTML share runs
+#: with the gateway's cookies and can drive /account.
+SHARE_CSP = (
+    "sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads; "
+    "default-src 'none'; img-src 'self' data: blob:; media-src 'self' data: blob:; "
+    "style-src 'unsafe-inline'; font-src data:; script-src 'unsafe-inline'; "
+    "frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+)
+
+
+def _apply_share_headers(headers: dict) -> dict:
+    """Force the share security policy, whatever the node returned."""
+    headers.pop("content-security-policy", None)
+    headers.pop("x-content-type-options", None)
+    headers.pop("referrer-policy", None)
+    headers["content-security-policy"] = SHARE_CSP
+    headers["x-content-type-options"] = "nosniff"
+    headers["referrer-policy"] = "no-referrer"
     return headers
 
 
@@ -3840,7 +4016,8 @@ def _format_device_result(name, res):
 
 
 def _share_response(status: int, message: str, extra=None) -> Response:
-    headers = {"content-type": "text/plain; charset=utf-8", "cache-control": "no-store"}
+    headers = {"content-type": "text/plain; charset=utf-8", "cache-control": "no-store",
+               "x-content-type-options": "nosniff", "referrer-policy": "no-referrer"}
     if extra:
         headers.update(extra)
     return Response(message + "\n", status_code=status, headers=headers)
@@ -3862,14 +4039,20 @@ async def public_share_endpoint(request: Request) -> Response:
     if method not in SHARE_METHODS:
         return _share_response(405, "method not allowed", {"allow": "GET, HEAD"})
     if user not in active_tunnels:
-        return _share_response(503, "node offline: the mesh agent on '%s' is not connected" % user)
+        # The same answer for "no such node", "node offline" and "no such
+        # share": anything else lets an anonymous caller enumerate the nodes of
+        # this gateway by comparing status codes.
+        return _share_response(404, "not found")
 
-    result = await call_remote_tool(user, "_http_share", {
-        "slug": slug,
-        "path": "/" + sub_path,
-        "method": method,
-        "query": request.url.query or "",
-    })
+    if _SHARE_RELAY_SLOTS.locked():
+        return _share_response(503, "busy", {"retry-after": "2"})
+    async with _SHARE_RELAY_SLOTS:
+        result = await call_remote_tool(user, "_http_share", {
+            "slug": slug,
+            "path": "/" + sub_path,
+            "method": method,
+            "query": request.url.query or "",
+        })
     if not isinstance(result, dict) or "status" not in result:
         logger.warning("share relay for '%s' returned an invalid response: %r", user, result)
         return _share_response(502, "bad gateway")
@@ -3878,11 +4061,16 @@ async def public_share_endpoint(request: Request) -> Response:
         body = base64.b64decode(result.get("body_b64") or "")
     except Exception:
         return _share_response(502, "bad gateway")
+    if len(body) > SHARE_RELAY_MAX_BYTES:
+        # A single public share must not be able to hold an unbounded buffer in
+        # the gateway process: everything else (tunnels, sessions) lives here.
+        logger.warning("share relay for '%s' refused a %d-byte body", user, len(body))
+        return _share_response(413, "share response too large")
     if not 200 <= status <= 599:
         # 1xx is not a final response: h11 rejects it and the client gets no
         # response at all, so a buggy node reply becomes a clean 502 instead.
         return _share_response(502, "bad gateway")
-    headers = _relay_headers(result.get("headers"))
+    headers = _apply_share_headers(_relay_headers(result.get("headers")))
     if status in (204, 304):
         # These statuses must not carry a body or a Content-Length.
         body = b""
@@ -4029,6 +4217,15 @@ async def tunnel_watchdog():
 @asynccontextmanager
 async def lifespan(_app):
     """Start the self-healing watchdog with the app (modern Starlette API)."""
+    # One startup pass turns link keys written by older releases into digests;
+    # existing connectors keep working because the digest still matches.
+    try:
+        registry = load_registry()
+        if migrate_link_keys(registry):
+            save_registry(registry)
+            logger.info("Registry link keys migrated to hashed storage")
+    except Exception as exc:                      # never block startup on this
+        logger.warning("Link-key migration skipped: %s", exc)
     task = asyncio.create_task(tunnel_watchdog())
     try:
         yield

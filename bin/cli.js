@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 const { spawn } = require('child_process');
 const fs = require('fs');
+const http = require('http');
+const https = require('https');
 const os = require('os');
 const path = require('path');
 
@@ -90,28 +92,62 @@ function runLocalScript(name, rest) {
   ps.on('exit', (code) => process.exit(code === null ? 1 : code));
 }
 
+const INSTALLER_BASE = 'https://racknerd-5a24bf9.merino-carob.ts.net';
+
+function downloadInstaller(name, target, done) {
+  // The installer is fetched to a file and executed from it with an argument
+  // array. It used to be interpolated into `curl … | bash -s -- ${rawArgs}` and
+  // into a PowerShell -Command string: an argument containing $(...) or a
+  // backtick was executed by the shell before the installer ever saw it.
+  const url = `${INSTALLER_BASE}/${name}`;
+  const request = (current, redirects) => {
+    const client = current.startsWith('https:') ? https : http;
+    client.get(current, (response) => {
+      if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location) {
+        response.resume();
+        if (redirects <= 0) {
+          done(new Error('too many redirects'));
+          return;
+        }
+        request(new URL(response.headers.location, current).toString(), redirects - 1);
+        return;
+      }
+      if (response.statusCode !== 200) {
+        response.resume();
+        done(new Error(`installer download failed: HTTP ${response.statusCode}`));
+        return;
+      }
+      const out = fs.createWriteStream(target, { mode: 0o600 });
+      response.pipe(out);
+      out.on('finish', () => out.close(() => done(null)));
+      out.on('error', done);
+    }).on('error', done);
+  };
+  request(url, 5);
+}
+
 function launchRemoteInstaller(args) {
-  const rawArgs = args.map(arg => `"${arg.replace(/"/g, '\\"')}"`).join(' ');
+  console.log('Launching Remote Harness MCP installer...');
 
-  console.log('🚀 Launching Remote Harness MCP installer...');
+  const name = isWindows ? 'install.ps1' : 'install.sh';
+  const target = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'rhm-installer-')), name);
 
-  if (isWindows) {
-    const psCmd = rawArgs
-      ? `& { $s = Invoke-RestMethod https://racknerd-5a24bf9.merino-carob.ts.net/install.ps1; & ([scriptblock]::Create($s)) ${rawArgs} }`
-      : `irm https://racknerd-5a24bf9.merino-carob.ts.net/install.ps1 | iex`;
-    const ps = spawn('powershell.exe', ['-ExecutionPolicy', 'Bypass', '-Command', psCmd], {
-      stdio: 'inherit'
+  downloadInstaller(name, target, (error) => {
+    if (error) {
+      console.error(`Could not download the installer: ${error.message}`);
+      console.error(`Download it yourself: ${INSTALLER_BASE}/${name}`);
+      process.exit(1);
+    }
+    const child = isWindows
+      ? spawn('powershell.exe',
+              ['-ExecutionPolicy', 'Bypass', '-File', target, ...args],
+              { stdio: 'inherit' })
+      : spawn('bash', [target, ...args], { stdio: 'inherit' });
+    child.on('exit', (code) => {
+      try { fs.rmSync(path.dirname(target), { recursive: true, force: true }); } catch (_) {}
+      process.exit(code === null ? 1 : code);
     });
-    ps.on('exit', (code) => process.exit(code || 0));
-  } else {
-    const bashCmd = rawArgs
-      ? `curl -fsSL https://racknerd-5a24bf9.merino-carob.ts.net/install.sh | bash -s -- ${rawArgs}`
-      : `curl -fsSL https://racknerd-5a24bf9.merino-carob.ts.net/install.sh | bash`;
-    const sh = spawn('bash', ['-c', bashCmd], {
-      stdio: 'inherit'
-    });
-    sh.on('exit', (code) => process.exit(code || 0));
-  }
+  });
 }
 
 const subcommand = (argv[0] || '').toLowerCase();

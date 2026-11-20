@@ -1,15 +1,21 @@
-﻿"""Bump the release version in every place the repository declares it.
+"""Bump the release version in every place the repository declares it.
 
-Run from the repository root: tests/test_version_single_source.py is the gate
-that proves the result is consistent.
+Run from anywhere: ``python tools/bump-version.py 0.6.0``. Without an argument
+it keeps the current ``core/version.py`` value, which is only useful to
+re-derive the other files. tests/test_version_single_source.py is the gate.
 """
 
 import json
 import pathlib
 import re
+import sys
 
-NEW = "0.5.1"
-ROOT = pathlib.Path(r"D:\MyProjects\Antigravity-mash")
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+current = re.search(r'__version__\s*=\s*"([^"]+)"',
+                    (ROOT / "core" / "version.py").read_text(encoding="utf-8")).group(1)
+NEW = sys.argv[1].strip() if len(sys.argv) > 1 else current
+if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?", NEW):
+    raise SystemExit("not a MAJOR.MINOR.PATCH version: %r" % NEW)
 
 # 1. core/version.py - the single source of truth.
 path = ROOT / "core" / "version.py"
@@ -49,3 +55,7 @@ print("core/version.py :", re.search(r'__version__\s*=\s*"([^"]+)"',
 print("package.json    :", json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"])
 print("alias package   :", json.loads((ROOT / "npm" / "gemini-computer-use" /
                                        "package.json").read_text(encoding="utf-8"))["version"])
+
+# 5. the plain VERSION marker used by older payload consumers.
+(ROOT / "VERSION").write_text(NEW + "\n", encoding="utf-8", newline="\n")
+print("VERSION         :", NEW)

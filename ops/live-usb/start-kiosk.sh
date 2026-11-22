@@ -6,6 +6,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="$(cd "${SCRIPT_DIR}/../.." && pwd):${PYTHONPATH:-}"
 KIOSK_HOST="127.0.0.1"
 KIOSK_PORT="${RHM_KIOSK_PORT:-8787}"
 KIOSK_URL="http://${KIOSK_HOST}:${KIOSK_PORT}"
@@ -51,7 +52,12 @@ wait_for_server() {
 launch_browser() {
     case "${BROWSER_BIN}" in
         chromium|chromium-browser|google-chrome)
+            local -a extra_flags=()
+            if [[ "$(id -u)" == "0" ]]; then
+                extra_flags+=(--no-sandbox --disable-dev-shm-usage)
+            fi
             exec "${BROWSER_BIN}" \
+                ${extra_flags[@]+"${extra_flags[@]}"} \
                 --kiosk \
                 --incognito \
                 --no-first-run \
@@ -103,36 +109,6 @@ if [[ -z "${BROWSER_BIN}" ]]; then
     fallback_tui
 fi
 
-launch_browser() {
-    case "${BROWSER_BIN}" in
-        chromium|chromium-browser|google-chrome)
-            exec "${BROWSER_BIN}" \
-                --kiosk \
-                --incognito \
-                --no-first-run \
-                --noerrdialogs \
-                --disable-infobars \
-                --disable-session-crashed-bubble \
-                --disable-translate \
-                --overscroll-history-navigation=0 \
-                --user-data-dir=/tmp/rhm-kiosk-profile \
-                "${KIOSK_URL}"
-            ;;
-        surf)
-            exec surf -F "${KIOSK_URL}"
-            ;;
-        epiphany-browser)
-            exec epiphany-browser --application-mode "${KIOSK_URL}"
-            ;;
-        midori)
-            exec midori -e Fullscreen -a "${KIOSK_URL}"
-            ;;
-        *)
-            exec "${BROWSER_BIN}" "${KIOSK_URL}"
-            ;;
-    esac
-}
-
 # 3. Launch under existing X11 session or start xinit + openbox
 if [[ -n "${DISPLAY:-}" ]]; then
     if command -v openbox >/dev/null 2>&1; then
@@ -151,7 +127,7 @@ openbox &
 exec "${SCRIPT_DIR}/start-kiosk.sh" --inner-browser
 EOF
     chmod +x "${XINITRC_TMP}"
-    xinit "${XINITRC_TMP}" -- :0 -nocursor vt1 || fallback_tui
+    xinit "${XINITRC_TMP}" -- :0 vt1 || fallback_tui
     rm -f "${XINITRC_TMP}"
 else
     echo "[rhm-kiosk] No DISPLAY and xinit/openbox unavailable." >&2

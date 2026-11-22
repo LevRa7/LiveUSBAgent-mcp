@@ -513,6 +513,19 @@ body {
   color: #ffffff;
 }
 
+.text-input:focus-visible,
+.tab-btn:focus-visible,
+.btn:focus-visible,
+.osk-key:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.wifi-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 @media (max-width: 800px) {
   .app-shell {
     padding: 16px;

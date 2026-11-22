@@ -108,6 +108,12 @@ try:  # pragma: no cover - core/skills_loader.py ships with Live USB nodes
 except Exception:  # pragma: no cover
     _skills_loader = None  # type: ignore
 
+# Optional: Live USB bootstrap helpers (active uplink detection).
+try:  # pragma: no cover - core/liveusb_bootstrap.py ships with Live USB nodes
+    from core import liveusb_bootstrap as _liveusb_bootstrap  # type: ignore
+except Exception:  # pragma: no cover
+    _liveusb_bootstrap = None  # type: ignore
+
 
 # ---------------------------------------------------------------------------
 # Platform / command shell
@@ -2155,12 +2161,49 @@ def _background_hint() -> str:
     return " On POSIX: 'nohup <command> > output.log 2>&1 &'."
 
 
+def _check_active_uplink_lock(command: str) -> Optional[str]:
+    """Refuse commands that bring down or disconnect the Live USB tunnel uplink."""
+    if not _is_live_usb_scenario():
+        return None
+    if str(os.environ.get("MESH_ALLOW_UPLINK_MUTATION", "")).strip().lower() in ("1", "true", "yes", "on"):
+        return None
+    if _liveusb_bootstrap is None:
+        return None
+    try:
+        uplink = _liveusb_bootstrap.active_uplink_interface()
+    except Exception:
+        return None
+    if not uplink:
+        return None
+    iface = r"(?<![A-Za-z0-9_.\-:])" + re.escape(uplink) + r"(?![A-Za-z0-9_.\-:])"
+    patterns = (
+        r"\bip\b[^;&|\n]*\blink\s+set\b[^;&|\n]*(?:\bdev\s+)?" + iface + r"[^;&|\n]*\bdown\b",
+        r"\bip\b[^;&|\n]*\blink\s+(?:del|delete)\b[^;&|\n]*(?:\bdev\s+)?" + iface,
+        r"\bip\b[^;&|\n]*\baddr(?:ess)?\s+flush\b[^;&|\n]*(?:\bdev\s+)?" + iface,
+        r"\bifconfig\b[^;&|\n]*" + iface + r"[^;&|\n]*\bdown\b",
+        r"\bnmcli\b[^;&|\n]*\b(?:dev(?:ice)?|d)\s+(?:disconnect|down)\b[^;&|\n]*" + iface,
+        r"\bifdown\b[^;&|\n]*" + iface,
+        r"\bnetworkctl\b[^;&|\n]*\bdown\b[^;&|\n]*" + iface,
+    )
+    for pat in patterns:
+        if re.search(pat, command, re.IGNORECASE):
+            return (
+                f"active_uplink_lock: refusing command that would bring down or disconnect "
+                f"the active uplink interface '{uplink}' carrying the Live USB tunnel. "
+                f"Set MESH_ALLOW_UPLINK_MUTATION=1 to override."
+            )
+    return None
+
+
 def _tool_bash_exec(args: Dict[str, Any]) -> Dict[str, Any]:
     if _read_only_active():
         return {"error": READ_ONLY_ERROR}
     command = args.get("command")
     if not isinstance(command, str) or not command.strip():
         return {"error": "command is required and must be a non-empty string"}
+    uplink_err = _check_active_uplink_lock(command)
+    if uplink_err:
+        return {"error": uplink_err}
     timeout = _clamp_int(args.get("timeout_sec"), 1, MAX_TIMEOUT_SEC, 25)
     max_chars = _max_chars(args.get("max_chars"))
     cursor = max(0, _safe_int(args.get("cursor"), 0))
@@ -2834,6 +2877,9 @@ def _tool_run_job(args: Dict[str, Any]) -> Dict[str, Any]:
         command = args.get("command")
         if not isinstance(command, str) or not command.strip():
             return {"error": "command is required and must be a non-empty string"}
+        uplink_err = _check_active_uplink_lock(command)
+        if uplink_err:
+            return {"error": uplink_err}
 
         if len(_running_jobs()) >= MAX_RUNNING_JOBS:
             return {"error": "too many running jobs (limit %d)" % MAX_RUNNING_JOBS}

@@ -455,7 +455,7 @@ def read_session_state(state_dir: Optional[Path] = None) -> Dict[str, Any]:
         return fallback
 
     connect_url = str(data.get("connect_url") or data.get("pair_url") or "").strip()
-    token = str(data.get("token") or data.get("live_token") or "").strip()
+    token = str(data.get("link_key") or data.get("token") or data.get("live_token") or "").strip()
     node_id = str(data.get("node_id") or data.get("hostname") or "").strip()
     tunnel_status = str(
         data.get("tunnel_status")
@@ -478,11 +478,82 @@ def trigger_session_regenerate(
     state_dir: Optional[Path] = None,
     run_cmd: CommandRunner = default_run_cmd,
 ) -> Dict[str, Any]:
-    """Signal LiveUSB bootstrap to rotate/re-register the session token."""
+    """Signal LiveUSB bootstrap to revoke and rotate/re-register the session token."""
     base = state_dir if state_dir is not None else get_live_state_dir()
-    trigger_path: Optional[str] = None
     messages: List[str] = []
 
+    # (a) If core.liveusb_bootstrap is importable, revoke the current ephemeral node
+    #     and remove agent.env so the next start/registration issues fresh credentials.
+    bootstrap_mod: Any = None
+    try:
+        bootstrap_mod = importlib.import_module("core.liveusb_bootstrap")
+    except ModuleNotFoundError:
+        bootstrap_mod = None
+    except Exception as exc:
+        messages.append(f"core.liveusb_bootstrap: {exc}")
+
+    if bootstrap_mod is not None:
+        revoke_fn = getattr(bootstrap_mod, "revoke_ephemeral_node", None)
+        if callable(revoke_fn):
+            try:
+                rev_res = revoke_fn(str(base))
+                if isinstance(rev_res, dict) and rev_res.get("ok"):
+                    messages.append("Текущая сессия отозвана на шлюзе")
+            except Exception as exc:
+                messages.append(f"revoke_ephemeral_node: {exc}")
+        try:
+            env_file = base / "agent.env"
+            if env_file.exists():
+                env_file.unlink()
+                messages.append("Файл agent.env удалён")
+        except Exception as exc:
+            messages.append(f"Не удалось удалить agent.env: {exc}")
+
+    # (b) If systemctl is available and rhm-live-agent.service is active/known,
+    #     restart the service so it re-registers cleanly.
+    rc_chk, out_chk, _ = run_cmd(
+        ["systemctl", "show", "-p", "LoadState", "--value", "rhm-live-agent.service"],
+        3.0,
+    )
+    load_state = (out_chk or "").strip().lower()
+    if rc_chk == 0 and load_state not in ("", "not-found", "masked"):
+        rc_rst, out_rst, err_rst = run_cmd(
+            ["systemctl", "restart", "rhm-live-agent.service"],
+            15.0,
+        )
+        if rc_rst == 0:
+            messages.append((out_rst or "Служба rhm-live-agent.service перезапущена").strip())
+            return {
+                "ok": True,
+                "method": "systemctl_restart",
+                "message": "; ".join(messages),
+                "trigger_file": None,
+            }
+        messages.append((err_rst or out_rst or f"Ошибка перезапуска службы (код {rc_rst})").strip())
+
+    # (c) Otherwise fall back to core.liveusb_bootstrap.register_ephemeral_node(...)
+    #     if MESH_GATEWAY is set, or write regenerate.trigger.
+    gateway_url = os.environ.get("MESH_GATEWAY", "").strip()
+    if bootstrap_mod is not None and gateway_url:
+        register_fn = getattr(bootstrap_mod, "register_ephemeral_node", None)
+        if callable(register_fn):
+            try:
+                reg_res = register_fn(gateway_url, state_dir=str(base))
+                if isinstance(reg_res, dict) and reg_res.get("ok"):
+                    messages.append("Новая эфемерная сессия зарегистрирована")
+                    return {
+                        "ok": True,
+                        "method": "register_ephemeral_node",
+                        "message": "; ".join(messages),
+                        "trigger_file": None,
+                    }
+                err_detail = reg_res.get("error") if isinstance(reg_res, dict) else "unknown error"
+                messages.append(f"register_ephemeral_node: {err_detail}")
+            except Exception as exc:
+                messages.append(f"register_ephemeral_node: {exc}")
+
+    # Fallback: write regenerate.trigger
+    trigger_path: Optional[str] = None
     try:
         base.mkdir(parents=True, exist_ok=True)
         tfile = base / "regenerate.trigger"
@@ -491,20 +562,6 @@ def trigger_session_regenerate(
         messages.append("Запрос на обновление токена записан")
     except Exception as exc:
         messages.append(f"Не удалось записать файл-триггер: {exc}")
-
-    # Optional hook: invoke core.liveusb_bootstrap if available and exposes a handler
-    try:
-        bootstrap_mod = importlib.import_module("core.liveusb_bootstrap")
-        for fn_name in ("regenerate_session", "rotate_session", "bootstrap_session"):
-            fn = getattr(bootstrap_mod, fn_name, None)
-            if callable(fn):
-                fn()
-                messages.append(f"Вызван core.liveusb_bootstrap.{fn_name}")
-                break
-    except ModuleNotFoundError:
-        pass
-    except Exception as exc:
-        messages.append(f"core.liveusb_bootstrap: {exc}")
 
     # Optional external command hook via environment variable
     regen_cmd = os.environ.get("RHM_REGENERATE_CMD", "").strip()
@@ -518,6 +575,7 @@ def trigger_session_regenerate(
     ok = trigger_path is not None
     return {
         "ok": ok,
+        "method": "trigger_file",
         "message": "; ".join(messages) if messages else "OK",
         "trigger_file": trigger_path,
     }

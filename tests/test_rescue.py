@@ -498,3 +498,151 @@ def test_mcp_tools_registers_and_dispatches_rescue_tools_on_live_usb(
     )
     assert action_res["dry_run"] is True
     assert action_res["argv"] == ["memtester", "128M", "1"]
+
+
+# ---------------------------------------------------------------------------
+# 7. Volatile mount detection, mountpoint validation, BitLocker step 2, uplink lock
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("root_fstype", ["overlay", "tmpfs"])
+def test_is_volatile_path_rejects_root_on_overlay_or_tmpfs(monkeypatch, root_fstype):
+    proc_mounts = (
+        f"{root_fstype} / {root_fstype} rw,relatime 0 0\n"
+        "/dev/sdb1 /mnt/scratch ext4 rw,relatime 0 0\n"
+    )
+    monkeypatch.setattr(rescue, "_read_file_text", lambda p: proc_mounts if p == "/proc/mounts" else "")
+
+    assert rescue._is_volatile_path("/root/dump.img") is True
+    assert rescue._is_volatile_path("/mnt/scratch/dump.img") is False
+
+    bad_ram = rescue.plan_or_run_rescue_action(
+        {"action": "ram_dump_plan", "output_path": "/root/dump.img"}
+    )
+    assert "error" in bad_ram
+    assert "volatile" in bad_ram["error"].lower()
+
+
+def test_ddrescue_plan_rejects_volatile_log_file(monkeypatch):
+    proc_mounts = (
+        "overlay / overlay rw,relatime 0 0\n"
+        "/dev/sdb1 /mnt/scratch ext4 rw,relatime 0 0\n"
+    )
+    monkeypatch.setattr(rescue, "_read_file_text", lambda p: proc_mounts if p == "/proc/mounts" else "")
+
+    res_tmp = rescue.plan_or_run_rescue_action(
+        {
+            "action": "ddrescue_plan",
+            "device": "/dev/sda",
+            "target_image": "/mnt/scratch/sda.img",
+            "log_file": "/tmp/sda.mapfile",
+        }
+    )
+    assert "error" in res_tmp
+    assert "volatile" in res_tmp["error"].lower()
+
+    res_root = rescue.plan_or_run_rescue_action(
+        {
+            "action": "ddrescue_plan",
+            "device": "/dev/sda",
+            "target_image": "/mnt/scratch/sda.img",
+            "log_file": "/root/sda.mapfile",
+        }
+    )
+    assert "error" in res_root
+    assert "volatile" in res_root["error"].lower()
+
+
+@pytest.mark.parametrize(
+    "bad_mp",
+    ["/", "/etc", "/mnt/rescue", "/mnt/rescue/", "/mnt/rescue/../etc", "/mnt/scratch/../../etc", "relative/path"],
+)
+def test_valid_mountpoint_rejects_unsafe_paths(bad_mp):
+    assert rescue._valid_mountpoint(bad_mp) is False
+
+    res_safe = rescue.plan_or_run_rescue_action(
+        {"action": "mount_safe", "device": "/dev/sda1", "mountpoint": bad_mp}
+    )
+    assert "error" in res_safe
+
+    res_auto = rescue.plan_or_run_rescue_action(
+        {"action": "mount_auto", "device": "/dev/sda1", "fstype": "ext4", "mountpoint": bad_mp}
+    )
+    assert "error" in res_auto
+
+    res_grub = rescue.plan_or_run_rescue_action(
+        {
+            "action": "grub_repair",
+            "device": "/dev/sda2",
+            "efi_partition": "/dev/sda1",
+            "mountpoint": bad_mp,
+        }
+    )
+    assert "error" in res_grub
+
+
+def test_valid_mountpoint_accepts_rescue_and_scratch_subdirs():
+    assert rescue._valid_mountpoint("/mnt/rescue/sda2") is True
+    assert rescue._valid_mountpoint("/mnt/scratch/recovery") is True
+
+
+def test_mount_auto_bitlocker_executes_loop_mount_after_dislocker_succeeds(linux_rescue_env):
+    calls: List[List[str]] = []
+
+    def fake_run(argv, timeout=20):
+        calls.append(list(argv))
+        return 0, f"ok:{argv[0]}", ""
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    linux_rescue_env.setattr(os, "makedirs", lambda *a, **kw: None)
+
+    res = rescue.plan_or_run_rescue_action(
+        {
+            "action": "mount_auto",
+            "device": "/dev/nvme0n1p3",
+            "fstype": "bitlocker",
+            "mountpoint": "/mnt/rescue/win_c",
+            "dry_run": False,
+        }
+    )
+    assert res["exit_code"] == 0
+    assert res["unlock_exit_code"] == 0
+    assert len(calls) == 2
+    assert calls[0][0] == "dislocker"
+    assert calls[1] == [
+        "mount",
+        "-o",
+        "loop,ro",
+        "/mnt/rescue/dislocker_nvme0n1p3/dislocker-file",
+        "/mnt/rescue/win_c",
+    ]
+
+
+def test_active_uplink_lock_blocks_down_and_disconnect_in_live_usb(monkeypatch, restore_mcp_tools):
+    monkeypatch.setenv("MESH_SCENARIO", "live_usb")
+    monkeypatch.delenv("MESH_ALLOW_UPLINK_MUTATION", raising=False)
+    mcp_tools.sync_scenario_tools()
+
+    monkeypatch.setattr(mcp_tools._liveusb_bootstrap, "active_uplink_interface", lambda: "eth0")
+
+    for cmd in (
+        "ip link set eth0 down",
+        "sudo ip link set dev eth0 down",
+        "ifconfig eth0 down",
+        "nmcli dev disconnect eth0",
+    ):
+        res_exec = mcp_tools.call_tool("bash_exec", {"command": cmd})
+        assert "error" in res_exec
+        assert "active_uplink_lock" in res_exec["error"]
+        assert "eth0" in res_exec["error"]
+
+        res_job = mcp_tools.call_tool("run_job", {"command": cmd})
+        assert "error" in res_job
+        assert "active_uplink_lock" in res_job["error"]
+        assert "eth0" in res_job["error"]
+
+    # Non-uplink interface is NOT blocked by active_uplink_lock
+    assert mcp_tools._check_active_uplink_lock("ip link set eth1 down") is None
+
+    # Explicit override via MESH_ALLOW_UPLINK_MUTATION=1 lifts the lock
+    monkeypatch.setenv("MESH_ALLOW_UPLINK_MUTATION", "1")
+    assert mcp_tools._check_active_uplink_lock("ip link set eth0 down") is None

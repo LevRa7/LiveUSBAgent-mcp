@@ -237,6 +237,7 @@ def configure_from_env() -> None:
         device_pim=_env_flag("MESH_DEVICE_PIM"),
         device_quick=_env_flag("MESH_DEVICE_QUICK"),
     )
+    mcp_tools.sync_scenario_tools()
 
 
 # Configure as soon as the node module is imported so external callers (tests,

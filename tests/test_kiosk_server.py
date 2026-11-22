@@ -410,12 +410,130 @@ def test_start_kiosk_and_udev_files_exist():
     assert "openbox" in sh_text
     assert "firstboot_tui.py" in sh_text
     assert "127.0.0.1" in sh_text
+    assert sh_text.count("launch_browser()") == 1
+    assert "-nocursor" not in sh_text
+    assert "--no-sandbox" in sh_text
+    assert "--disable-dev-shm-usage" in sh_text
+    assert "export PYTHONPATH=" in sh_text
 
     udev_text = UDEV_RULES_PATH.read_text(encoding="utf-8")
     assert "rndis_host" in udev_text
     assert "ipheth" in udev_text
     assert "usbmuxd" in udev_text
     assert 'ENV{NM_UNMANAGED}="0"' in udev_text
+
+
+def test_read_session_state_resolves_link_key_as_token(tmp_path: Path):
+    """session.json written by core/liveusb_bootstrap.py uses link_key -> ready=True, token=link_key."""
+    state_dir = tmp_path / "rhm-live"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "node_id": "live-abc123",
+                "link_key": "lk_live_key_42",
+                "connect_url": "https://smart-server.online/connect/ABCD-1234",
+            }
+        ),
+        encoding="utf-8",
+    )
+    sess = kiosk.read_session_state(state_dir)
+    assert sess["ready"] is True
+    assert sess["token"] == "lk_live_key_42"
+    assert sess["node_id"] == "live-abc123"
+
+
+def test_trigger_session_regenerate_systemctl_and_agent_env_cleanup(tmp_path: Path, monkeypatch):
+    state_dir = tmp_path / "rhm-live"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    env_file = state_dir / "agent.env"
+    env_file.write_text("MESH_USER=live-1\nMESH_TOKEN=tok-1\n", encoding="utf-8")
+    (state_dir / "session.json").write_text(
+        json.dumps({"node_id": "live-1", "link_key": "lk_1", "connect_url": "https://gw/c/1"}),
+        encoding="utf-8",
+    )
+
+    revoked_dirs: List[str] = []
+
+    class FakeBootstrap:
+        @staticmethod
+        def revoke_ephemeral_node(sd: str):
+            revoked_dirs.append(sd)
+            return {"ok": True}
+
+    monkeypatch.setattr(kiosk.importlib, "import_module", lambda name: FakeBootstrap if name == "core.liveusb_bootstrap" else None)
+
+    calls: List[List[str]] = []
+
+    def fake_run(cmd: List[str], timeout: float = 5.0) -> Tuple[int, str, str]:
+        calls.append(list(cmd))
+        if cmd[:2] == ["systemctl", "show"]:
+            return 0, "loaded\n", ""
+        if cmd[:2] == ["systemctl", "restart"]:
+            return 0, "", ""
+        return 127, "", "not found"
+
+    res = kiosk.trigger_session_regenerate(state_dir=state_dir, run_cmd=fake_run)
+    assert res["ok"] is True
+    assert res["method"] == "systemctl_restart"
+    assert revoked_dirs == [str(state_dir)]
+    assert not env_file.exists()
+    assert ["systemctl", "restart", "rhm-live-agent.service"] in calls
+
+
+def test_trigger_session_regenerate_fallback_register_ephemeral_node(tmp_path: Path, monkeypatch):
+    state_dir = tmp_path / "rhm-live"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("MESH_GATEWAY", "https://smart-server.online")
+
+    reg_calls: List[Tuple[str, str]] = []
+
+    class FakeBootstrap:
+        @staticmethod
+        def revoke_ephemeral_node(sd: str):
+            return {"ok": True}
+
+        @staticmethod
+        def register_ephemeral_node(gw: str, state_dir: str = ""):
+            reg_calls.append((gw, state_dir))
+            return {"ok": True, "node_id": "live-new"}
+
+    monkeypatch.setattr(kiosk.importlib, "import_module", lambda name: FakeBootstrap if name == "core.liveusb_bootstrap" else None)
+
+    def no_systemd(cmd: List[str], timeout: float = 5.0) -> Tuple[int, str, str]:
+        return 127, "", "command not found: systemctl"
+
+    res = kiosk.trigger_session_regenerate(state_dir=state_dir, run_cmd=no_systemd)
+    assert res["ok"] is True
+    assert res["method"] == "register_ephemeral_node"
+    assert reg_calls == [("https://smart-server.online", str(state_dir))]
+
+
+def test_firstboot_tui_renders_session_json(tmp_path: Path):
+    tui_path = REPO_ROOT / "ops" / "live-usb" / "firstboot_tui.py"
+    spec = importlib.util.spec_from_file_location("rhm_firstboot_tui_test", str(tui_path))
+    assert spec is not None and spec.loader is not None
+    tui = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tui)
+
+    state_dir = tmp_path / "rhm-live"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "node_id": "live-tui-99",
+                "connect_url": "https://smart-server.online/connect/TUI-99",
+                "link_key": "lk_tui_secret_99",
+            }
+        ),
+        encoding="utf-8",
+    )
+    banner = tui.render_banner(state_dir=state_dir)
+    assert "live-tui-99" in banner
+    assert "https://smart-server.online/connect/TUI-99" in banner
+    assert "lk_tui_secret_99" in banner
+    assert "FULL ACCESS" in banner
+    assert callable(tui.run_loop)
 
 
 def test_unslop_ui_surface_regex_audit():

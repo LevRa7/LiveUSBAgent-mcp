@@ -1,0 +1,14 @@
+# ops/live-usb/udev/99-rhm-no-automount.rules
+# Prevent udisks2 and desktop automounters from auto-mounting host storage
+# devices before read-only forensic/rescue inspection on Remote-Harness LiveUSB.
+
+ACTION!="add|change", GOTO="rhm_no_automount_end"
+SUBSYSTEM!="block", GOTO="rhm_no_automount_end"
+
+# Leave virtual loop/ram/zram devices used by live-boot untouched
+KERNEL=="loop*|ram*|zram*", GOTO="rhm_no_automount_end"
+
+# Never auto-mount or expose host disks/partitions to automounters
+ENV{UDISKS_AUTO}="0", ENV{UDISKS_IGNORE}="1"
+
+LABEL="rhm_no_automount_end"

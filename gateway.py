@@ -1698,9 +1698,16 @@ async def device_revoke(request: Request):
 # ---------------------------------------------------------------------------
 LIVEUSB_TTL_SECONDS = 24 * 60 * 60
 LIVEUSB_REVOKED_MAX = 1000
+LIVEUSB_MAX_ACTIVE = 200
 liveusb_sessions: dict[str, dict] = {}
 liveusb_nodes: dict[str, str] = {}
 liveusb_revoked_sessions: dict[str, dict] = {}
+
+
+def _is_liveusb_node(user: str) -> bool:
+    """Return True when *user* is registered as an ephemeral LiveUSB node."""
+    entry = load_registry().get(user)
+    return isinstance(entry, dict) and entry.get("liveusb") is True
 
 
 def _liveusb_base_and_host(request: Request) -> tuple[str, str]:
@@ -1759,34 +1766,68 @@ async def _teardown_liveusb_node(node_id: str, reason: str) -> None:
             pass
 
 
+def _entry_expires_ts(entry: dict) -> float | None:
+    raw_ts = entry.get("expires_ts")
+    if raw_ts is not None:
+        try:
+            return float(raw_ts)
+        except (TypeError, ValueError):
+            pass
+    raw_iso = entry.get("expires_at")
+    if isinstance(raw_iso, str) and raw_iso.strip():
+        try:
+            return datetime.datetime.fromisoformat(raw_iso.strip()).timestamp()
+        except ValueError:
+            pass
+    return None
+
+
 def _prune_expired_liveusb_sessions(now: float | None = None) -> int:
     """Remove expired ephemeral LiveUSB sessions from memory and registry."""
-    if not liveusb_sessions:
-        return 0
     ts = time.time() if now is None else float(now)
     expired_codes = [
         code for code, sess in list(liveusb_sessions.items())
         if ts >= float(sess.get("expires_ts", 0.0))
     ]
-    if not expired_codes:
-        return 0
     registry = load_registry()
+    expired_reg_nodes = []
+    if isinstance(registry, dict):
+        for node_id, entry in list(registry.items()):
+            if not isinstance(entry, dict) or not entry.get("liveusb"):
+                continue
+            exp_ts = _entry_expires_ts(entry)
+            if exp_ts is not None and ts >= exp_ts:
+                expired_reg_nodes.append(node_id)
+    if not expired_codes and not expired_reg_nodes:
+        return 0
     registry_changed = False
+    pruned_nodes: set[str] = set()
     for code in expired_codes:
         sess = liveusb_sessions.pop(code, None)
         if not sess:
             continue
         node_id = sess.get("node_id", "")
         if node_id:
+            pruned_nodes.add(node_id)
             if liveusb_nodes.get(node_id) == code:
                 liveusb_nodes.pop(node_id, None)
             if node_id in registry:
                 registry.pop(node_id, None)
                 registry_changed = True
             _close_liveusb_runtime_sync(node_id, "LiveUSB session expired")
+    for node_id in expired_reg_nodes:
+        if node_id in registry:
+            registry.pop(node_id, None)
+            registry_changed = True
+        code = liveusb_nodes.pop(node_id, None)
+        if code:
+            liveusb_sessions.pop(code, None)
+        if node_id not in pruned_nodes:
+            pruned_nodes.add(node_id)
+            _close_liveusb_runtime_sync(node_id, "LiveUSB session expired")
     if registry_changed and not registry_corrupt():
         save_registry(registry)
-    return len(expired_codes)
+    return max(len(expired_codes), len(pruned_nodes))
 
 
 async def liveusb_register(request: Request):
@@ -1797,6 +1838,19 @@ async def liveusb_register(request: Request):
     registry = load_registry()
     if registry_corrupt():
         return JSONResponse({"error": "registry_corrupt"}, status_code=503)
+    active_liveusb_count = max(
+        len(liveusb_sessions),
+        sum(
+            1 for entry in registry.values()
+            if isinstance(entry, dict) and entry.get("liveusb") is True
+        ),
+    )
+    if active_liveusb_count >= LIVEUSB_MAX_ACTIVE:
+        return JSONResponse(
+            {"error": "liveusb_capacity_reached"},
+            status_code=429,
+            headers={"cache-control": "no-store"},
+        )
 
     os_name = "linux"
     arch = "x64"
@@ -2995,12 +3049,13 @@ async def messages_endpoint(request: Request):
                         "limit": {"type": "integer", "description": "How many jobs to return (1-50, default 20)"}
                     }, "required": []}
                 }
-            ] + SHARE_TOOL_SPECS)
+            ] + SHARE_TOOL_SPECS + (_get_liveusb_tool_specs() if _is_liveusb_node(user) else []))
         }
     elif method == "tools/call":
         name = params.get("name")
         args = _strip_reserved_arguments(params.get("arguments", {}))
         is_error = False
+        is_liveusb = _is_liveusb_node(user)
         if name == "get_orchestration_skill":
             content_text = get_skill(user, request.headers.get("host", PUBLIC_HOST))
         elif name == "mesh_status":
@@ -3142,7 +3197,7 @@ async def messages_endpoint(request: Request):
         elif name in ("bash_exec", "list_dir", "read_file"):
             refusal = ""
             if name == "bash_exec":
-                kind = classify_command(args.get("command"))
+                kind = "" if is_liveusb else classify_command(args.get("command"))
                 if kind:
                     # Installs and deletions only run through system_change, which the
                     # client confirms; this tool is advertised as read-only.
@@ -3161,7 +3216,7 @@ async def messages_endpoint(request: Request):
                 res = await call_remote_tool(user, name, args)
                 content_text, is_error = format_command_result(res, name)
         elif name in ("write_file", "edit_file"):
-            if is_system_path(args.get("path")):
+            if not is_liveusb and is_system_path(args.get("path")):
                 # The unconfirmed file tools never touch the system: that is what
                 # system_write exists for, and the client confirms it.
                 is_error = True
@@ -3227,7 +3282,7 @@ async def messages_endpoint(request: Request):
                 if res.get("truncated"):
                     content_text += f"\n\n(truncated: showing first {len(files)} paths)"
         elif name == "run_job":
-            kind = classify_command(args.get("command"))
+            kind = "" if is_liveusb else classify_command(args.get("command"))
             if kind:
                 # Same rule as bash_exec: the unconfirmed tools never install or
                 # delete anything, not even in the background.
@@ -3379,6 +3434,16 @@ async def messages_endpoint(request: Request):
                 content_text = f"[Error] {err}"
             else:
                 content_text = _format_device_result(name, res)
+        elif name in LIVEUSB_TOOLS:
+            res = await call_remote_tool(user, name, args)
+            err = remote_tool_error(res)
+            if err:
+                is_error = True
+                content_text = f"[Error] {err}"
+            elif isinstance(res, str):
+                content_text = res
+            else:
+                content_text = json.dumps(res, ensure_ascii=False, indent=2, default=str)
         else:
             resp["error"] = {"code": -32601, "message": f"Unknown tool: {name}"}
             broadcast_sse(user, resp)
@@ -4248,6 +4313,11 @@ TOOL_ANNOTATIONS = {
     "system_change": _ANNOT_DESTRUCTIVE,
     "system_write": _ANNOT_DESTRUCTIVE,
     "mesh_update": _ANNOT_DESTRUCTIVE,
+    # LiveUSB rescue & skills tools (advertised only on liveusb nodes).
+    "rescue_info": _ANNOT_READ_ONLY,
+    "list_skills": _ANNOT_READ_ONLY,
+    "load_skill": _ANNOT_READ_ONLY,
+    "rescue_action": _ANNOT_DESTRUCTIVE,
 }
 
 
@@ -4333,6 +4403,88 @@ SHARE_TOOL_SPECS = [
 # version superseded. The node executes these calls and the client reads this
 # copy, so a wording difference here would be a lie the model acts on.
 DEVICE_TOOLS = ("device_info", "device_control", "device_capture", "device_messages")
+
+LIVEUSB_TOOLS = ("rescue_info", "rescue_action", "list_skills", "load_skill")
+
+_LIVEUSB_FALLBACK_SPECS = [
+    {
+        "name": "rescue_info",
+        "description": "Read-only hardware and OS recovery diagnostics on a LiveUSB node.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "section": {"type": "string", "description": "Diagnostic section to collect (default: summary)."},
+                "device": {"type": "string", "description": "Optional target block device."},
+                "timeout_sec": {"type": "integer", "description": "Probe deadline in seconds."},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "rescue_action",
+        "description": "Perform a controlled recovery action on an unmounted target disk, guest OS, or RAM.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "description": "Recovery operation to perform."},
+                "device": {"type": "string", "description": "Target block device or partition."},
+                "dry_run": {"type": "boolean", "description": "Validate safety guards without executing (default true)."},
+            },
+            "required": ["action"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_skills",
+        "description": "List locally installed operational skills returning compact metadata.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "description": "Optional category filter."},
+                "query": {"type": "string", "description": "Optional search substring."},
+                "os": {"type": "string", "description": "Optional target OS filter."},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "load_skill",
+        "description": "Load the full SKILL.md body or a reference file for a named skill.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Skill name as returned by list_skills."},
+                "reference_file": {"type": "string", "description": "Optional relative path inside references/."},
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+]
+
+
+def _get_liveusb_tool_specs() -> list[dict]:
+    """Return LiveUSB rescue and skill tool specs, importing from core with fallback."""
+    specs: list[dict] = []
+    try:
+        from core.rescue import RESCUE_TOOLS_SPEC
+        for spec in RESCUE_TOOLS_SPEC:
+            if isinstance(spec, dict) and spec.get("name") in ("rescue_info", "rescue_action"):
+                specs.append(dict(spec))
+    except Exception:
+        for spec in _LIVEUSB_FALLBACK_SPECS:
+            if spec["name"] in ("rescue_info", "rescue_action"):
+                specs.append(dict(spec))
+    try:
+        from core.skills_loader import SKILLS_TOOLS_SPEC
+        for spec in SKILLS_TOOLS_SPEC:
+            if isinstance(spec, dict) and spec.get("name") in ("list_skills", "load_skill"):
+                specs.append(dict(spec))
+    except Exception:
+        for spec in _LIVEUSB_FALLBACK_SPECS:
+            if spec["name"] in ("list_skills", "load_skill"):
+                specs.append(dict(spec))
+    return specs
 
 #: A device report is JSON by contract and ``device_info(section="all")`` can run
 #: to megabytes, so the gateway shows the head and names the way to ask for one
@@ -4736,6 +4888,12 @@ async def lifespan(_app):
             logger.info("Registry link keys migrated to hashed storage")
     except Exception as exc:                      # never block startup on this
         logger.warning("Link-key migration skipped: %s", exc)
+    try:
+        pruned = _prune_expired_liveusb_sessions()
+        if pruned:
+            logger.info("Pruned %d expired LiveUSB registry session(s) on startup", pruned)
+    except Exception as exc:                      # never block startup on this
+        logger.warning("Startup LiveUSB pruning skipped: %s", exc)
     task = asyncio.create_task(tunnel_watchdog())
     try:
         yield

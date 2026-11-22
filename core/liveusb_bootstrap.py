@@ -9,6 +9,7 @@ the network, gateway, or local filesystem is unavailable.
 from datetime import datetime, timezone
 import json
 import os
+import platform
 import socket
 import tempfile
 import time
@@ -233,7 +234,9 @@ def register_ephemeral_node(
         if not host:
             host = "liveusb"
 
-        payload = json.dumps({"hostname": host}).encode("utf-8")
+        payload = json.dumps(
+            {"hostname": host, "os": "linux", "arch": platform.machine()}
+        ).encode("utf-8")
         req = urllib.request.Request(
             f"{base}/v1/liveusb/register",
             data=payload,
@@ -300,6 +303,8 @@ def register_ephemeral_node(
         session_doc = {
             "node_id": node_id,
             "link_key": link_key,
+            "token": link_key,
+            "ready": True,
             "session_code": session_code,
             "connect_url": connect_url,
             "sse_url": sse_url,

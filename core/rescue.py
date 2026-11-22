@@ -24,6 +24,8 @@ _IS_WINDOWS = os.name == "nt"
 
 _VOLATILE_PREFIXES: Tuple[str, ...] = ("/tmp/", "/run/", "/var/tmp/")
 _VOLATILE_EXACT: Tuple[str, ...] = ("/tmp", "/run", "/var/tmp")
+_VOLATILE_FSTYPES = frozenset({"tmpfs", "ramfs", "overlay", "squashfs", "devtmpfs"})
+_ALLOWED_MOUNTPOINT_BASES: Tuple[str, ...] = ("/mnt/rescue/", "/mnt/scratch/")
 
 RESCUE_SECTIONS: Tuple[str, ...] = (
     "summary",
@@ -296,15 +298,95 @@ def _valid_dev_path(dev: str) -> bool:
     return bool(re.match(r"^/dev/[a-zA-Z0-9_\-/]+$", dev or ""))
 
 
+def _valid_mountpoint(path: str) -> bool:
+    """True only if path is a safe subdirectory under /mnt/rescue/ or /mnt/scratch/."""
+    raw = (path or "").strip()
+    if not raw or "\\" in raw or "\x00" in raw or not raw.startswith("/"):
+        return False
+    parts = [p for p in raw.split("/") if p]
+    if any(p in (".", "..") for p in parts):
+        return False
+    norm = "/" + "/".join(parts)
+    for base in _ALLOWED_MOUNTPOINT_BASES:
+        if norm.startswith(base) and len(norm) > len(base):
+            return True
+    return False
+
+
+def _resolve_nearest_existing_realpath(path: str) -> str:
+    """Resolve os.path.realpath() on the nearest existing parent and rejoin tail."""
+    norm = os.path.normpath(path).replace("\\", "/")
+    if not norm.startswith("/"):
+        return norm
+    cur = norm
+    tail: List[str] = []
+    while True:
+        try:
+            exists = os.path.exists(cur)
+        except Exception:
+            exists = False
+        if exists:
+            try:
+                real_parent = os.path.realpath(cur).replace("\\", "/")
+            except Exception:
+                real_parent = cur
+            # Guard against Windows host resolving POSIX '/' to 'D:/' during unit tests.
+            if not real_parent.startswith("/"):
+                return norm
+            if not tail:
+                return real_parent
+            return os.path.normpath(
+                real_parent.rstrip("/") + "/" + "/".join(reversed(tail))
+            ).replace("\\", "/")
+        parent, name = os.path.split(cur.rstrip("/"))
+        if not name or parent == cur:
+            return norm
+        tail.append(name)
+        cur = parent or "/"
+
+
+def _mount_fstype_for_path(resolved_path: str) -> Optional[str]:
+    """Return the filesystem type from /proc/mounts for the longest matching mountpoint."""
+    mounts_text = _read_file_text("/proc/mounts")
+    if not mounts_text or not resolved_path.startswith("/"):
+        return None
+    best_len = -1
+    best_fstype: Optional[str] = None
+    for line in mounts_text.splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        mp = parts[1].replace("\\040", " ").rstrip("/") or "/"
+        fstype = parts[2].strip().lower()
+        if mp == "/":
+            matched = True
+            mp_len = 1
+        else:
+            matched = resolved_path == mp or resolved_path.startswith(mp + "/")
+            mp_len = len(mp)
+        if matched and mp_len >= best_len:
+            best_len = mp_len
+            best_fstype = fstype
+    return best_fstype
+
+
 def _is_volatile_path(path: str) -> bool:
-    """True if path points inside a volatile RAM filesystem (/tmp, /run, /var/tmp)."""
+    """True if path points inside a volatile RAM filesystem (/tmp, /run, /var/tmp, or tmpfs/overlay mount)."""
     cleaned = (path or "").strip()
     if not cleaned:
         return False
     norm = os.path.normpath(cleaned).replace("\\", "/")
     if norm in _VOLATILE_EXACT:
         return True
-    return any(norm.startswith(prefix) or cleaned.startswith(prefix) for prefix in _VOLATILE_PREFIXES)
+    if any(norm.startswith(prefix) or cleaned.startswith(prefix) for prefix in _VOLATILE_PREFIXES):
+        return True
+    resolved = _resolve_nearest_existing_realpath(cleaned)
+    if resolved in _VOLATILE_EXACT or any(resolved.startswith(prefix) for prefix in _VOLATILE_PREFIXES):
+        return True
+    fstype = _mount_fstype_for_path(resolved)
+    if fstype in _VOLATILE_FSTYPES:
+        return True
+    return False
 
 
 def _kernel_filesystems() -> List[str]:
@@ -676,6 +758,13 @@ def _plan_or_run_mount_auto(args: Dict[str, Any], dry_run: bool) -> Dict[str, An
 
     dev_name = os.path.basename(device) if device else (pool_name or "target")
     mountpoint = str(args.get("mountpoint") or f"/mnt/rescue/{dev_name}").strip()
+    if not _valid_mountpoint(mountpoint):
+        return {
+            "error": (
+                f"Invalid mountpoint '{mountpoint}': must be a subdirectory under "
+                "/mnt/rescue/ or /mnt/scratch/ without '..' traversal."
+            )
+        }
 
     warnings: List[str] = []
     fallback_argv: Optional[List[str]] = None
@@ -796,6 +885,21 @@ def _plan_or_run_mount_auto(args: Dict[str, Any], dry_run: bool) -> Dict[str, An
         os.makedirs(str(extra["dislocker_dir"]), exist_ok=True)
 
     rc, out, err = _run_cmd(argv, timeout=20)
+    if fstype == "bitlocker" and rc == 0 and planned_steps and len(planned_steps) >= 2:
+        loop_argv = planned_steps[1]
+        rc_loop, out_loop, err_loop = _run_cmd(loop_argv, timeout=20)
+        plan.update(
+            {
+                "unlock_exit_code": rc,
+                "unlock_stdout": out,
+                "unlock_stderr": err,
+                "loop_argv": loop_argv,
+                "exit_code": rc_loop,
+                "stdout": out_loop,
+                "stderr": err_loop,
+            }
+        )
+        return plan
     if rc != 0 and fallback_argv:
         rc_fb, out_fb, err_fb = _run_cmd(fallback_argv, timeout=20)
         plan.update(
@@ -833,6 +937,13 @@ def plan_or_run_rescue_action(args: Dict[str, Any]) -> Dict[str, Any]:
         writable = bool(args.get("writable", False))
         dev_name = os.path.basename(device)
         mountpoint = str(args.get("mountpoint") or f"/mnt/rescue/{dev_name}").strip()
+        if not _valid_mountpoint(mountpoint):
+            return {
+                "error": (
+                    f"Invalid mountpoint '{mountpoint}': must be a subdirectory under "
+                    "/mnt/rescue/ or /mnt/scratch/ without '..' traversal."
+                )
+            }
         opts = "rw,noatime" if writable else "ro,noload"
         argv = ["mount", "-o", opts, device, mountpoint]
         plan = {
@@ -859,11 +970,11 @@ def plan_or_run_rescue_action(args: Dict[str, Any]) -> Dict[str, Any]:
         log_file = str(args.get("log_file") or f"{target_image}.mapfile").strip()
         if not _valid_dev_path(device) or not target_image:
             return {"error": "ddrescue_plan requires both 'device' and 'target_image'"}
-        if _is_volatile_path(target_image):
+        if _is_volatile_path(target_image) or _is_volatile_path(log_file):
             return {
                 "error": (
-                    "Refusing to write recovery image to volatile RAM filesystem "
-                    "(/tmp, /run, or /var/tmp). Mount an external scratch disk under /mnt/scratch first."
+                    "Refusing to write recovery image or log_file to volatile RAM filesystem "
+                    "(/tmp, /run, /var/tmp, or tmpfs/overlay mount). Mount an external scratch disk under /mnt/scratch first."
                 )
             }
         argv = ["ddrescue", "-f", "-n", device, target_image, log_file]
@@ -940,6 +1051,13 @@ def plan_or_run_rescue_action(args: Dict[str, Any]) -> Dict[str, Any]:
         mountpoint = str(args.get("mountpoint") or "/mnt/rescue/root").strip()
         if not _valid_dev_path(device) or not _valid_dev_path(efi_part):
             return {"error": "grub_repair requires 'device' (root FS) and 'efi_partition' (ESP)"}
+        if not _valid_mountpoint(mountpoint):
+            return {
+                "error": (
+                    f"Invalid mountpoint '{mountpoint}': must be a subdirectory under "
+                    "/mnt/rescue/ or /mnt/scratch/ without '..' traversal."
+                )
+            }
         steps = [
             ["mount", device, mountpoint],
             ["mount", efi_part, f"{mountpoint}/boot/efi"],

@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import platform
 import stat
 import urllib.error
 
@@ -185,7 +186,7 @@ def test_register_ephemeral_node_writes_agent_env_and_atomic_session_json(tmp_pa
     assert res["ok"] is True
     assert captured["url"] == "https://gw.example.test/v1/liveusb/register"
     assert captured["method"] == "POST"
-    assert captured["body"] == {"hostname": "rescue-box"}
+    assert captured["body"] == {"hostname": "rescue-box", "os": "linux", "arch": platform.machine()}
     assert captured["timeout"] == 12.0
 
     # Verify agent.env contents
@@ -221,6 +222,9 @@ def test_register_ephemeral_node_writes_agent_env_and_atomic_session_json(tmp_pa
     ):
         assert field in session_doc and session_doc[field]
     assert session_doc["node_id"] == "live-abc123"
+    assert session_doc["link_key"] == "lk_live_888"
+    assert session_doc["token"] == "lk_live_888"
+    assert session_doc["ready"] is True
     assert session_doc["gateway"] == "https://gw.example.test"
     assert "device_token" not in session_doc
 
@@ -427,3 +431,16 @@ def test_agent_bootstrap_ephemeral_registers_exports_and_hooks_atexit(tmp_path, 
     assert len(atexit_hooks) == 1
     assert atexit_hooks[0][0] is liveusb_bootstrap.revoke_ephemeral_node
     assert atexit_hooks[0][2] == {"state_dir": str(state_dir)}
+
+
+def test_configure_from_env_syncs_liveusb_scenario_tools(monkeypatch):
+    from core import mcp_tools
+    monkeypatch.setenv("MESH_SCENARIO", "live_usb")
+    try:
+        agent.configure_from_env()
+        tool_names = {t["name"] for t in mcp_tools.TOOLS}
+        assert "rescue_info" in tool_names
+        assert "rescue_action" in tool_names
+    finally:
+        monkeypatch.delenv("MESH_SCENARIO", raising=False)
+        mcp_tools.sync_scenario_tools()

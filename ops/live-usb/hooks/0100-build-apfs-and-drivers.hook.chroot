@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+# ops/live-usb/hooks/0100-build-apfs-and-drivers.hook.chroot
+# Live-build chroot hook for Remote-Harness LiveUSB (Debian 13 "Trixie"):
+#   - Detects chroot kernel version(s) under /lib/modules/ (never uses host uname -r)
+#   - Builds & installs linux-apfs-rw via DKMS against chroot kernel headers
+#   - Builds & installs apfs-fuse into /usr/local/bin/apfs-fuse
+#   - Optionally installs broadcom-sta-dkms while preserving brcmfmac for modern chips
+#   - Configures /etc/modules-load.d/rhm-liveusb.conf (graceful non-fatal loading)
+#   - Enables NetworkManager.service, usbmuxd.service, and rhm-live-agent.service
+
+set -euo pipefail
+
+log() {
+    echo "[rhm-hook] $*"
+}
+
+warn() {
+    echo "[rhm-hook] WARNING: $*" >&2
+}
+
+# 1. Detect installed chroot kernel version(s) under /lib/modules/ (never uname -r)
+KVERSIONS=()
+if [[ -d /lib/modules ]]; then
+    for kdir in /lib/modules/*; do
+        [[ -d "${kdir}" ]] || continue
+        kver="$(basename "${kdir}")"
+        [[ -n "${kver}" ]] && KVERSIONS+=("${kver}")
+    done
+fi
+
+if [[ ${#KVERSIONS[@]} -eq 0 ]]; then
+    warn "No kernel versions found under /lib/modules/; skipping kernel module builds."
+else
+    log "Detected chroot kernel version(s): ${KVERSIONS[*]}"
+fi
+
+# 2. Build & install linux-apfs-rw via DKMS against chroot kernel headers
+build_linux_apfs_rw() {
+    if [[ ${#KVERSIONS[@]} -eq 0 ]]; then
+        return 0
+    fi
+    if ! command -v git >/dev/null 2>&1 || ! command -v dkms >/dev/null 2>&1; then
+        warn "git or dkms missing; skipping linux-apfs-rw build."
+        return 0
+    fi
+
+    local pkg_name="linux-apfs-rw"
+    local pkg_ver="0.3"
+    local src_dir="/usr/src/${pkg_name}-${pkg_ver}"
+
+    log "Cloning ${pkg_name} into ${src_dir}..."
+    rm -rf "${src_dir}"
+    if ! git clone --depth 1 https://github.com/linux-apfs/linux-apfs-rw.git "${src_dir}"; then
+        warn "Failed to clone linux-apfs-rw; continuing without kernel APFS driver."
+        return 0
+    fi
+    rm -rf "${src_dir}/.git"
+
+    if [[ ! -f "${src_dir}/dkms.conf" ]]; then
+        cat <<'EOF' > "${src_dir}/dkms.conf"
+PACKAGE_NAME="linux-apfs-rw"
+PACKAGE_VERSION="0.3"
+BUILT_MODULE_NAME[0]="apfs"
+DEST_MODULE_LOCATION[0]="/updates/dkms"
+AUTOINSTALL="yes"
+MAKE[0]="make -C ${kernel_source_dir} M=${dkms_tree}/${PACKAGE_NAME}/${PACKAGE_VERSION}/build modules"
+CLEAN="make -C ${kernel_source_dir} M=${dkms_tree}/${PACKAGE_NAME}/${PACKAGE_VERSION}/build clean"
+EOF
+    fi
+
+    dkms remove -m "${pkg_name}" -v "${pkg_ver}" --all >/dev/null 2>&1 || true
+    if ! dkms add -m "${pkg_name}" -v "${pkg_ver}"; then
+        warn "dkms add failed for ${pkg_name}/${pkg_ver}"
+        return 0
+    fi
+
+    local kver
+    for kver in "${KVERSIONS[@]}"; do
+        if [[ ! -d "/lib/modules/${kver}/build" ]]; then
+            warn "Kernel headers missing at /lib/modules/${kver}/build; skipping ${pkg_name} for ${kver}."
+            continue
+        fi
+        log "Building & installing ${pkg_name} via DKMS for kernel ${kver}..."
+        if dkms build -m "${pkg_name}" -v "${pkg_ver}" -k "${kver}" && \
+           dkms install -m "${pkg_name}" -v "${pkg_ver}" -k "${kver}"; then
+            log "Installed ${pkg_name} for ${kver}."
+        else
+            warn "${pkg_name} DKMS build failed for ${kver}; falling back to apfs-fuse / libfsapfs-utils."
+        fi
+    done
+}
+
+# 3. Build & install apfs-fuse into /usr/local/bin/apfs-fuse
+build_apfs_fuse() {
+    if ! command -v git >/dev/null 2>&1 || ! command -v cmake >/dev/null 2>&1; then
+        warn "git or cmake missing; skipping apfs-fuse build."
+        return 0
+    fi
+
+    local tmp_dir="/tmp/rhm-build-apfs-fuse"
+    rm -rf "${tmp_dir}"
+    log "Cloning apfs-fuse..."
+    if ! git clone --depth 1 --recurse-submodules --shallow-submodules \
+        https://github.com/sgan81/apfs-fuse.git "${tmp_dir}"; then
+        warn "Failed to clone apfs-fuse; continuing with libfsapfs-utils."
+        return 0
+    fi
+
+    if cmake -B "${tmp_dir}/build" -S "${tmp_dir}" -DCMAKE_BUILD_TYPE=Release && \
+       cmake --build "${tmp_dir}/build" -j"$(nproc)"; then
+        if [[ -f "${tmp_dir}/build/apfs-fuse" ]]; then
+            install -m 0755 "${tmp_dir}/build/apfs-fuse" /usr/local/bin/apfs-fuse
+            log "Installed /usr/local/bin/apfs-fuse."
+        fi
+        if [[ -f "${tmp_dir}/build/apfsutil" ]]; then
+            install -m 0755 "${tmp_dir}/build/apfsutil" /usr/local/bin/apfsutil
+            log "Installed /usr/local/bin/apfsutil."
+        fi
+    else
+        warn "apfs-fuse build failed; continuing with libfsapfs-utils."
+    fi
+
+    rm -rf "${tmp_dir}"
+}
+
+# 4. Optional broadcom-sta-dkms (preserving brcmfmac for newer Broadcom chips)
+install_broadcom_sta() {
+    if ! apt-cache show broadcom-sta-dkms >/dev/null 2>&1; then
+        log "broadcom-sta-dkms not available in configured repositories; skipping."
+        return 0
+    fi
+
+    log "Installing broadcom-sta-dkms..."
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends broadcom-sta-dkms; then
+        local kver
+        for kver in "${KVERSIONS[@]}"; do
+            if [[ -d "/lib/modules/${kver}/build" ]]; then
+                dkms autoinstall -k "${kver}" || warn "dkms autoinstall returned non-zero for ${kver}"
+            fi
+        done
+
+        # broadcom-sta-dkms ships a blanket blacklist that disables brcmfmac/bcma,
+        # which breaks modern Broadcom Wi-Fi hardware (e.g. newer laptops/MacBooks).
+        # Un-blacklist brcmfmac and bcma so modern chips keep working automatically;
+        # legacy BCM43xx devices can still load wl explicitly via 'modprobe wl'.
+        local bcm_conf="/etc/modprobe.d/broadcom-sta-dkms.conf"
+        if [[ -f "${bcm_conf}" ]]; then
+            log "Scoping ${bcm_conf} to preserve brcmfmac/bcma for modern Broadcom chips..."
+            sed -i -E 's/^([[:space:]]*blacklist[[:space:]]+(brcmfmac|bcma)\b)/# [rhm-liveusb] preserved for modern chips: \1/' "${bcm_conf}"
+        fi
+    else
+        warn "broadcom-sta-dkms installation failed; purging half-configured package and continuing with firmware-brcm80211 / brcmfmac."
+        dpkg --purge broadcom-sta-dkms || true
+    fi
+}
+
+build_linux_apfs_rw
+build_apfs_fuse
+install_broadcom_sta
+
+# Rebuild module dependencies for every chroot kernel
+for kver in "${KVERSIONS[@]}"; do
+    depmod -a "${kver}" || warn "depmod failed for ${kver}"
+done
+
+# 5. Configure kernel modules to load at boot (graceful non-fatal loading)
+log "Writing /etc/modules-load.d/rhm-liveusb.conf..."
+mkdir -p /etc/modules-load.d
+cat <<'EOF' > /etc/modules-load.d/rhm-liveusb.conf
+# Remote-Harness LiveUSB: USB tethering & cross-OS filesystem modules
+# Loaded gracefully at boot (missing optional modules will not block startup).
+ipheth
+rndis_host
+cdc_ether
+cdc_ncm
+ntfs3
+exfat
+hfsplus
+apfs
+EOF
+
+# Ensure systemd-modules-load never marks boot degraded if an optional out-of-tree module is absent
+mkdir -p /etc/systemd/system/systemd-modules-load.service.d
+cat <<'EOF' > /etc/systemd/system/systemd-modules-load.service.d/rhm-nonfatal.conf
+[Service]
+SuccessExitStatus=1
+EOF
+
+# 6. Enable NetworkManager, usbmuxd, and rhm-live-agent services
+log "Enabling NetworkManager, usbmuxd, and rhm-live-agent.service..."
+systemctl enable NetworkManager.service || true
+systemctl enable usbmuxd.service || true
+systemctl enable rhm-live-agent.service || true
+
+# Ensure multi-user.target.wants symlinks exist even if a unit is static or masked
+mkdir -p /etc/systemd/system/multi-user.target.wants
+if [[ -f /etc/systemd/system/rhm-live-agent.service ]]; then
+    ln -sf /etc/systemd/system/rhm-live-agent.service \
+        /etc/systemd/system/multi-user.target.wants/rhm-live-agent.service
+fi
+if [[ -f /lib/systemd/system/NetworkManager.service ]]; then
+    ln -sf /lib/systemd/system/NetworkManager.service \
+        /etc/systemd/system/multi-user.target.wants/NetworkManager.service
+elif [[ -f /usr/lib/systemd/system/NetworkManager.service ]]; then
+    ln -sf /usr/lib/systemd/system/NetworkManager.service \
+        /etc/systemd/system/multi-user.target.wants/NetworkManager.service
+fi
+if [[ -f /lib/systemd/system/usbmuxd.service ]]; then
+    ln -sf /lib/systemd/system/usbmuxd.service \
+        /etc/systemd/system/multi-user.target.wants/usbmuxd.service
+elif [[ -f /usr/lib/systemd/system/usbmuxd.service ]]; then
+    ln -sf /usr/lib/systemd/system/usbmuxd.service \
+        /etc/systemd/system/multi-user.target.wants/usbmuxd.service
+fi
+
+# Clean apt caches to keep the LiveUSB squashfs lean
+apt-get clean || true
+
+log "Chroot hook complete."

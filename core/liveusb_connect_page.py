@@ -205,6 +205,11 @@ def render_connect_page(
     border-color: #444c56;
   }}
 
+  .tab-btn:focus-visible {{
+    outline: 2px solid #58a6ff;
+    outline-offset: 2px;
+  }}
+
   .tab-btn[aria-selected="true"] {{
     background-color: #21262d;
     border-color: #58a6ff;
@@ -255,6 +260,11 @@ def render_connect_page(
   .copy-btn:hover {{
     background-color: #2b313a;
     border-color: #444c56;
+  }}
+
+  .copy-btn:focus-visible {{
+    outline: 2px solid #58a6ff;
+    outline-offset: 2px;
   }}
 
   .copy-btn.is-copied {{
@@ -357,7 +367,7 @@ def render_connect_page(
           <pre class="code-box">{esc_mcp_url}</pre>
         </div>
         <ol class="steps">
-          <li>Откройте «Настройки» -&gt; «Приложения и коннекторы» -&gt; «Создать коннектор».</li>
+          <li>Откройте «Настройки» &rarr; «Приложения и коннекторы» &rarr; «Создать коннектор».</li>
           <li>Вставьте MCP URL в поле адреса сервера.</li>
           <li>Выберите режим без дополнительной аутентификации (токен передаётся в URL) и сохраните.</li>
         </ol>
@@ -386,7 +396,7 @@ def render_connect_page(
           <pre class="code-box">{esc_claude_cli}</pre>
         </div>
         <ol class="steps">
-          <li>В Claude.ai добавьте MCP URL в разделе «Настройки» -&gt; «Интеграции».</li>
+          <li>В Claude.ai добавьте MCP URL в разделе «Настройки» &rarr; «Интеграции».</li>
           <li>В Claude Desktop добавьте блок mcpServers в файл claude_desktop_config.json.</li>
           <li>В Claude Code выполните команду claude mcp add в терминале.</li>
         </ol>

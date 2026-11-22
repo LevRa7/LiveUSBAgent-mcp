@@ -797,6 +797,21 @@ LSBLK_WIN = json.dumps(
     }
 )
 
+LSBLK_TWO_DISKS = json.dumps(
+    {
+        "blockdevices": [
+            _lsblk_disk(
+                ("sda1", "vfat", "EFI", "AAAA-1111", None),
+                ("sda2", "ext4", "root", "uuid-ext4", None),
+            ),
+            _lsblk_disk(
+                ("sdb1", "ntfs", "Backup", "BBBB-2222", None),
+                name="sdb",
+            ),
+        ]
+    }
+)
+
 LSBLK_RESCUE = json.dumps(
     {
         "blockdevices": [
@@ -905,6 +920,7 @@ def test_collect_partitions_parses_sfdisk_json(linux_rescue_env):
 
     assert res["available"] is True
     assert res["source"] == "sfdisk"
+    # device comes from partitiontable.device, not from the argument
     assert res["device"] == "/dev/nvme0n1"
     assert res["label"] == "gpt"
     assert [p["node"] for p in res["partitions"]] == ["/dev/nvme0n1p1", "/dev/nvme0n1p2"]
@@ -916,6 +932,15 @@ def test_collect_partitions_parses_sfdisk_json(linux_rescue_env):
     assert calls[0] == ["sfdisk", "-J", "/dev/nvme0n1"]
 
 
+def test_collect_partitions_prefers_partitiontable_device_over_the_argument(linux_rescue_env):
+    linux_rescue_env.setattr(
+        rescue, "_run_cmd", lambda argv, timeout=8: (0, SFDISK_GPT, "") if argv[0] == "sfdisk" else (1, "", "")
+    )
+    res = rescue.collect_partitions("/dev/sda")
+    assert res["available"] is True
+    assert res["device"] == "/dev/nvme0n1"
+
+
 def test_collect_partitions_rejects_invalid_device(linux_rescue_env):
     assert rescue.collect_partitions(None)["available"] is False
     assert rescue.collect_partitions("/dev/../etc/passwd")["available"] is False
@@ -923,11 +948,14 @@ def test_collect_partitions_rejects_invalid_device(linux_rescue_env):
 
 
 def test_collect_partitions_falls_back_to_lsblk_when_sfdisk_fails(linux_rescue_env):
+    calls: List[List[str]] = []
+
     def fake_run(argv, timeout=8):
+        calls.append(list(argv))
         if argv[0] == "sfdisk":
             return 1, "", "sfdisk: cannot open /dev/sda: Permission denied"
         if argv[0] == "lsblk":
-            return 0, LSBLK_LINUX, ""
+            return 0, LSBLK_TWO_DISKS, ""
         return 1, "", "unexpected"
 
     linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
@@ -935,9 +963,30 @@ def test_collect_partitions_falls_back_to_lsblk_when_sfdisk_fails(linux_rescue_e
 
     assert res["available"] is True
     assert res["source"] == "lsblk"
+    # Only /dev/sda's own partitions, never the other disk's /dev/sdb1.
     assert [p["node"] for p in res["partitions"]] == ["/dev/sda1", "/dev/sda2"]
     assert res["partitions"][1]["type"] == "ext4"
     assert any("sfdisk" in warning for warning in res["warnings"])
+    # lsblk is scoped to the requested device.
+    assert calls[1][-1] == "/dev/sda"
+
+
+def test_collect_partitions_lsblk_fallback_filters_foreign_rows(linux_rescue_env):
+    """Even if lsblk answers with another disk, its partitions must be dropped."""
+
+    def fake_run(argv, timeout=8):
+        if argv[0] == "sfdisk":
+            return 1, "", "sfdisk failed"
+        if argv[0] == "lsblk":
+            return 0, LSBLK_TWO_DISKS, ""
+        return 1, "", "unexpected"
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    res = rescue.collect_partitions("/dev/sdb")
+
+    assert res["available"] is True
+    assert [p["node"] for p in res["partitions"]] == ["/dev/sdb1"]
+    assert any("ignored partition outside /dev/sdb" in warning for warning in res["warnings"])
 
 
 def test_collect_raid_lvm_parses_lsblk_and_lvm(linux_rescue_env):
@@ -1127,6 +1176,89 @@ def test_collect_installed_os_umounts_even_when_reading_os_release_raises(linux_
     assert umount_calls == [["umount", "/mnt/rescue/_osprobe_sda2"]]
 
 
+def test_collect_installed_os_retries_with_lazy_umount(linux_rescue_env):
+    calls: List[List[str]] = []
+
+    def fake_run(argv, timeout=15):
+        calls.append(list(argv))
+        if argv[0] == "lsblk":
+            return 0, LSBLK_LINUX, ""
+        if argv[:2] == ["umount", "-l"]:
+            return 0, "", ""
+        if argv[0] == "umount":
+            return 32, "", "umount: /mnt/rescue/_osprobe_sda2: target is busy"
+        return 0, "", ""
+
+    def fake_read(path):
+        return OS_RELEASE_DEBIAN if path.endswith("/etc/os-release") else ""
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    linux_rescue_env.setattr(rescue, "_read_file_text", fake_read)
+    linux_rescue_env.setattr(os, "makedirs", lambda *args, **kwargs: None)
+    linux_rescue_env.setattr(os.path, "ismount", lambda path: False)
+
+    res = rescue.collect_installed_os()
+
+    assert res["available"] is True
+    assert len(res["operating_systems"]) == 1
+    umount_calls = [call for call in calls if call[0] == "umount"]
+    assert umount_calls == [
+        ["umount", "/mnt/rescue/_osprobe_sda2"],
+        ["umount", "-l", "/mnt/rescue/_osprobe_sda2"],
+    ]
+    assert not any("left mounted" in warning for warning in res["warnings"])
+
+
+def test_collect_installed_os_warns_when_the_mount_cannot_be_released(linux_rescue_env):
+    calls: List[List[str]] = []
+
+    def fake_run(argv, timeout=15):
+        calls.append(list(argv))
+        if argv[0] == "lsblk":
+            return 0, LSBLK_LINUX, ""
+        if argv[0] == "umount":
+            return 32, "", "umount: target is busy"
+        return 0, "", ""
+
+    def fake_read(path):
+        return OS_RELEASE_DEBIAN if path.endswith("/etc/os-release") else ""
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    linux_rescue_env.setattr(rescue, "_read_file_text", fake_read)
+    linux_rescue_env.setattr(os, "makedirs", lambda *args, **kwargs: None)
+    linux_rescue_env.setattr(os.path, "ismount", lambda path: True)
+
+    res = rescue.collect_installed_os()
+
+    assert res["available"] is True
+    umount_calls = [call for call in calls if call[0] == "umount"]
+    assert ["umount", "-l", "/mnt/rescue/_osprobe_sda2"] in umount_calls
+    assert any(
+        warning == "left mounted: /mnt/rescue/_osprobe_sda2" for warning in res["warnings"]
+    )
+
+
+def test_collect_installed_os_uses_a_fixed_umount_timeout(linux_rescue_env):
+    """The unmount uses a fixed 5s budget, independent of the small probe timeout."""
+    umount_timeouts: List[int] = []
+
+    def fake_run(argv, timeout=15):
+        if argv[0] == "lsblk":
+            return 0, LSBLK_LINUX, ""
+        if argv[0] == "umount":
+            umount_timeouts.append(timeout)
+        return 0, "", ""
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    linux_rescue_env.setattr(rescue, "_read_file_text", lambda path: "")
+    linux_rescue_env.setattr(os, "makedirs", lambda *args, **kwargs: None)
+    linux_rescue_env.setattr(os.path, "ismount", lambda path: False)
+
+    rescue.collect_installed_os(timeout=3)
+
+    assert umount_timeouts == [5]
+
+
 def test_collect_installed_os_probes_ntfs_with_ntfsls_and_never_mounts(linux_rescue_env):
     calls: List[List[str]] = []
 
@@ -1230,21 +1362,46 @@ def test_collect_win_artifacts_with_ntfsls_detects_hives_and_bitlocker(linux_res
     assert ntfsls_calls and ntfsls_calls[0][-1] == "/dev/nvme0n1p3"
 
 
-def test_collect_win_artifacts_without_ntfsls_is_honest(linux_rescue_env):
+def test_collect_win_artifacts_without_ntfsls_still_lists_partitions(linux_rescue_env):
+    calls: List[List[str]] = []
+
+    def fake_run(argv, timeout=8):
+        calls.append(list(argv))
+        if argv[0] == "lsblk":
+            return 0, LSBLK_WIN, ""
+        if argv[0] == "blkid":
+            if argv[-1] == "/dev/nvme0n1p4":
+                return 0, "BitLocker\n", ""
+            return 0, "ntfs\n", ""
+        return 1, "", "unexpected"
+
     linux_rescue_env.setattr(rescue, "_which", lambda name: None)
-    linux_rescue_env.setattr(rescue, "_run_cmd", lambda argv, timeout=8: (0, LSBLK_WIN, ""))
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
 
     res = rescue.collect_win_artifacts()
 
     assert res["available"] is True
-    assert res["partitions"] == []
+    assert res["source"] == "lsblk"
     assert "ntfsls" in res["reason"]
+    # Partitions are still enumerated; only the hive probe is skipped.
+    assert [part["device"] for part in res["partitions"]] == ["/dev/nvme0n1p3", "/dev/nvme0n1p4"]
+    assert res["partitions"][0]["artifacts"] == {"SAM": False, "SYSTEM": False, "SOFTWARE": False}
+    assert res["partitions"][1]["bitlocker"] is True
+    assert not [call for call in calls if call[0] == "ntfsls"]
+    assert not [call for call in calls if call[0] == "mount"]
 
 
 @pytest.mark.parametrize(
-    "section", ["partitions", "raid_lvm", "installed_os", "boot_efi", "win_artifacts"]
+    "section, expected_keys",
+    [
+        ("partitions", ("partitions",)),
+        ("raid_lvm", ("devices", "lvm")),
+        ("installed_os", ("operating_systems",)),
+        ("boot_efi", ("entries",)),
+        ("win_artifacts", ("partitions",)),
+    ],
 )
-def test_handle_rescue_info_dispatches_each_new_section(linux_rescue_env, section):
+def test_handle_rescue_info_dispatches_each_new_section(linux_rescue_env, section, expected_keys):
     calls: List[List[str]] = []
 
     def fake_run(argv, timeout=10):
@@ -1266,14 +1423,55 @@ def test_handle_rescue_info_dispatches_each_new_section(linux_rescue_env, sectio
     linux_rescue_env.setattr(rescue, "_which", lambda name: None)
     linux_rescue_env.setattr(os, "makedirs", lambda *args, **kwargs: None)
     linux_rescue_env.setattr(os.path, "exists", lambda path: True)
+    linux_rescue_env.setattr(os.path, "ismount", lambda path: False)
 
     res = rescue.handle_rescue_info({"section": section, "device": "/dev/sda"})
 
     assert isinstance(res, dict)
-    assert "available" in res
+    assert res["available"] is True
+    for key in expected_keys:
+        assert key in res, key
+        assert isinstance(res[key], (list, dict)), key
     dumped = json.dumps(res)
     assert "Linux Live USB environment" not in dumped
     assert "schema_ready" not in dumped
+
+
+def test_handle_rescue_info_summary_and_all_include_the_five_new_sections(linux_rescue_env):
+    def fake_run(argv, timeout=10):
+        if argv[0] == "lsblk":
+            return 0, LSBLK_LINUX, ""
+        if argv[0] == "sfdisk":
+            return 0, SFDISK_GPT, ""
+        if argv[0] == "efibootmgr":
+            return 0, "BootCurrent: 0001\nBootOrder: 0001\nBoot0001* debian\tHD(1,GPT,x,0x800,0x100000)\n", ""
+        if argv[0] in ("mount", "umount"):
+            return 0, "", ""
+        if argv[0] == "dmesg":
+            return 0, "[Sun] boot ok\n", ""
+        if argv[0] == "free":
+            return 0, "Mem: 100 1 2 3 4 5\n", ""
+        return 1, "", "not available"
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    linux_rescue_env.setattr(rescue, "_read_file_text", lambda path: "")
+    linux_rescue_env.setattr(rescue, "_which", lambda name: None)
+    linux_rescue_env.setattr(os, "makedirs", lambda *args, **kwargs: None)
+    linux_rescue_env.setattr(os.path, "exists", lambda path: True)
+    linux_rescue_env.setattr(os.path, "ismount", lambda path: False)
+
+    summary = rescue.handle_rescue_info({"section": "summary", "device": "/dev/sda"})
+    assert summary["section"] == "summary"
+    for key in ("partitions", "installed_os", "boot_efi"):
+        assert key in summary, key
+        assert isinstance(summary[key], dict)
+
+    everything = rescue.handle_rescue_info({"section": "all", "device": "/dev/sda"})
+    assert everything["section"] == "all"
+    for key in ("partitions", "raid_lvm", "installed_os", "boot_efi", "win_artifacts"):
+        assert key in everything, key
+        assert isinstance(everything[key], dict)
+    assert "available" in everything["boot_efi"]
 
 
 def test_handle_rescue_info_unknown_section_degrades_cleanly(linux_rescue_env):
@@ -1283,17 +1481,19 @@ def test_handle_rescue_info_unknown_section_degrades_cleanly(linux_rescue_env):
 
 
 @pytest.mark.parametrize(
-    "call",
+    "call, marker",
     [
-        lambda: rescue.collect_partitions("/dev/sda"),
-        lambda: rescue.collect_raid_lvm(),
-        lambda: rescue.collect_installed_os(),
-        lambda: rescue.collect_boot_efi(),
-        lambda: rescue.collect_win_artifacts(),
+        (lambda: rescue.collect_partitions("/dev/sda"), "requires Linux"),
+        (lambda: rescue.collect_raid_lvm(), "requires Linux"),
+        (lambda: rescue.collect_installed_os(), "requires Linux"),
+        # Windows is not UEFI-booted, so boot_efi reports the same honest reason
+        # as a Linux node booted in BIOS/CSM mode (review finding #3).
+        (lambda: rescue.collect_boot_efi(), "system is not booted in UEFI mode"),
+        (lambda: rescue.collect_win_artifacts(), "requires Linux"),
     ],
     ids=["partitions", "raid_lvm", "installed_os", "boot_efi", "win_artifacts"],
 )
-def test_new_collectors_are_unavailable_on_windows(monkeypatch, call):
+def test_new_collectors_are_unavailable_on_windows(monkeypatch, call, marker):
     monkeypatch.setattr(rescue, "_IS_WINDOWS", True)
     monkeypatch.setattr(rescue, "_run_cmd", lambda *args, **kwargs: pytest.fail("no subprocess on Windows"))
     monkeypatch.setattr(rescue, "_which", lambda name: pytest.fail("no binary lookup on Windows"))
@@ -1304,4 +1504,4 @@ def test_new_collectors_are_unavailable_on_windows(monkeypatch, call):
     res = call()
 
     assert res["available"] is False
-    assert "requires Linux" in res["reason"]
+    assert marker in res["reason"]

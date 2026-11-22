@@ -785,9 +785,16 @@ def _flatten_lsblk(nodes: Any) -> List[Dict[str, Any]]:
     return flat
 
 
-def _lsblk_blockdevices(timeout: int, columns: str = _LSBLK_BLOCK_COLUMNS) -> Tuple[bool, str, List[Dict[str, Any]]]:
-    """Run ``lsblk -J -b`` and return (ok, reason, flattened_list)."""
-    rc, out, err = _run_cmd(["lsblk", "-J", "-b", "-o", columns], timeout=timeout)
+def _lsblk_blockdevices(
+    timeout: int,
+    columns: str = _LSBLK_BLOCK_COLUMNS,
+    device: Optional[str] = None,
+) -> Tuple[bool, str, List[Dict[str, Any]]]:
+    """Run ``lsblk -J -b [-o cols] [device]`` and return (ok, reason, flattened_list)."""
+    argv = ["lsblk", "-J", "-b", "-o", columns]
+    if device:
+        argv.append(device)
+    rc, out, err = _run_cmd(argv, timeout=timeout)
     if rc != 0:
         return False, (err.strip() or f"lsblk exited with {rc}"), []
     if not out.strip():
@@ -799,6 +806,23 @@ def _lsblk_blockdevices(timeout: int, columns: str = _LSBLK_BLOCK_COLUMNS) -> Tu
     if not isinstance(parsed, dict):
         return False, "lsblk json is not an object", []
     return True, "", _flatten_lsblk(parsed.get("blockdevices"))
+
+
+def _path_belongs_to_device(path: str, device: str) -> bool:
+    """True if ``path`` is ``device`` itself or a partition/child of it.
+
+    Handles the ``/dev/sda`` -> ``/dev/sda1`` and ``/dev/nvme0n1`` ->
+    ``/dev/nvme0n1p1`` naming schemes so an ``lsblk <device>`` fallback can
+    never report another disk's partitions.
+    """
+    if not path or not device:
+        return False
+    if path == device:
+        return True
+    if not path.startswith(device):
+        return False
+    rest = path[len(device):]
+    return rest.isdigit() or (rest[:1] == "p" and rest[1:].isdigit())
 
 
 def _parse_blkid_export(text: str) -> Dict[str, str]:
@@ -906,6 +930,7 @@ def collect_partitions(device: Optional[str] = None, timeout: int = 8) -> Dict[s
     """Read the partition table of ``device`` via ``sfdisk -J`` with an ``lsblk`` fallback."""
     if _IS_WINDOWS:
         return {"available": False, "reason": "partitions requires Linux"}
+    device = (device or "").strip().rstrip("/")
     if not device or not _valid_dev_path(device):
         return {
             "available": False,
@@ -944,8 +969,8 @@ def collect_partitions(device: Optional[str] = None, timeout: int = 8) -> Dict[s
         result: Dict[str, Any] = {
             "available": True,
             "source": "sfdisk",
-            "device": device,
-            "label": table.get("label") or table.get("label-id") or None,
+            "device": table.get("device") or device,
+            "label": table.get("label") or None,
             "partitions": partitions,
         }
         rc_blk, out_blk, _err_blk = _run_cmd(["blkid", "-o", "export", device], timeout=min(timeout, 5))
@@ -960,7 +985,7 @@ def collect_partitions(device: Optional[str] = None, timeout: int = 8) -> Dict[s
     if table is not None:
         warnings.append("sfdisk returned no partition entries")
     warnings.append("falling back to lsblk")
-    ok, reason, nodes = _lsblk_blockdevices(timeout=timeout)
+    ok, reason, nodes = _lsblk_blockdevices(timeout=timeout, device=device)
     if not ok:
         return {"available": False, "reason": reason or "lsblk failed", "source": "lsblk", "warnings": warnings}
 
@@ -973,6 +998,10 @@ def collect_partitions(device: Optional[str] = None, timeout: int = 8) -> Dict[s
             name = str(node.get("name") or "")
             path = f"/dev/{name}" if name else ""
         if not path:
+            continue
+        if not _path_belongs_to_device(path, device):
+            # lsblk was called with the device but never trust a foreign row.
+            warnings.append(f"ignored partition outside {device}: {path}")
             continue
         partitions.append(
             {
@@ -1143,14 +1172,23 @@ def _probe_linux_root(device: str, fstype: str, deadline: float) -> Tuple[Option
     except Exception as exc:  # pragma: no cover - defensive contract
         warnings.append(f"reading guest files failed on {device}: {type(exc).__name__}: {exc}")
     finally:
-        rc_umount, _out_umount, err_umount = _run_cmd(
-            ["umount", mountpoint],
-            timeout=_remaining_timeout(deadline),
-        )
+        # A fixed 5s budget: an unmount must never be starved down to 1s,
+        # because a leaked read-only mount is worse than a slightly late call.
+        rc_umount, _out_umount, err_umount = _run_cmd(["umount", mountpoint], timeout=5)
         if rc_umount != 0:
-            warnings.append(
-                f"umount failed for {mountpoint}: {err_umount.strip() or f'exited with {rc_umount}'}"
-            )
+            rc_lazy, _out_lazy, err_lazy = _run_cmd(["umount", "-l", mountpoint], timeout=5)
+            if rc_lazy != 0:
+                warnings.append(
+                    f"umount failed for {mountpoint}: "
+                    f"{err_umount.strip() or f'exited with {rc_umount}'}; "
+                    f"lazy umount failed: {err_lazy.strip() or f'exited with {rc_lazy}'}"
+                )
+        try:
+            still_mounted = bool(os.path.ismount(mountpoint))
+        except Exception:
+            still_mounted = False
+        if still_mounted:
+            warnings.append(f"left mounted: {mountpoint}")
 
     if not entry["evidence"] or not entry.get("name"):
         return None, warnings + [f"no os-release found on {device}"]
@@ -1236,7 +1274,13 @@ def collect_installed_os(timeout: int = 12) -> Dict[str, Any]:
 def collect_boot_efi(timeout: int = 8) -> Dict[str, Any]:
     """Parse UEFI boot entries via efibootmgr -v (BIOS systems report unavailable)."""
     if _IS_WINDOWS:
-        return {"available": False, "reason": "boot_efi requires Linux"}
+        # Windows is never an EFI-booted Live USB node: report the same honest
+        # platform-agnostic reason as a Linux machine booted in BIOS/CSM mode.
+        return {
+            "available": False,
+            "reason": "system is not booted in UEFI mode",
+            "source": "efibootmgr",
+        }
     try:
         uefi_present = os.path.exists("/sys/firmware/efi")
     except Exception:
@@ -1274,13 +1318,7 @@ def collect_win_artifacts(timeout: int = 8) -> Dict[str, Any]:
     if not ok:
         return {"available": False, "reason": reason or "lsblk failed", "source": "lsblk"}
 
-    if not _which("ntfsls"):
-        return {
-            "available": True,
-            "source": "lsblk",
-            "partitions": [],
-            "reason": "ntfsls is not installed; Windows registry hives cannot be probed without mounting",
-        }
+    ntfsls_present = _which("ntfsls") is not None
 
     probe_timeout = max(1, min(int(timeout), 5))
     partitions: List[Dict[str, Any]] = []
@@ -1299,7 +1337,7 @@ def collect_win_artifacts(timeout: int = 8) -> Dict[str, Any]:
         if not bitlocker and fstype not in _WIN_ROOT_FSTYPES and "ntfs" not in combined:
             continue
         artifacts: Dict[str, bool] = {"SAM": False, "SYSTEM": False, "SOFTWARE": False}
-        if not bitlocker:
+        if not bitlocker and ntfsls_present:
             artifacts, artifact_warnings = _ntfsls_artifacts(device, timeout=probe_timeout)
             warnings.extend(artifact_warnings)
         partitions.append(
@@ -1313,12 +1351,17 @@ def collect_win_artifacts(timeout: int = 8) -> Dict[str, Any]:
 
     result: Dict[str, Any] = {
         "available": True,
-        "source": "lsblk+ntfsls",
+        "source": "lsblk+ntfsls" if ntfsls_present else "lsblk",
         "partitions": partitions,
     }
     if warnings:
         result["warnings"] = warnings
-    if not partitions:
+    if not ntfsls_present:
+        result["reason"] = (
+            "ntfsls is not installed; NTFS/BitLocker partitions are listed but "
+            "SAM/SYSTEM/SOFTWARE were not probed (nothing is ever mounted here)"
+        )
+    elif not partitions:
         result["reason"] = "no NTFS or BitLocker partition found"
     return result
 

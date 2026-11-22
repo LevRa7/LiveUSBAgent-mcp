@@ -189,7 +189,7 @@ def test_build_iso_contract_required_packages() -> None:
         "xfsprogs",
         "f2fs-tools",
         "zfsutils-linux",
-        "hfsprogs",
+        "libfshfs-utils", "apfs-dkms",
         "hfsplus",
         "libfsapfs-utils",
         "lvm2",

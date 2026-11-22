@@ -798,6 +798,9 @@ def _plan_or_run_mount_auto(args: Dict[str, Any], dry_run: bool) -> Dict[str, An
     elif fstype == "f2fs":
         opts = "rw,noatime" if writable else "ro"
         argv = ["mount", "-t", "f2fs", "-o", opts, device, mountpoint]
+    elif fstype in ("vfat", "fat32", "fat16", "msdos"):
+        opts = "rw,noatime" if writable else "ro"
+        argv = ["mount", "-t", "vfat", "-o", opts, device, mountpoint]
 
     elif fstype == "hfsplus":
         opts = "force,rw" if writable else "ro"

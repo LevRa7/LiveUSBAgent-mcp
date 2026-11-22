@@ -132,6 +132,7 @@ ca-certificates
 
 # Filesystems (exFAT, NTFS, Linux, macOS, RAID/LVM/LUKS)
 exfatprogs
+exfat-fuse
 dosfstools
 ntfs-3g
 dislocker
@@ -141,9 +142,10 @@ xfsprogs
 f2fs-tools
 zfsutils-linux
 zfs-dkms
-hfsprogs
 hfsplus
-hfsutils
+libfshfs-utils
+apfs-dkms
+apfsprogs
 libfsapfs-utils
 lvm2
 mdadm

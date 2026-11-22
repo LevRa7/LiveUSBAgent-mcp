@@ -1,0 +1,20 @@
+# ops/live-usb/udev/99-rhm-network-tethering.rules
+# Ensure Android USB tethering (RNDIS / CDC Ethernet / CDC NCM) and
+# Apple iPhone USB tethering (ipheth + usbmuxd) are automatically managed
+# by NetworkManager on LiveUSB boot.
+
+# Android RNDIS USB tethering
+ACTION=="add|change", SUBSYSTEM=="net", DRIVERS=="rndis_host", ENV{NM_UNMANAGED}="0", ENV{ID_NET_MANAGED_BY}="NetworkManager"
+
+# Android CDC Ethernet / CDC NCM USB tethering
+ACTION=="add|change", SUBSYSTEM=="net", DRIVERS=="cdc_ether", ENV{NM_UNMANAGED}="0", ENV{ID_NET_MANAGED_BY}="NetworkManager"
+ACTION=="add|change", SUBSYSTEM=="net", DRIVERS=="cdc_ncm", ENV{NM_UNMANAGED}="0", ENV{ID_NET_MANAGED_BY}="NetworkManager"
+
+# Generic Android USB tethering interfaces (usb0, rndis0)
+ACTION=="add|change", SUBSYSTEM=="net", KERNEL=="usb*|rndis*", ENV{NM_UNMANAGED}="0"
+
+# Apple iPhone USB tethering network interface (ipheth)
+ACTION=="add|change", SUBSYSTEM=="net", DRIVERS=="ipheth", ENV{NM_UNMANAGED}="0", ENV{ID_NET_MANAGED_BY}="NetworkManager"
+
+# Apple iOS USB device plugged in -> ensure usbmuxd is active for pairing/trust
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTRS{idVendor}=="05ac", ATTRS{idProduct}=="12[9a][0-9a-f]", TAG+="systemd", ENV{SYSTEMD_WANTS}+="usbmuxd.service"

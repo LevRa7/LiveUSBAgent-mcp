@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Remote-Harness LiveUSB</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="topbar-title" id="hostname-label">—</div>
+      <nav class="view-switch" aria-label="Разделы">
+        <button type="button" class="tab-btn is-active" id="nav-network" data-view="network">Сеть / Wi-Fi</button>
+        <button type="button" class="tab-btn" id="nav-ready" data-view="ready">Готово к подключению MCP</button>
+      </nav>
+    </header>
+
+    <main class="main-content">
+      <section id="view-network" class="view-panel" aria-labelledby="heading-network">
+        <div class="section-head">
+          <h1 id="heading-network" class="page-heading">Сеть / Wi-Fi</h1>
+          <div class="head-actions">
+            <button type="button" class="btn btn-secondary" id="btn-hidden-wifi">Скрытая сеть</button>
+            <button type="button" class="btn btn-primary" id="btn-refresh-wifi">Обновить список</button>
+          </div>
+        </div>
+
+        <div id="iphone-trust-banner" class="alert-banner is-hidden" role="alert">
+          Нажмите «Доверять» на iPhone и введите код-пароль
+        </div>
+
+        <div class="interface-grid" aria-label="Сетевые интерфейсы">
+          <div class="card iface-card">
+            <div class="iface-label">Ethernet</div>
+            <div class="iface-value" id="status-ethernet">—</div>
+            <div class="iface-meta" id="meta-ethernet">—</div>
+          </div>
+          <div class="card iface-card">
+            <div class="iface-label">Android USB-модем</div>
+            <div class="iface-value" id="status-android">—</div>
+            <div class="iface-meta" id="meta-android">—</div>
+          </div>
+          <div class="card iface-card">
+            <div class="iface-label">iPhone USB-модем</div>
+            <div class="iface-value" id="status-iphone">—</div>
+            <div class="iface-meta" id="meta-iphone">—</div>
+          </div>
+        </div>
+
+        <div class="card wifi-card">
+          <div class="card-head">
+            <h2 class="card-title">Сети Wi-Fi</h2>
+            <span class="card-meta" id="wifi-scan-meta">—</span>
+          </div>
+          <div id="wifi-list" class="wifi-list" role="list">
+            <div class="empty-row">—</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-ready" class="view-panel is-hidden" aria-labelledby="heading-ready">
+        <div class="section-head">
+          <h1 id="heading-ready" class="page-heading">Готово к подключению MCP</h1>
+          <div class="head-actions">
+            <button type="button" class="btn btn-secondary" id="btn-change-wifi">Сменить Wi-Fi</button>
+            <button type="button" class="btn btn-primary" id="btn-new-token">Новый токен</button>
+          </div>
+        </div>
+
+        <div class="ready-grid">
+          <div class="card qr-card">
+            <div class="qr-frame">
+              <img id="qr-image" class="qr-image" src="/api/qr.svg" alt="QR-код подключения MCP">
+            </div>
+          </div>
+
+          <div class="ready-details">
+            <div class="card detail-card">
+              <div class="detail-row">
+                <div class="detail-label">Ссылка подключения</div>
+                <div class="detail-value mono" id="session-url">—</div>
+              </div>
+              <div class="detail-row">
+                <div class="detail-label">Токен сессии</div>
+                <div class="detail-value mono" id="session-token">—</div>
+              </div>
+              <div class="detail-row">
+                <div class="detail-label">Туннель</div>
+                <div class="detail-value" id="session-tunnel">—</div>
+              </div>
+              <div class="detail-row">
+                <div class="detail-label">Обнаруженные диски</div>
+                <div class="detail-value" id="disks-summary">—</div>
+              </div>
+            </div>
+
+            <div class="card disk-list-card">
+              <div class="card-head">
+                <h2 class="card-title">Диски</h2>
+                <span class="card-meta" id="disks-count-meta">—</span>
+              </div>
+              <div id="disks-list" class="disks-list">
+                <div class="empty-row">—</div>
+              </div>
+            </div>
+
+            <div id="regen-feedback" class="feedback-line is-hidden" role="status"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="wifi-modal-backdrop" class="modal-backdrop is-hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="card modal-card">
+      <div class="card-head">
+        <h2 id="modal-title" class="card-title">Подключение к Wi-Fi</h2>
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-modal-close">Закрыть</button>
+      </div>
+
+      <form id="wifi-connect-form" class="modal-form" autocomplete="off">
+        <div class="field-group">
+          <label class="field-label" for="input-ssid">Имя сети (SSID)</label>
+          <input id="input-ssid" name="ssid" type="text" class="text-input" required>
+        </div>
+
+        <div class="field-group">
+          <div class="field-label-row">
+            <label class="field-label" for="input-password">Пароль</label>
+            <div class="field-toggles">
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-toggle-password">Показать</button>
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-toggle-keyboard">Клавиатура</button>
+            </div>
+          </div>
+          <input id="input-password" name="password" type="password" class="text-input">
+        </div>
+
+        <label class="checkbox-row">
+          <input id="input-hidden" name="hidden" type="checkbox">
+          <span>Скрытая сеть</span>
+        </label>
+
+        <div id="modal-error" class="alert-banner is-hidden" role="alert"></div>
+
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" id="btn-modal-cancel">Отмена</button>
+          <button type="submit" class="btn btn-primary" id="btn-modal-submit">Подключить</button>
+        </div>
+      </form>
+
+      <div id="osk-container" class="osk-container is-hidden" aria-label="Экранная клавиатура"></div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

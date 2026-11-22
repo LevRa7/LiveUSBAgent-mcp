@@ -804,7 +804,67 @@ def start_scheduler(interval: float = 5.0):
     return thread
 
 
-def main() -> None:
+def _bootstrap_ephemeral_liveusb(argv: list) -> None:
+    """Handle ``--ephemeral-liveusb`` (or ``MESH_EPHEMERAL_LIVEUSB=1``) startup.
+
+    No-op when ephemeral LiveUSB mode is not requested so normal agent
+    invocations remain 100% unchanged.
+    """
+    global GATEWAY_HOST, USER, TOKEN
+
+    enabled = "--ephemeral-liveusb" in argv or _env_flag("MESH_EPHEMERAL_LIVEUSB")
+    if not enabled:
+        return
+
+    from core import liveusb_bootstrap
+
+    force_register = "--force-register" in argv
+    gateway_arg: Optional[str] = None
+    state_dir_arg: Optional[str] = None
+    for idx, arg in enumerate(argv):
+        if arg == "--gateway" and idx + 1 < len(argv):
+            gateway_arg = argv[idx + 1]
+        elif arg.startswith("--gateway="):
+            gateway_arg = arg.split("=", 1)[1]
+        elif arg == "--state-dir" and idx + 1 < len(argv):
+            state_dir_arg = argv[idx + 1]
+        elif arg.startswith("--state-dir="):
+            state_dir_arg = arg.split("=", 1)[1]
+
+    state_dir = liveusb_bootstrap.state_dir_path(state_dir_arg)
+    gateway_url = gateway_arg or os.environ.get("MESH_GATEWAY") or GATEWAY_HOST or domain.public_url()
+
+    os.environ["MESH_ACCESS_MODE"] = "full"
+    os.environ["MESH_SCENARIO"] = "live_usb"
+
+    needs_register = force_register or (not os.environ.get("MESH_TOKEN") and not TOKEN)
+    if needs_register:
+        logger.info("Ephemeral LiveUSB mode: waiting for gateway %s ...", gateway_url)
+        if not liveusb_bootstrap.wait_for_gateway(gateway_url):
+            logger.error("Gateway %s unreachable during LiveUSB bootstrap. Refusing to start.", gateway_url)
+            sys.exit(2)
+        reg = liveusb_bootstrap.register_ephemeral_node(gateway_url, state_dir=state_dir)
+        if not reg.get("ok"):
+            logger.error("Ephemeral LiveUSB registration failed: %s", reg.get("error", "unknown error"))
+            sys.exit(2)
+        env_file = reg.get("env_file")
+        if env_file:
+            liveusb_bootstrap.export_env_file(env_file, overwrite=True)
+            os.environ["MESH_CONFIG_FILE"] = env_file
+        os.environ["MESH_ACCESS_MODE"] = "full"
+        os.environ["MESH_SCENARIO"] = "live_usb"
+        logger.info("Registered ephemeral LiveUSB node '%s' (state: %s).", reg.get("node_id"), state_dir)
+
+    settings = _load_settings()
+    GATEWAY_HOST = settings["gateway"]
+    USER = settings["user"]
+    TOKEN = settings["token"]
+    configure_from_env()
+    atexit.register(liveusb_bootstrap.revoke_ephemeral_node, state_dir=state_dir)
+
+
+def main(argv: Optional[list] = None) -> None:
+    _bootstrap_ephemeral_liveusb(list(sys.argv[1:] if argv is None else argv))
     # Fail fast on a configuration that can never work, instead of retrying the
     # gateway every 60 seconds forever from a Windows Startup launcher.
     problem = configuration_error()

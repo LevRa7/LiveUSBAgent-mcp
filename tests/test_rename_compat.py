@@ -278,7 +278,24 @@ def test_the_release_workflow_publishes_the_new_installer_name():
 
 
 def test_readme_names_the_project():
-    assert "Remote Harness MCP" in _read("README.md").splitlines()[0]
+    """The banner line names *this* project, never a pre-fork or pre-rename one.
+
+    The fork's README opens with ``# LiveUSBAgent-mcp``. The upstream name
+    (``Remote Harness MCP``) and the pre-rename names are still referenced in
+    the body - deliberately, so an existing user can find the history - but a
+    first line carrying one of them would tell a reader they are installing the
+    wrong thing.
+    """
+    first_line = _read("README.md").splitlines()[0]
+    assert "LiveUSBAgent-mcp" in first_line, (
+        "the README's first line should be the fork's banner '# LiveUSBAgent-mcp', got %r"
+        % first_line)
+    legacy_names = ("Antigravity Mesh", "AntigravityMesh", "antigravity-mesh",
+                    "gemini-computer-use", "Computer-use-for-Gemini-App-Web",
+                    "Remote Harness MCP", "remote-harness-mcp")
+    for legacy in legacy_names:
+        assert legacy not in first_line, (
+            "the README's first line still names %r, which is not this project" % legacy)
 
 
 # ---------------------------------------------------------------------------

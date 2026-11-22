@@ -900,10 +900,11 @@ if [ ! -f "$SCRIPT_DIR/core/agent.py" ]; then
     # then died on "from core import platforms" before it could report a version.
     # tests/test_installer_bootstrap.py walks this list recursively and imports the
     # result, so neither failure can ship again.
-    for f in core/__init__.py core/agent.py core/agent_harness.py core/code_cache.py \
-             core/control.py core/device.py core/domain.py core/goal.py core/hooks.py core/mcp_tools.py core/menu.py core/paths.py \
+    for f in core/__init__.py core/agent.py core/agent_harness.py core/autoruns.py core/code_cache.py \
+             core/control.py core/device.py core/domain.py core/goal.py core/hooks.py \
+             core/liveusb_bootstrap.py core/liveusb_connect_page.py core/mcp_tools.py core/menu.py core/paths.py \
              core/policies.py core/policy.py core/rekey.py \
-             core/redact.py core/rescue.py core/sandbox.py core/schedule.py core/schemas.py core/server.py core/settings.py core/subagents.py core/termux.py \
+             core/redact.py core/rescue.py core/sandbox.py core/schedule.py core/schemas.py core/server.py core/settings.py core/skills_loader.py core/subagents.py core/termux.py \
              core/triggers.py core/updater.py core/usage.py core/version.py core/vitals.py core/web_share.py core/web_settings.py \
              core/platforms/__init__.py core/platforms/base.py core/platforms/common.py \
              core/platforms/encoding.py core/platforms/png.py core/platforms/shell.py \

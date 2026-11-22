@@ -79,11 +79,28 @@ def test_every_other_declaration_of_the_version_is_derived():
     assert offenders == [], "the version is declared outside core/version.py: %s" % offenders
 
 
+#: The line the README carries so a reader can see which release they are on.
+#: Kept in the README on purpose: the number a reader copies must be the number
+#: ``core/version.py`` declares, and this pattern is the only place it is read.
+README_VERSION_LINE = re.compile(
+    r"^\*\*Version:\*\*\s+(\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?)", re.M)
+
+
 def test_the_docs_name_the_current_version():
-    """The README's copy/paste examples must match the shipped installer."""
+    """The README's stated version must match the shipped node.
+
+    Upstream guarded this with the ``RemoteHarnessMCP-Setup-<version>.exe``
+    name. The LiveUSB fork is a bootable Debian ISO and does **not** ship that
+    Windows installer, so the executable-name assertion is deliberately dropped
+    (there is no assert on ``*-Setup-*.exe`` here, by design). The invariant it
+    protected is kept: the README states one version, in a real sentence, and it
+    must equal ``core/version.py`` - no second literal can drift unnoticed.
+    """
     readme = _read("README.md")
-    mentioned = set(re.findall(r"RemoteHarnessMCP-Setup-(\d+\.\d+\.\d+)\.exe", readme))
-    assert mentioned, "the README should show the setup executable's name at least once"
+    mentioned = set(README_VERSION_LINE.findall(readme))
+    assert mentioned, (
+        "the README should state the release it documents on a "
+        "'**Version:** X.Y.Z' line")
     assert mentioned == {version_module.__version__}, (
         "the README advertises %s while the node is %s"
         % (sorted(mentioned), version_module.__version__))

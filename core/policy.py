@@ -33,6 +33,12 @@ READ_ONLY_TOOLS: FrozenSet[str] = frozenset({
     "share_list",
     "device_info",
     "rescue_info",
+    # The SKILL.md playbooks are read-only by nature: listing or loading one
+    # only reads a markdown file the checkout already ships. A rescue session
+    # needs them most when the host is in read-only mode, so they belong here
+    # (the node's guard lists them too, and a test pins the agreement).
+    "list_skills",
+    "load_skill",
     # A note in the node's config directory: it starts nothing and touches no
     # project file, so read-only sessions may still record their objective.
     "goal",

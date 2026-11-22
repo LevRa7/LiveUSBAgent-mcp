@@ -6,6 +6,8 @@
 
 **Repository:** [github.com/LevRa7/LiveUSBAgent-mcp](https://github.com/LevRa7/LiveUSBAgent-mcp) (evolved from [github.com/LevRa7/remote-harness-mcp](https://github.com/LevRa7/remote-harness-mcp))
 
+**Version:** 0.6.0 — release notes: [docs/releases/v0.6.0.md](docs/releases/v0.6.0.md) (upstream Windows `*-Setup-*.exe` installers are not published by this fork; it ships a bootable Debian 13 ISO).
+
 ---
 
 ## What It Is & Purpose

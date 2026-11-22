@@ -693,7 +693,11 @@ def apply_gateway_hello(message: Any) -> str:
 def tunnel_uri() -> str:
     """Canonical tunnel URL: one shared domain, node selected by ?user=."""
     base = GATEWAY_HOST.rstrip("/")
-    if not base.startswith(("ws://", "wss://")):
+    if base.startswith("http://"):
+        base = "ws://" + base[len("http://"):]
+    elif base.startswith("https://"):
+        base = "wss://" + base[len("https://"):]
+    elif not base.startswith(("ws://", "wss://")):
         base = "wss://" + base
     return f"{base}/ws/tunnel?user={USER}&token={TOKEN}"
 
@@ -857,7 +861,7 @@ def _bootstrap_ephemeral_liveusb(argv: list) -> None:
         logger.info("Registered ephemeral LiveUSB node '%s' (state: %s).", reg.get("node_id"), state_dir)
 
     settings = _load_settings()
-    GATEWAY_HOST = settings["gateway"]
+    GATEWAY_HOST = gateway_arg or os.environ.get("MESH_GATEWAY") or settings["gateway"]
     USER = settings["user"]
     TOKEN = settings["token"]
     configure_from_env()

@@ -315,7 +315,11 @@
     els.regenFeedback.classList.remove("is-hidden");
     els.regenFeedback.textContent = "Запрос нового токена...";
     try {
-      const resp = await fetch("/api/session/regenerate", { method: "POST" });
+      const resp = await fetch("/api/session/regenerate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
       const data = await resp.json();
       els.regenFeedback.textContent = data.message || (data.ok ? "Токен обновлён" : "Ошибка обновления");
       refreshQrImage();

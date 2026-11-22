@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import html
 import json
+import shlex
+from urllib.parse import quote
 
 
 def _safe_json_for_script(value: object) -> str:
@@ -11,6 +13,8 @@ def _safe_json_for_script(value: object) -> str:
         .replace("&", "\\u0026")
         .replace("<", "\\u003c")
         .replace(">", "\\u003e")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
     )
 
 
@@ -23,6 +27,7 @@ def render_connect_page(
     expires_at: str,
     public_base_url: str = "",
     online: bool = False,
+    csp_nonce: str = "",
 ) -> str:
     """Render the mobile-friendly Russian LiveUSB connect page.
 
@@ -38,8 +43,10 @@ def render_connect_page(
         else:
             base = f"https://{clean_host}" if clean_host else ""
 
-    sse_url = f"{base}/sse?user={node_id}&token={link_key}"
-    mcp_url = f"{base}/mcp?user={node_id}&token={link_key}"
+    enc_node = quote(node_id, safe="")
+    enc_link_key = quote(link_key, safe="")
+    sse_url = f"{base}/sse?user={enc_node}&token={enc_link_key}"
+    mcp_url = f"{base}/mcp?user={enc_node}&token={enc_link_key}"
 
     claude_json = json.dumps(
         {
@@ -52,7 +59,8 @@ def render_connect_page(
         indent=2,
         ensure_ascii=False,
     )
-    claude_cli_cmd = f'claude mcp add --transport http {node_id} "{mcp_url}"'
+    claude_cli_cmd = f"claude mcp add --transport http {shlex.quote(node_id)} {shlex.quote(mcp_url)}"
+    script_open = f'<script nonce="{html.escape(csp_nonce, quote=True)}">' if csp_nonce else "<script>"
 
     esc_node = html.escape(node_id, quote=True)
     esc_expires = html.escape(expires_at, quote=True)
@@ -414,7 +422,7 @@ def render_connect_page(
     </section>
   </main>
 
-  <script>
+  {script_open}
     (function () {{
       var cfg = {js_config};
 

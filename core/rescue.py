@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -294,12 +295,35 @@ def _run_cmd(argv: Sequence[str], timeout: int = 10) -> Tuple[int, str, str]:
         return 1, "", f"{type(exc).__name__}: {exc}"
 
 
+_FORBIDDEN_DEV_EXACT = frozenset({
+    "/dev/mem",
+    "/dev/kmem",
+    "/dev/port",
+    "/dev/null",
+    "/dev/zero",
+    "/dev/shm",
+})
+_FORBIDDEN_DEV_PREFIXES: Tuple[str, ...] = ("/dev/shm/",)
+_SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
 def _valid_dev_path(dev: str) -> bool:
-    return bool(re.match(r"^/dev/[a-zA-Z0-9_\-/]+$", dev or ""))
+    if not dev or not isinstance(dev, str):
+        return False
+    if ".." in dev or "//" in dev:
+        return False
+    if not re.match(r"^/dev/[a-zA-Z0-9_\-/]+$", dev):
+        return False
+    norm = dev.rstrip("/")
+    if norm in _FORBIDDEN_DEV_EXACT:
+        return False
+    if any(norm.startswith(prefix) for prefix in _FORBIDDEN_DEV_PREFIXES):
+        return False
+    return True
 
 
 def _valid_mountpoint(path: str) -> bool:
-    """True only if path is a safe subdirectory under /mnt/rescue/ or /mnt/scratch/."""
+    """True only if path (and its resolved realpath) is a safe subdirectory under /mnt/rescue/ or /mnt/scratch/."""
     raw = (path or "").strip()
     if not raw or "\\" in raw or "\x00" in raw or not raw.startswith("/"):
         return False
@@ -307,10 +331,12 @@ def _valid_mountpoint(path: str) -> bool:
     if any(p in (".", "..") for p in parts):
         return False
     norm = "/" + "/".join(parts)
-    for base in _ALLOWED_MOUNTPOINT_BASES:
-        if norm.startswith(base) and len(norm) > len(base):
-            return True
-    return False
+    if not any(norm.startswith(base) and len(norm) > len(base) for base in _ALLOWED_MOUNTPOINT_BASES):
+        return False
+    resolved = _resolve_nearest_existing_realpath(norm)
+    if not any(resolved.startswith(base) and len(resolved) > len(base) for base in _ALLOWED_MOUNTPOINT_BASES):
+        return False
+    return True
 
 
 def _resolve_nearest_existing_realpath(path: str) -> str:
@@ -747,6 +773,11 @@ def _plan_or_run_mount_auto(args: Dict[str, Any], dry_run: bool) -> Dict[str, An
     mapper_name = str(args.get("mapper_name") or "").strip()
     recovery_key = str(args.get("recovery_key") or "").strip()
 
+    if mapper_name and not _SAFE_IDENTIFIER_RE.match(mapper_name):
+        return {"error": f"Invalid mapper_name '{mapper_name}': must match ^[A-Za-z0-9][A-Za-z0-9_.-]{{0,63}}$"}
+    if pool_name and not _SAFE_IDENTIFIER_RE.match(pool_name):
+        return {"error": f"Invalid pool_name '{pool_name}': must match ^[A-Za-z0-9][A-Za-z0-9_.-]{{0,63}}$"}
+
     fstype = _normalize_fstype(str(args.get("fstype") or ""))
     if not fstype and device and _valid_dev_path(device):
         fstype = _detect_fstype(device)
@@ -861,19 +892,25 @@ def _plan_or_run_mount_auto(args: Dict[str, Any], dry_run: bool) -> Dict[str, An
     else:
         return {"error": f"Unsupported filesystem type for mount_auto: {fstype}"}
 
+    def _redact_argv(cmd: Sequence[str]) -> List[str]:
+        if not recovery_key:
+            return list(cmd)
+        secret_arg = f"-p{recovery_key}"
+        return ["-p***REDACTED***" if tok == secret_arg else tok for tok in cmd]
+
     plan: Dict[str, Any] = {
         "action": "mount_auto",
         "device": device or None,
         "fstype": fstype,
         "mountpoint": mountpoint,
         "writable": writable,
-        "argv": argv,
+        "argv": _redact_argv(argv),
         "dry_run": dry_run,
     }
     if fallback_argv:
-        plan["fallback_argv"] = fallback_argv
+        plan["fallback_argv"] = _redact_argv(fallback_argv)
     if planned_steps:
-        plan["planned_steps"] = planned_steps
+        plan["planned_steps"] = [_redact_argv(step) for step in planned_steps]
     if warnings:
         plan["warning"] = " ".join(warnings)
         plan["warnings"] = warnings
@@ -985,7 +1022,7 @@ def plan_or_run_rescue_action(args: Dict[str, Any]) -> Dict[str, Any]:
             "action": action,
             "dry_run": True,
             "argv": argv,
-            "recommended_execution": "Pass ' '.join(argv) to run_job() for non-blocking background cloning.",
+            "recommended_execution": "Pass shlex.join(argv) to run_job() for non-blocking background cloning.",
         }
 
     if action == "ram_test_plan":
@@ -1003,7 +1040,7 @@ def plan_or_run_rescue_action(args: Dict[str, Any]) -> Dict[str, Any]:
             "loops": loops,
             "dry_run": dry_run,
             "argv": argv,
-            "recommended_execution": "Pass ' '.join(argv) to run_job() for non-blocking memory testing.",
+            "recommended_execution": "Pass shlex.join(argv) to run_job() for non-blocking memory testing.",
         }
         if dry_run or _IS_WINDOWS:
             return plan
@@ -1037,7 +1074,7 @@ def plan_or_run_rescue_action(args: Dict[str, Any]) -> Dict[str, Any]:
             "output_path": output_path,
             "dry_run": True,
             "argv": argv,
-            "recommended_execution": "Pass ' '.join(argv) to run_job() for non-blocking memory acquisition.",
+            "recommended_execution": "Pass shlex.join(argv) to run_job() for non-blocking memory acquisition.",
         }
 
     if action == "ntfs_fix":

@@ -21,6 +21,7 @@ def _clean_liveusb_state(tmp_path, monkeypatch):
     gateway._REGISTRY_CACHE["data"] = None
     gateway._rate_windows.clear()
     gateway.pending_pairs.clear()
+    gateway._last_liveusb_prune_ts = 0.0
     gateway.liveusb_sessions.clear()
     gateway.liveusb_nodes.clear()
     gateway.liveusb_revoked_sessions.clear()
@@ -29,6 +30,7 @@ def _clean_liveusb_state(tmp_path, monkeypatch):
     yield
     gateway._rate_windows.clear()
     gateway.pending_pairs.clear()
+    gateway._last_liveusb_prune_ts = 0.0
     gateway.liveusb_sessions.clear()
     gateway.liveusb_nodes.clear()
     gateway.liveusb_revoked_sessions.clear()
@@ -400,7 +402,7 @@ def test_liveusb_registry_expired_entries_pruned_when_ram_sessions_empty():
     gateway.liveusb_nodes.clear()
     assert len(gateway.liveusb_sessions) == 0
 
-    pruned = gateway._prune_expired_liveusb_sessions()
+    pruned = gateway._prune_expired_liveusb_sessions(force=True)
     assert pruned == 1
     assert node_id not in _load_disk_registry()
 
@@ -417,3 +419,85 @@ def test_liveusb_register_enforces_max_active_cap(monkeypatch):
     r3 = client.post("/v1/liveusb/register")
     assert r3.status_code == 429
     assert r3.json()["error"] == "liveusb_capacity_reached"
+
+
+def test_liveusb_cors_stripped_on_connect_and_v1_liveusb():
+    client = _client()
+    reg = client.post("/v1/liveusb/register").json()
+    session_code = reg["session_code"]
+
+    r_connect = client.get(
+        f"/connect/{session_code}",
+        headers={"Origin": "https://evil.example"},
+    )
+    assert r_connect.status_code == 200
+    assert "access-control-allow-origin" not in {k.lower() for k in r_connect.headers.keys()}
+
+    r_status = client.get(
+        f"/v1/liveusb/status/{session_code}",
+        headers={"Origin": "https://evil.example"},
+    )
+    assert r_status.status_code == 200
+    assert "access-control-allow-origin" not in {k.lower() for k in r_status.headers.keys()}
+
+
+def test_liveusb_connect_csp_nonce_and_x_frame_options():
+    client = _client()
+    reg = client.post("/v1/liveusb/register").json()
+    session_code = reg["session_code"]
+
+    resp = client.get(f"/connect/{session_code}")
+    assert resp.status_code == 200
+    assert resp.headers.get("x-frame-options") == "DENY"
+    csp = resp.headers.get("content-security-policy", "")
+    assert "frame-ancestors 'none'" in csp
+    match = re.search(r"script-src 'nonce-([^']+)'", csp)
+    assert match is not None, f"Missing script-src nonce in CSP: {csp!r}"
+    nonce = match.group(1)
+    assert f'<script nonce="{nonce}">' in resp.text
+
+
+def test_liveusb_revoke_works_after_restart_from_registry():
+    client = _client()
+    reg = client.post("/v1/liveusb/register").json()
+    node_id = reg["node_id"]
+    device_token = reg["device_token"]
+    session_code = reg["session_code"]
+
+    # Simulate gateway restart: clear in-memory session dicts while registry persists on disk
+    gateway.liveusb_sessions.clear()
+    gateway.liveusb_nodes.clear()
+    assert node_id in _load_disk_registry()
+
+    rev = client.post(
+        "/v1/liveusb/revoke",
+        headers={"Authorization": f"Bearer {device_token}"},
+    )
+    assert rev.status_code == 200
+    body = rev.json()
+    assert body["status"] == "revoked"
+    assert body["node_id"] == node_id
+    assert body["session_code"] == session_code
+    assert node_id not in _load_disk_registry()
+
+
+def test_render_connect_page_escaping_and_quoting():
+    html_doc = render_connect_page(
+        session_code="sess-123",
+        node_id="live node&1",
+        link_key="lk_a+b/c=d",
+        host="smart-server.online",
+        expires_at="2026-11-23T12:00:00\u2028\u2029",
+        online=True,
+        csp_nonce="nonceXYZ",
+    )
+    assert '<script nonce="nonceXYZ">' in html_doc
+    script_block = html_doc.split('<script nonce="nonceXYZ">', 1)[1].split("</script>", 1)[0]
+    assert "\\u2028" in script_block
+    assert "\\u2029" in script_block
+    assert "\u2028" not in script_block
+    assert "\u2029" not in script_block
+    assert "/sse?user=live%20node%261&amp;token=lk_a%2Bb%2Fc%3Dd" in html_doc
+    assert "/mcp?user=live%20node%261&amp;token=lk_a%2Bb%2Fc%3Dd" in html_doc
+    assert "claude mcp add --transport http &#x27;live node&amp;1&#x27;" in html_doc
+

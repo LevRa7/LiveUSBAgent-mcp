@@ -2177,11 +2177,19 @@ def _check_active_uplink_lock(command: str) -> Optional[str]:
         return None
     iface = r"(?<![A-Za-z0-9_.\-:])" + re.escape(uplink) + r"(?![A-Za-z0-9_.\-:])"
     patterns = (
-        r"\bip\b[^;&|\n]*\blink\s+set\b[^;&|\n]*(?:\bdev\s+)?" + iface + r"[^;&|\n]*\bdown\b",
-        r"\bip\b[^;&|\n]*\blink\s+(?:del|delete)\b[^;&|\n]*(?:\bdev\s+)?" + iface,
-        r"\bip\b[^;&|\n]*\baddr(?:ess)?\s+flush\b[^;&|\n]*(?:\bdev\s+)?" + iface,
+        r"\bip\b[^;&|\n]*\bl(?:i(?:n(?:k)?)?)?\s+s(?:e(?:t)?)?\b[^;&|\n]*(?:\bdev\s+)?" + iface + r"[^;&|\n]*\bdown\b",
+        r"\bip\b[^;&|\n]*\bl(?:i(?:n(?:k)?)?)?\s+d(?:e(?:l(?:e(?:t(?:e)?)?)?)?)?\b[^;&|\n]*(?:\bdev\s+)?" + iface,
+        r"\bip\b[^;&|\n]*\ba(?:d(?:d(?:r(?:e(?:s(?:s)?)?)?)?)?)?\s+f(?:l(?:u(?:s(?:h)?)?)?)?\b[^;&|\n]*(?:\bdev\s+)?" + iface,
+        r"\bip\b[^;&|\n]*\br(?:o(?:u(?:t(?:e)?)?)?)?\s+(?:d(?:e(?:l(?:e(?:t(?:e)?)?)?)?)?|f(?:l(?:u(?:s(?:h)?)?)?)?)\b[^;&|\n]*\bdefault\b",
         r"\bifconfig\b[^;&|\n]*" + iface + r"[^;&|\n]*\bdown\b",
         r"\bnmcli\b[^;&|\n]*\b(?:dev(?:ice)?|d)\s+(?:disconnect|down)\b[^;&|\n]*" + iface,
+        r"\bnmcli\b[^;&|\n]*\bn(?:et(?:working)?)?\s+off\b",
+        r"\bnmcli\b[^;&|\n]*\br(?:adio)?\s+(?:wifi|all)\s+off\b",
+        r"\bnmcli\b[^;&|\n]*\bc(?:on(?:nection)?)?\s+down\b",
+        r"\brfkill\b[^;&|\n]*\bblock\b",
+        r"\bsystemctl\b[^;&|\n]*\b(?:stop|restart|kill|isolate)\b[^;&|\n]*\b(?:NetworkManager|systemd-networkd|wpa_supplicant|rhm-live-agent)(?:\.service)?\b",
+        r"\biw\b[^;&|\n]*\bdev\s+" + iface + r"[^;&|\n]*\bdisconnect\b",
+        r"\bdhclient\b[^;&|\n]*\s-r\b[^;&|\n]*" + iface,
         r"\bifdown\b[^;&|\n]*" + iface,
         r"\bnetworkctl\b[^;&|\n]*\bdown\b[^;&|\n]*" + iface,
     )

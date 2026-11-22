@@ -444,3 +444,87 @@ def test_configure_from_env_syncs_liveusb_scenario_tools(monkeypatch):
     finally:
         monkeypatch.delenv("MESH_SCENARIO", raising=False)
         mcp_tools.sync_scenario_tools()
+
+
+# ---------------------------------------------------------------------------
+# Security hardening tests (F-04, F-05, F-08 IPv6, F-13)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "http://gw.example.test",
+        "http://gw.example.test:8080",
+        "ws://gw.example.test/ws",
+        "http://192.168.1.10:8000",
+        "ftp://gw.example.test",
+    ],
+)
+def test_normalize_gateway_base_rejects_non_loopback_plaintext(bad_url):
+    assert liveusb_bootstrap._normalize_gateway_base(bad_url) == ""
+    res = liveusb_bootstrap.register_ephemeral_node(bad_url)
+    assert res["ok"] is False
+
+
+@pytest.mark.parametrize(
+    "good_url,expected",
+    [
+        ("http://127.0.0.1:8080", "http://127.0.0.1:8080"),
+        ("http://localhost:8080/", "http://localhost:8080"),
+        ("http://[::1]:8080", "http://[::1]:8080"),
+        ("ws://127.0.0.1:9000", "http://127.0.0.1:9000"),
+        ("https://gw.example.test/", "https://gw.example.test"),
+        ("wss://gw.example.test", "https://gw.example.test"),
+    ],
+)
+def test_normalize_gateway_base_allows_loopback_and_tls(good_url, expected):
+    assert liveusb_bootstrap._normalize_gateway_base(good_url) == expected
+
+
+def test_revoke_ephemeral_node_unlinks_agent_env_alongside_session(tmp_path, monkeypatch):
+    state_dir = tmp_path / "rhm-live"
+    state_dir.mkdir()
+    env_path = state_dir / "agent.env"
+    session_path = state_dir / "session.json"
+    env_path.write_text(
+        "MESH_GATEWAY=gw.example.test\nMESH_USER=live-1\nMESH_TOKEN=dtok_1\n",
+        encoding="utf-8",
+    )
+    session_path.write_text(json.dumps({"node_id": "live-1"}), encoding="utf-8")
+
+    monkeypatch.setattr(
+        liveusb_bootstrap.urllib.request,
+        "urlopen",
+        lambda req, timeout=None: _FakeResponse(b'{"revoked": true}', status=200),
+    )
+
+    res = liveusb_bootstrap.revoke_ephemeral_node(state_dir=str(state_dir))
+    assert res["ok"] is True
+    assert res["cleaned_session"] is True
+    assert res["cleaned_env"] is True
+    assert not session_path.exists()
+    assert not env_path.exists()
+
+
+def test_active_uplink_interface_falls_back_to_ipv6_route(tmp_path):
+    v4_file = tmp_path / "route"
+    v4_file.write_text(
+        "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n"
+        "eth0\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0\n",
+        encoding="utf-8",
+    )
+    v6_file = tmp_path / "ipv6_route"
+    v6_file.write_text(
+        "00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe800000000000000000000000000001 00000258 00000001 00000000 00000003 wlan0\n"
+        "00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe800000000000000000000000000001 00000064 00000001 00000000 00000003 enp0s3\n",
+        encoding="utf-8",
+    )
+    assert liveusb_bootstrap.active_uplink_interface(str(v4_file), ipv6_route_path=str(v6_file)) == "enp0s3"
+
+
+def test_no_redirect_handler_blocks_3xx():
+    handler = liveusb_bootstrap._NoRedirectHandler()
+    req = liveusb_bootstrap.urllib.request.Request("https://gw.example.test/v1/liveusb/register")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        handler.redirect_request(req, io.BytesIO(b""), 302, "Found", {}, "https://evil.example/steal")
+    assert exc_info.value.code == 302

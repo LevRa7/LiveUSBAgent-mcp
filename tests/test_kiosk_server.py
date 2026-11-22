@@ -37,12 +37,16 @@ def _http_request(
     path: str,
     method: str = "GET",
     payload: Dict[str, Any] | None = None,
+    extra_headers: Dict[str, str] | None = None,
+    raw_body: bytes | None = None,
 ) -> Tuple[int, Dict[str, str], bytes]:
-    data = None
+    data = raw_body
     headers: Dict[str, str] = {}
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
+    if extra_headers:
+        headers.update(extra_headers)
     req = urllib.request.Request(f"{base_url}{path}", data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -118,7 +122,8 @@ def running_server(tmp_path: Path):
         if exe == "nmcli" and "list" in cmd:
             return 0, mock_state["nmcli_scan_output"], ""
         if exe == "nmcli" and "connect" in cmd:
-            return 0, f"Device 'wlan0' successfully activated with '{cmd[4]}'.", ""
+            ssid_arg = cmd[5] if len(cmd) > 5 and cmd[4] == "--" else cmd[4]
+            return 0, f"Device 'wlan0' successfully activated with '{ssid_arg}'.", ""
         if exe == "nmcli" and "ACTIVE,SSID" in cmd:
             return 0, "yes:Office\\:5G\n", ""
         if exe == "idevice_id":
@@ -338,7 +343,7 @@ def test_http_api_wifi_scan_and_connect(running_server):
     )
     assert st_conn == 200
     assert json.loads(body_conn.decode("utf-8"))["ok"] is True
-    assert ["nmcli", "dev", "wifi", "connect", "Office:5G", "password", "secret-pass"] in calls
+    assert ["nmcli", "dev", "wifi", "connect", "--", "Office:5G", "password", "secret-pass"] in calls
 
     # Connect to hidden SSID
     st_hid, _, body_hid = _http_request(
@@ -354,6 +359,7 @@ def test_http_api_wifi_scan_and_connect(running_server):
         "dev",
         "wifi",
         "connect",
+        "--",
         "HiddenCorp",
         "password",
         "pw",
@@ -591,3 +597,97 @@ def test_unslop_ui_surface_regex_audit():
         "Клавиатура",
     ):
         assert required_text in html_text, f"Missing required Russian label: {required_text}"
+
+
+def test_http_security_headers_and_host_origin_csrf_rejection(running_server):
+    base = running_server["base_url"]
+
+    # Security headers present on normal GET
+    st_ok, headers, _ = _http_request(base, "/api/status")
+    assert st_ok == 200
+    low_headers = {k.lower(): v for k, v in headers.items()}
+    assert low_headers.get("x-frame-options") == "DENY"
+    assert low_headers.get("referrer-policy") == "no-referrer"
+    csp = low_headers.get("content-security-policy", "")
+    assert "default-src 'self'" in csp
+    assert "frame-ancestors 'none'" in csp
+
+    # DNS rebinding / invalid Host header rejected with 403
+    st_host, _, _ = _http_request(
+        base,
+        "/api/status",
+        extra_headers={"Host": "evil.example.com:8787"},
+    )
+    assert st_host == 403
+
+    # Cross-origin Origin header rejected with 403
+    st_origin, _, _ = _http_request(
+        base,
+        "/api/status",
+        extra_headers={"Origin": "https://evil.example.com"},
+    )
+    assert st_origin == 403
+
+    # Cross-site Sec-Fetch-Site rejected with 403
+    st_sfs, _, _ = _http_request(
+        base,
+        "/api/status",
+        extra_headers={"Sec-Fetch-Site": "cross-site"},
+    )
+    assert st_sfs == 403
+
+    # POST without Content-Type: application/json rejected with 403 (CSRF protection)
+    st_ct, _, _ = _http_request(
+        base,
+        "/api/session/regenerate",
+        method="POST",
+        extra_headers={"Content-Type": "text/plain"},
+        raw_body=b"{}",
+    )
+    assert st_ct == 403
+
+
+def test_connect_wifi_rejects_leading_dash_and_invalid_inputs():
+    called = []
+
+    def fail_if_called(cmd: List[str], timeout: float = 5.0) -> Tuple[int, str, str]:
+        called.append(cmd)
+        return 0, "", ""
+
+    # Leading '-' SSID rejected
+    res_dash = kiosk.connect_wifi("-o", password="pw", run_cmd=fail_if_called)
+    assert res_dash["ok"] is False
+    res_flag = kiosk.connect_wifi("--help", password="pw", run_cmd=fail_if_called)
+    assert res_flag["ok"] is False
+
+    # SSID > 32 UTF-8 bytes rejected
+    res_long_ssid = kiosk.connect_wifi("a" * 33, password="pw", run_cmd=fail_if_called)
+    assert res_long_ssid["ok"] is False
+
+    # Control char in SSID rejected
+    res_ctrl_ssid = kiosk.connect_wifi("MyNet\nEvil", password="pw", run_cmd=fail_if_called)
+    assert res_ctrl_ssid["ok"] is False
+
+    # Password > 64 chars or control char rejected
+    res_long_pw = kiosk.connect_wifi("MyNet", password="p" * 65, run_cmd=fail_if_called)
+    assert res_long_pw["ok"] is False
+    res_ctrl_pw = kiosk.connect_wifi("MyNet", password="pass\x00word", run_cmd=fail_if_called)
+    assert res_ctrl_pw["ok"] is False
+
+    assert called == []
+
+
+def test_default_run_cmd_timeout_redacts_password_args(monkeypatch):
+    def fake_timeout(*args, **kwargs):
+        raise kiosk.subprocess.TimeoutExpired(cmd=args[0], timeout=1.0)
+
+    monkeypatch.setattr(kiosk.subprocess, "run", fake_timeout)
+    rc, out, err = kiosk.default_run_cmd(
+        ["nmcli", "dev", "wifi", "connect", "--", "OfficeWifi", "password", "SuperSecretPass99"],
+        timeout=1.0,
+    )
+    assert rc == 124
+    assert out == ""
+    assert err == "command timed out: nmcli"
+    assert "SuperSecretPass99" not in err
+

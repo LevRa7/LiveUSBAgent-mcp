@@ -16,6 +16,7 @@ import json
 import mimetypes
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -51,9 +52,9 @@ def default_run_cmd(cmd: List[str], timeout: float = 5.0) -> Tuple[int, str, str
         )
         return proc.returncode, proc.stdout or "", proc.stderr or ""
     except FileNotFoundError:
-        return 127, "", f"command not found: {cmd[0]}"
+        return 127, "", f"command not found: {cmd[0] if cmd else 'command'}"
     except subprocess.TimeoutExpired:
-        return 124, "", f"command timed out: {' '.join(cmd)}"
+        return 124, "", f"command timed out: {cmd[0] if cmd else 'command'}"
     except Exception as exc:
         return 1, "", str(exc)
 
@@ -566,11 +567,16 @@ def trigger_session_regenerate(
     # Optional external command hook via environment variable
     regen_cmd = os.environ.get("RHM_REGENERATE_CMD", "").strip()
     if regen_cmd:
-        rc, out, err = run_cmd(regen_cmd.split(), 10.0)
-        if rc == 0:
-            messages.append((out or "Команда перерегистрации выполнена").strip())
-        else:
-            messages.append((err or f"Ошибка перерегистрации (код {rc})").strip())
+        try:
+            cmd_args = shlex.split(regen_cmd)
+        except ValueError:
+            cmd_args = []
+        if cmd_args:
+            rc, out, err = run_cmd(cmd_args, 10.0)
+            if rc == 0:
+                messages.append((out or "Команда перерегистрации выполнена").strip())
+            else:
+                messages.append((err or f"Ошибка перерегистрации (код {rc})").strip())
 
     ok = trigger_path is not None
     return {
@@ -617,13 +623,26 @@ def connect_wifi(
     run_cmd: CommandRunner = default_run_cmd,
 ) -> Dict[str, Any]:
     """Connect to a Wi-Fi network using nmcli."""
-    clean_ssid = (ssid or "").strip()
+    raw_ssid = ssid or ""
+    clean_ssid = raw_ssid.strip()
     if not clean_ssid:
         return {"ok": False, "message": "Не указано имя сети (SSID)"}
+    if len(clean_ssid.encode("utf-8")) > 32:
+        return {"ok": False, "message": "Имя сети (SSID) превышает 32 байта"}
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw_ssid):
+        return {"ok": False, "message": "Имя сети (SSID) содержит недопустимые символы"}
+    if clean_ssid.startswith("-"):
+        return {"ok": False, "message": "Имя сети (SSID) не может начинаться с '-'"}
 
-    cmd = ["nmcli", "dev", "wifi", "connect", clean_ssid]
-    if password:
-        cmd.extend(["password", password])
+    raw_password = password or ""
+    if len(raw_password) > 64:
+        return {"ok": False, "message": "Пароль Wi-Fi превышает 64 символа"}
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw_password):
+        return {"ok": False, "message": "Пароль Wi-Fi содержит недопустимые символы"}
+
+    cmd = ["nmcli", "dev", "wifi", "connect", "--", clean_ssid]
+    if raw_password:
+        cmd.extend(["password", raw_password])
     if hidden:
         cmd.extend(["hidden", "yes"])
 
@@ -711,11 +730,53 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'",
+        )
         if extra_headers:
             for k, v in extra_headers.items():
                 self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
+
+    def _validate_request_security(self, *, require_json: bool = False) -> bool:
+        port = self.server.server_port
+        allowed_hosts = {
+            f"127.0.0.1:{port}",
+            f"localhost:{port}",
+            f"[::1]:{port}",
+        }
+        host = (self.headers.get("Host") or "").strip().lower()
+        if host not in allowed_hosts:
+            self._send_json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "Forbidden"})
+            return False
+
+        sec_fetch_site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if sec_fetch_site not in ("", "same-origin", "none"):
+            self._send_json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "Forbidden"})
+            return False
+
+        origin = (self.headers.get("Origin") or "").strip().lower()
+        if origin:
+            allowed_origins = {
+                f"http://127.0.0.1:{port}",
+                f"http://localhost:{port}",
+                f"http://[::1]:{port}",
+            }
+            if origin not in allowed_origins:
+                self._send_json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "Forbidden"})
+                return False
+
+        if require_json:
+            ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+            if ctype != "application/json":
+                self._send_json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "Forbidden"})
+                return False
+
+        return True
 
     def _send_json(self, status: int, payload: Dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -769,12 +830,14 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
 
         try:
             data = candidate.read_bytes()
-        except Exception as exc:
-            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(exc)})
+        except Exception:
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": "Internal server error"})
             return
         self._send_bytes(HTTPStatus.OK, data, ctype)
 
     def do_GET(self) -> None:
+        if not self._validate_request_security(require_json=False):
+            return
         parsed = urlparse(self.path)
         path = parsed.path
 
@@ -789,13 +852,15 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
                 self._handle_qr_svg()
                 return
             self._serve_static(path)
-        except Exception as exc:
+        except Exception:
             self._send_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
-                {"ok": False, "error": str(exc)},
+                {"ok": False, "error": "Internal server error"},
             )
 
     def do_POST(self) -> None:
+        if not self._validate_request_security(require_json=True):
+            return
         parsed = urlparse(self.path)
         path = parsed.path
 
@@ -807,10 +872,10 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
                 self._handle_session_regenerate()
                 return
             self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Not found"})
-        except Exception as exc:
+        except Exception:
             self._send_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
-                {"ok": False, "error": str(exc)},
+                {"ok": False, "error": "Internal server error"},
             )
 
     def _handle_status(self) -> None:

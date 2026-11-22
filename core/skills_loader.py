@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 #: Default Linux LiveUSB SquashFS skills directory (included when present on disk).
@@ -352,15 +353,42 @@ def _list_reference_files(skill_dir: Optional[str]) -> List[str]:
     return found
 
 
+def _safe_read_regular_file(
+    file_path: str,
+    allowed_root: str,
+    max_bytes: int = 512 * 1024,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Safely read a regular UTF-8 file contained within *allowed_root* up to *max_bytes*."""
+    try:
+        root_real = os.path.realpath(allowed_root)
+        target_real = os.path.realpath(file_path)
+        try:
+            common = os.path.commonpath([root_real, target_real])
+        except ValueError:
+            return None, "path escapes allowed root"
+        if common != root_real or target_real == root_real:
+            return None, "path escapes allowed root"
+        st = os.stat(target_real)
+        if not stat.S_ISREG(st.st_mode):
+            return None, "target is not a regular file"
+        if st.st_size > max_bytes:
+            return None, f"file exceeds maximum allowed size ({max_bytes} bytes)"
+        with open(target_real, "rb") as fh:
+            data = fh.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            return None, f"file exceeds maximum allowed size ({max_bytes} bytes)"
+        return data.decode("utf-8", errors="replace"), None
+    except Exception as exc:
+        return None, str(exc)
+
+
 def _load_skill_entry(
     file_path: str,
     is_package: bool,
     root_dir: str,
 ) -> Optional[Dict[str, Any]]:
-    try:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as fh:
-            raw_text = fh.read()
-    except Exception:
+    raw_text, read_err = _safe_read_regular_file(file_path, root_dir)
+    if read_err is not None or raw_text is None:
         return None
 
     meta, body = parse_frontmatter(raw_text)
@@ -610,14 +638,18 @@ def handle_load_skill(args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             if common != refs_root or real_candidate == refs_root:
                 return {"error": "Invalid reference_file: path traversal is not allowed."}
 
-            if not os.path.isfile(real_candidate):
+            if not os.path.exists(real_candidate):
                 return {
                     "error": f"Reference file not found: {normalized_ref}",
                     "references": available_refs,
                 }
 
-            with open(real_candidate, "r", encoding="utf-8", errors="replace") as fh:
-                ref_content = fh.read()
+            ref_content, read_err = _safe_read_regular_file(candidate_path, refs_root)
+            if read_err is not None or ref_content is None:
+                return {
+                    "error": f"Invalid reference_file: {read_err}",
+                    "references": available_refs,
+                }
 
             return {
                 "name": found["name"],

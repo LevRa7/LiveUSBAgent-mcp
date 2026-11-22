@@ -1,12 +1,12 @@
-# Remote-Harness Live USB (`ops/live-usb`)
+# LiveUSBAgent-mcp Live USB (`ops/live-usb`)
 
-Сборка, локальное тестирование в QEMU/KVM и запись загрузочного rescue-образа **Remote-Harness Live Rescue** на базе Debian 13 (Trixie).
+Сборка, локальное тестирование в QEMU/KVM и запись загрузочного rescue-образа **LiveUSBAgent-mcp** на базе Debian 13 (Trixie).
 
 ---
 
 ## 1. Сборка ISO на Debian
 
-Сборка выполняется на хосте или ВМ с **Debian 13 (Trixie)** (например, на узле `matebook16-deb`).
+Сборка выполняется на хосте или виртуальной машине с **Debian 13 (Trixie)**.
 
 ### Зависимости
 
@@ -20,9 +20,11 @@ sudo apt-get install -y \
 
 ### Базовая сборка (без внешних скиллов)
 
+Флаг `--build` запускает `lb build` сразу после подготовки конфигурации `live-build`:
+
 ```bash
-cd /path/to/remote-harness-liveusb
-sudo ops/live-usb/build-iso.sh
+cd /path/to/LiveUSBAgent-mcp
+sudo ops/live-usb/build-iso.sh --build
 ```
 
 ### Сборка с внешними скиллами (`--with-external-skills`)
@@ -30,20 +32,21 @@ sudo ops/live-usb/build-iso.sh
 Если нужно включить в образ внешние скиллы из `ops/live-usb/skills-manifest.json`:
 
 ```bash
+sudo ops/live-usb/build-iso.sh --with-external-skills --build
+```
+
+### Настройка через переменные окружения и ручной запуск `lb build`
+
+По умолчанию рабочая директория — `/tmp/rhm-live-build` (`DISTRO=trixie`, `ARCH=amd64`). При нехватке места в `/tmp` укажите другой каталог (через `WORK_DIR` или `--work-dir`):
+
+```bash
+sudo WORK_DIR=/var/tmp/rhm-live-build ops/live-usb/build-iso.sh --with-external-skills --build
+```
+
+Если опустить флаг `--build`, скрипт только подготовит конфигурацию `live-build` (удобно для инспекции перед сборкой), после чего сборку ISO можно запустить вручную в `WORK_DIR`:
+
+```bash
 sudo ops/live-usb/build-iso.sh --with-external-skills
-```
-
-### Настройка через переменные окружения
-
-По умолчанию рабочая директория — `/tmp/rhm-live-build` (`DISTRO=trixie`, `ARCH=amd64`). При нехватке места в `/tmp` укажите другой каталог:
-
-```bash
-sudo WORK_DIR=/var/tmp/rhm-live-build ops/live-usb/build-iso.sh --with-external-skills
-```
-
-Если скрипт только подготавливает конфигурацию `live-build`, запустите сборку ISO вручную в `WORK_DIR`:
-
-```bash
 cd "${WORK_DIR:-/tmp/rhm-live-build}"
 sudo lb build
 ```
@@ -127,7 +130,7 @@ sync
 Образ содержит подписанные `shim-signed` и ядро Debian, поэтому базовая загрузка возможна при включённом Secure Boot. Однако **неподписанные out-of-tree DKMS-модули** будут заблокированы ядром, если Secure Boot активен:
 - `linux-apfs-rw` (чтение/запись разделов Apple APFS),
 - `zfs` (пулы OpenZFS),
-- `broadcom-sta` (часть Wi-Fi адаптеров Broadcom).
+- `broadcom-sta-dkms` (часть Wi-Fi адаптеров Broadcom).
 
 Если на целевой машине нужны APFS, ZFS или Broadcom Wi-Fi — **отключите Secure Boot в настройках UEFI/BIOS** (либо подпишите модули собственным MOK-ключом).
 

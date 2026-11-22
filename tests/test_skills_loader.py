@@ -381,3 +381,73 @@ def test_skills_manifest_json_valid():
         assert entry["url"].startswith("https://github.com/")
         assert isinstance(entry["paths"], list) and len(entry["paths"]) >= 1
         assert entry["dest_subdir"]
+
+
+# ---------------------------------------------------------------------------
+# Security hardening tests (F-12: symlink escape & oversized file caps)
+# ---------------------------------------------------------------------------
+
+
+def test_safe_read_rejects_symlink_escape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    skills_root = tmp_path / "skills_root"
+    outside_file = tmp_path / "outside_secret.txt"
+    outside_file.write_text("TOP SECRET", encoding="utf-8")
+
+    skill_md = _write(
+        skills_root / "my-skill" / "SKILL.md",
+        "---\nname: my-skill\ndescription: Test skill\n---\nBody\n",
+    )
+    ref_file = _write(
+        skills_root / "my-skill" / "references" / "link.md",
+        "placeholder\n",
+    )
+
+    real_realpath = os.path.realpath
+
+    def fake_realpath(p):
+        if os.path.normcase(os.path.abspath(p)) == os.path.normcase(os.path.abspath(str(ref_file))):
+            return real_realpath(str(outside_file))
+        return real_realpath(p)
+
+    monkeypatch.setattr(skills_loader.os.path, "realpath", fake_realpath)
+    monkeypatch.setenv("MESH_SKILLS_DIRS", str(skills_root))
+
+    content, err = skills_loader._safe_read_regular_file(str(ref_file), str(skills_root / "my-skill" / "references"))
+    assert content is None
+    assert err is not None
+
+    res = skills_loader.handle_load_skill({"name": "my-skill", "reference_file": "link.md"})
+    assert "error" in res
+    assert "content" not in res
+
+
+def test_safe_read_rejects_oversized_skill_and_reference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    skills_root = tmp_path / "skills_root"
+    oversized_bytes = "A" * (512 * 1024 + 1024)
+
+    # Oversized SKILL.md is skipped during discovery
+    _write(
+        skills_root / "huge-skill" / "SKILL.md",
+        "---\nname: huge-skill\ndescription: Too large\n---\n" + oversized_bytes,
+    )
+    # Normal skill with oversized reference file
+    _write(
+        skills_root / "normal-skill" / "SKILL.md",
+        "---\nname: normal-skill\ndescription: Normal size\n---\nNormal body\n",
+    )
+    _write(
+        skills_root / "normal-skill" / "references" / "huge.md",
+        oversized_bytes,
+    )
+
+    monkeypatch.setenv("MESH_SKILLS_DIRS", str(skills_root))
+
+    listed = skills_loader.handle_list_skills({})
+    names = [s["name"] for s in listed["skills"]]
+    assert "normal-skill" in names
+    assert "huge-skill" not in names
+
+    ref_res = skills_loader.handle_load_skill({"name": "normal-skill", "reference_file": "huge.md"})
+    assert "error" in ref_res
+    assert "size" in ref_res["error"].lower()
+    assert "content" not in ref_res

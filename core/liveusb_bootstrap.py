@@ -11,6 +11,7 @@ import json
 import os
 import platform
 import socket
+import ssl
 import tempfile
 import time
 from typing import Any, Dict, Optional
@@ -20,6 +21,39 @@ import urllib.request
 
 DEFAULT_STATE_DIR = "/run/rhm-live"
 _USER_AGENT = "rhm-liveusb-bootstrap/1.0"
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_DEFAULT_URLOPEN = urllib.request.urlopen
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Block HTTP 3xx redirects so ephemeral tokens are never forwarded off-origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(
+            req.full_url,
+            code,
+            f"HTTP redirect ({code}) blocked",
+            headers,
+            fp,
+        )
+
+
+def _build_secure_opener() -> urllib.request.OpenerDirector:
+    """Create a urllib opener enforcing TLS 1.2+ and blocking HTTP redirects."""
+    ctx = ssl.create_default_context()
+    if hasattr(ssl, "TLSVersion"):
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    return urllib.request.build_opener(
+        _NoRedirectHandler(),
+        urllib.request.HTTPSHandler(context=ctx),
+    )
+
+
+def _secure_urlopen(req: urllib.request.Request, timeout: float):
+    """Open *req* with TLS 1.2+ and no-redirect opener (respects monkeypatched urlopen in tests)."""
+    if urllib.request.urlopen is not _DEFAULT_URLOPEN:
+        return urllib.request.urlopen(req, timeout=timeout)
+    return _build_secure_opener().open(req, timeout=timeout)
 
 
 def state_dir_path(state_dir: Optional[str] = None) -> str:
@@ -36,20 +70,28 @@ def state_dir_path(state_dir: Optional[str] = None) -> str:
 
 
 def _normalize_gateway_base(gateway_url: Optional[str]) -> str:
-    """Normalize a gateway host or URL to an HTTP(S) base URL without trailing slash."""
+    """Normalize a gateway host or URL to an HTTP(S) base URL without trailing slash.
+
+    Rejects plaintext ``http://`` and ``ws://`` for non-loopback hosts.
+    """
     raw = str(gateway_url or "").strip().rstrip("/")
     if not raw:
         return ""
-    if raw.startswith("wss://"):
+    lower = raw.lower()
+    if lower.startswith("wss://"):
         raw = "https://" + raw[6:]
-    elif raw.startswith("ws://"):
+    elif lower.startswith("ws://"):
         raw = "http://" + raw[5:]
     elif "://" not in raw:
         raw = "https://" + raw
     parsed = urllib.parse.urlparse(raw)
-    if not parsed.scheme or not parsed.netloc:
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("https", "http") or not parsed.netloc:
         return ""
-    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
+    hostname = (parsed.hostname or "").lower()
+    if scheme == "http" and hostname not in _LOOPBACK_HOSTS:
+        return ""
+    return f"{scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
 
 
 def _gateway_host(gateway_url: Optional[str]) -> str:
@@ -69,7 +111,12 @@ def _atomic_write_text(path: str, content: str, mode: Optional[int] = None) -> N
     """Write text to *path* atomically via a same-directory temp file and os.replace."""
     parent = os.path.dirname(os.path.abspath(path))
     if parent:
-        os.makedirs(parent, exist_ok=True)
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+        if os.name == "posix":
+            try:
+                os.chmod(parent, 0o700)
+            except OSError:
+                pass
     basename = os.path.basename(path)
     tmp_path = None
     try:
@@ -178,7 +225,7 @@ def wait_for_gateway(
                 headers={"User-Agent": _USER_AGENT},
             )
             try:
-                with urllib.request.urlopen(req, timeout=req_timeout) as resp:
+                with _secure_urlopen(req, timeout=req_timeout) as resp:
                     status = getattr(resp, "status", None)
                     if status is None:
                         status = resp.getcode()
@@ -247,7 +294,7 @@ def register_ephemeral_node(
                 "User-Agent": _USER_AGENT,
             },
         )
-        with urllib.request.urlopen(req, timeout=max(1.0, float(timeout_sec))) as resp:
+        with _secure_urlopen(req, timeout=max(1.0, float(timeout_sec))) as resp:
             raw_body = resp.read().decode("utf-8", errors="replace")
 
         data = json.loads(raw_body) if raw_body.strip() else {}
@@ -317,7 +364,7 @@ def register_ephemeral_node(
         _atomic_write_text(
             session_path,
             json.dumps(session_doc, indent=2, sort_keys=False) + "\n",
-            mode=0o644,
+            mode=0o600,
         )
 
         return {
@@ -406,7 +453,7 @@ def revoke_ephemeral_node(
                     "User-Agent": _USER_AGENT,
                 },
             )
-            with urllib.request.urlopen(req, timeout=max(1.0, float(timeout_sec))) as resp:
+            with _secure_urlopen(req, timeout=max(1.0, float(timeout_sec))) as resp:
                 raw_body = resp.read().decode("utf-8", errors="replace")
                 if raw_body.strip():
                     try:
@@ -436,10 +483,19 @@ def revoke_ephemeral_node(
     except Exception:
         cleaned_session = False
 
+    cleaned_env = False
+    try:
+        if os.path.exists(env_path):
+            os.unlink(env_path)
+            cleaned_env = True
+    except Exception:
+        cleaned_env = False
+
     result: Dict[str, Any] = {
         "ok": revoked,
         "revoked": revoked,
         "cleaned_session": cleaned_session,
+        "cleaned_env": cleaned_env,
         "node_id": node_id,
         "state_dir": target_dir,
     }
@@ -450,44 +506,90 @@ def revoke_ephemeral_node(
     return result
 
 
-def active_uplink_interface(route_path: str = "/proc/net/route") -> Optional[str]:
-    """Return the Linux default-route network interface name from /proc/net/route.
-
-    Parses ``Destination == 00000000`` entries and prefers the lowest metric
-    among active (RTF_UP) routes. Returns None on non-Linux systems or when no
-    default route exists. Never raises unhandled exceptions.
-    """
+def _active_ipv6_uplink_interface(ipv6_route_path: str = "/proc/net/ipv6_route") -> Optional[str]:
+    """Return the Linux IPv6 default-route interface from /proc/net/ipv6_route."""
     try:
-        if not route_path or not os.path.isfile(route_path):
+        if not ipv6_route_path or not os.path.isfile(ipv6_route_path):
             return None
         candidates = []
-        with open(route_path, "r", encoding="utf-8", errors="replace") as handle:
+        with open(ipv6_route_path, "r", encoding="utf-8", errors="replace") as handle:
             lines = handle.readlines()
         for idx, line in enumerate(lines):
             parts = line.strip().split()
-            if idx == 0 and parts and parts[0].lower() == "iface":
+            if len(parts) < 10:
                 continue
-            if len(parts) < 4:
+            dest, prefix_len = parts[0], parts[1]
+            if dest != "00000000000000000000000000000000" or prefix_len != "00":
                 continue
-            iface, dest = parts[0], parts[1]
-            if dest != "00000000":
+            iface = parts[9]
+            if not iface or iface == "lo":
                 continue
             try:
-                flags = int(parts[3], 16)
+                flags = int(parts[8], 16)
                 if (flags & 0x1) == 0:
                     continue
             except ValueError:
-                pass
-            metric = 0
-            if len(parts) >= 7:
-                try:
-                    metric = int(parts[6])
-                except ValueError:
-                    metric = 0
+                continue
+            try:
+                metric = int(parts[5], 16)
+            except ValueError:
+                metric = 0
             candidates.append((metric, idx, iface))
         if not candidates:
             return None
         candidates.sort(key=lambda item: (item[0], item[1]))
         return candidates[0][2]
+    except Exception:
+        return None
+
+
+def active_uplink_interface(
+    route_path: str = "/proc/net/route",
+    ipv6_route_path: Optional[str] = None,
+) -> Optional[str]:
+    """Return the Linux default-route network interface name from /proc/net/route.
+
+    Parses ``Destination == 00000000`` entries and prefers the lowest metric
+    among active (RTF_UP) routes. Falls back to ``/proc/net/ipv6_route`` when no
+    IPv4 default route exists. Returns None on non-Linux systems or when no
+    default route exists. Never raises unhandled exceptions.
+    """
+    try:
+        if route_path and os.path.isfile(route_path):
+            candidates = []
+            with open(route_path, "r", encoding="utf-8", errors="replace") as handle:
+                lines = handle.readlines()
+            for idx, line in enumerate(lines):
+                parts = line.strip().split()
+                if idx == 0 and parts and parts[0].lower() == "iface":
+                    continue
+                if len(parts) < 4:
+                    continue
+                iface, dest = parts[0], parts[1]
+                if dest != "00000000":
+                    continue
+                try:
+                    flags = int(parts[3], 16)
+                    if (flags & 0x1) == 0:
+                        continue
+                except ValueError:
+                    pass
+                metric = 0
+                if len(parts) >= 7:
+                    try:
+                        metric = int(parts[6])
+                    except ValueError:
+                        metric = 0
+                candidates.append((metric, idx, iface))
+            if candidates:
+                candidates.sort(key=lambda item: (item[0], item[1]))
+                return candidates[0][2]
+
+        v6_path = ipv6_route_path if ipv6_route_path is not None else (
+            "/proc/net/ipv6_route" if route_path == "/proc/net/route" else None
+        )
+        if v6_path:
+            return _active_ipv6_uplink_interface(v6_path)
+        return None
     except Exception:
         return None

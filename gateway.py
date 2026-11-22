@@ -608,6 +608,11 @@ def verify_token(request: Request) -> tuple[bool, str, str]:
     if registry_corrupt():
         return False, "The gateway registry is unreadable; restore it before using this node.", user
     entry = registry.get(user)
+    if isinstance(entry, dict) and entry.get("liveusb"):
+        exp_ts = _entry_expires_ts(entry)
+        if exp_ts is not None and time.time() >= exp_ts:
+            _prune_expired_liveusb_sessions(force=True)
+            entry = None
     if not entry:
         # The same message as a wrong credential: "user X is not registered"
         # turned /sse and /mcp into a free oracle for every device name.
@@ -1699,6 +1704,9 @@ async def device_revoke(request: Request):
 LIVEUSB_TTL_SECONDS = 24 * 60 * 60
 LIVEUSB_REVOKED_MAX = 1000
 LIVEUSB_MAX_ACTIVE = 200
+LIVEUSB_PRUNE_INTERVAL = 10.0
+_LIVEUSB_HOST_RE = re.compile(r"^[A-Za-z0-9.\-:\[\]]{1,253}$")
+_last_liveusb_prune_ts: float = 0.0
 liveusb_sessions: dict[str, dict] = {}
 liveusb_nodes: dict[str, str] = {}
 liveusb_revoked_sessions: dict[str, dict] = {}
@@ -1715,7 +1723,11 @@ def _liveusb_base_and_host(request: Request) -> tuple[str, str]:
     if base:
         host = urlparse(base).netloc or PUBLIC_HOST
         return base, host
-    host = (request.headers.get("host") or PUBLIC_HOST or "localhost").strip()
+    raw_host = (request.headers.get("host") or "").strip()
+    if raw_host and _LIVEUSB_HOST_RE.fullmatch(raw_host):
+        host = raw_host
+    else:
+        host = (PUBLIC_HOST or "localhost").strip()
     scheme = request.url.scheme or "https"
     return f"{scheme}://{host}", host
 
@@ -1725,7 +1737,7 @@ def _new_liveusb_link_key() -> str:
 
 
 def _new_liveusb_session_code() -> str:
-    return secrets.token_urlsafe(12)
+    return secrets.token_urlsafe(16)
 
 
 def _new_liveusb_node_id(registry: dict) -> str:
@@ -1782,9 +1794,13 @@ def _entry_expires_ts(entry: dict) -> float | None:
     return None
 
 
-def _prune_expired_liveusb_sessions(now: float | None = None) -> int:
+def _prune_expired_liveusb_sessions(now: float | None = None, *, force: bool = False) -> int:
     """Remove expired ephemeral LiveUSB sessions from memory and registry."""
+    global _last_liveusb_prune_ts
     ts = time.time() if now is None else float(now)
+    if not force and now is None and (ts - _last_liveusb_prune_ts) < LIVEUSB_PRUNE_INTERVAL:
+        return 0
+    _last_liveusb_prune_ts = ts
     expired_codes = [
         code for code, sess in list(liveusb_sessions.items())
         if ts >= float(sess.get("expires_ts", 0.0))
@@ -1832,7 +1848,7 @@ def _prune_expired_liveusb_sessions(now: float | None = None) -> int:
 
 async def liveusb_register(request: Request):
     """Issue a 24h ephemeral LiveUSB node, credentials, and connect URL."""
-    if rate_limited("liveusb_register", client_ip(request), limit=30):
+    if rate_limited("liveusb_register", client_ip(request), limit=10):
         return JSONResponse({"error": "rate_limited"}, status_code=429)
     _prune_expired_liveusb_sessions()
     registry = load_registry()
@@ -1924,6 +1940,8 @@ async def liveusb_register(request: Request):
 
 async def liveusb_revoke(request: Request):
     """Revoke an ephemeral LiveUSB session using its device_token."""
+    if rate_limited("liveusb_revoke", client_ip(request), limit=20):
+        return JSONResponse({"error": "rate_limited"}, status_code=429)
     _prune_expired_liveusb_sessions()
     payload = {}
     try:
@@ -1953,45 +1971,72 @@ async def liveusb_revoke(request: Request):
                 continue
             if want_code and code != want_code:
                 continue
-            matched_code = code
-            matched_sess = sess
-            break
-
-    if not matched_code or not matched_sess:
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-
-    node_id = matched_sess["node_id"]
-    expires_at = matched_sess["expires_at"]
-    liveusb_sessions.pop(matched_code, None)
-    if liveusb_nodes.get(node_id) == matched_code:
-        liveusb_nodes.pop(node_id, None)
+            if matched_code is None:
+                matched_code = code
+                matched_sess = sess
 
     registry = load_registry()
-    if node_id in registry:
+    matched_reg_node = None
+    matched_reg_entry = None
+    if not matched_code or not matched_sess:
+        if isinstance(registry, dict):
+            for nid, entry in list(registry.items()):
+                if not isinstance(entry, dict) or not entry.get("liveusb"):
+                    continue
+                if token_matches_device(entry, supplied):
+                    if want_node and nid != want_node:
+                        continue
+                    entry_code = str(entry.get("session_code") or "").strip()
+                    if want_code and entry_code != want_code:
+                        continue
+                    if matched_reg_node is None:
+                        matched_reg_node = nid
+                        matched_reg_entry = entry
+
+    if matched_code and matched_sess:
+        node_id = matched_sess["node_id"]
+        expires_at = matched_sess["expires_at"]
+        session_code = matched_code
+    elif matched_reg_node and matched_reg_entry:
+        node_id = matched_reg_node
+        expires_at = str(matched_reg_entry.get("expires_at") or "")
+        session_code = str(matched_reg_entry.get("session_code") or "").strip()
+    else:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+
+    if session_code:
+        liveusb_sessions.pop(session_code, None)
+    if liveusb_nodes.get(node_id) == session_code or node_id in liveusb_nodes:
+        liveusb_nodes.pop(node_id, None)
+
+    if isinstance(registry, dict) and node_id in registry:
         registry.pop(node_id, None)
         if not registry_corrupt():
             save_registry(registry)
 
     await _teardown_liveusb_node(node_id, "LiveUSB session revoked")
 
-    while len(liveusb_revoked_sessions) >= LIVEUSB_REVOKED_MAX:
-        oldest = next(iter(liveusb_revoked_sessions))
-        liveusb_revoked_sessions.pop(oldest, None)
-    liveusb_revoked_sessions[matched_code] = {
-        "node_id": node_id,
-        "expires_at": expires_at,
-        "revoked": True,
-    }
+    if session_code:
+        while len(liveusb_revoked_sessions) >= LIVEUSB_REVOKED_MAX:
+            oldest = next(iter(liveusb_revoked_sessions))
+            liveusb_revoked_sessions.pop(oldest, None)
+        liveusb_revoked_sessions[session_code] = {
+            "node_id": node_id,
+            "expires_at": expires_at,
+            "revoked": True,
+        }
 
     logger.warning("Ephemeral LiveUSB node '%s' revoked", node_id)
     return JSONResponse(
-        {"status": "revoked", "node_id": node_id, "session_code": matched_code},
+        {"status": "revoked", "node_id": node_id, "session_code": session_code},
         headers={"cache-control": "no-store"},
     )
 
 
 async def liveusb_status(request: Request):
     """Return live connection status for one LiveUSB session_code."""
+    if rate_limited("liveusb_status", client_ip(request), limit=60):
+        return JSONResponse({"error": "rate_limited"}, status_code=429)
     _prune_expired_liveusb_sessions()
     session_code = (request.path_params.get("session_code") or "").strip()
     if session_code in liveusb_revoked_sessions:
@@ -2006,6 +2051,9 @@ async def liveusb_status(request: Request):
             headers={"cache-control": "no-store"},
         )
     sess = liveusb_sessions.get(session_code)
+    if sess and time.time() >= float(sess.get("expires_ts", 0.0)):
+        _prune_expired_liveusb_sessions(force=True)
+        sess = None
     if not sess:
         return JSONResponse(
             {"error": "session_not_found"},
@@ -2026,6 +2074,13 @@ async def liveusb_status(request: Request):
 
 async def liveusb_connect(request: Request):
     """Serve the mobile-friendly Russian connect page for a LiveUSB session."""
+    if rate_limited("liveusb_connect", client_ip(request), limit=60):
+        return Response(
+            "Too many requests.\n",
+            status_code=429,
+            media_type="text/plain; charset=utf-8",
+            headers={"cache-control": "no-store", "x-content-type-options": "nosniff"},
+        )
     _prune_expired_liveusb_sessions()
     session_code = (request.path_params.get("session_code") or "").strip()
     if session_code in liveusb_revoked_sessions:
@@ -2036,6 +2091,9 @@ async def liveusb_connect(request: Request):
             headers={"cache-control": "no-store", "x-content-type-options": "nosniff"},
         )
     sess = liveusb_sessions.get(session_code)
+    if sess and time.time() >= float(sess.get("expires_ts", 0.0)):
+        _prune_expired_liveusb_sessions(force=True)
+        sess = None
     if not sess:
         return Response(
             "Сессия не найдена или истекла.\n",
@@ -2047,6 +2105,7 @@ async def liveusb_connect(request: Request):
 
     base, host = _liveusb_base_and_host(request)
     node_id = sess["node_id"]
+    csp_nonce = secrets.token_urlsafe(16)
     html_body = render_connect_page(
         session_code=session_code,
         node_id=node_id,
@@ -2055,6 +2114,7 @@ async def liveusb_connect(request: Request):
         expires_at=sess["expires_at"],
         public_base_url=base,
         online=node_id in active_tunnels,
+        csp_nonce=csp_nonce,
     )
     return Response(
         html_body,
@@ -2064,6 +2124,12 @@ async def liveusb_connect(request: Request):
             "cache-control": "no-store",
             "referrer-policy": "no-referrer",
             "x-content-type-options": "nosniff",
+            "x-frame-options": "DENY",
+            "content-security-policy": (
+                f"default-src 'none'; style-src 'unsafe-inline'; "
+                f"script-src 'nonce-{csp_nonce}'; connect-src 'self'; "
+                f"frame-ancestors 'none'; base-uri 'none'"
+            ),
         },
     )
 
@@ -3710,6 +3776,11 @@ async def ws_tunnel_endpoint(websocket: WebSocket):
     _prune_expired_liveusb_sessions()
     registry = load_registry()
     entry = registry.get(user) if user else None
+    if isinstance(entry, dict) and entry.get("liveusb"):
+        exp_ts = _entry_expires_ts(entry)
+        if exp_ts is not None and time.time() >= exp_ts:
+            _prune_expired_liveusb_sessions(force=True)
+            entry = None
 
     # The tunnel is the machine's own identity: it accepts the DEVICE TOKEN only,
     # never a link key (a link that leaks must not let someone attach a fake
@@ -4801,7 +4872,12 @@ class AccountCorsFilter:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope.get("type") != "http" or not scope.get("path", "").startswith("/account"):
+        path = scope.get("path", "")
+        if scope.get("type") != "http" or not (
+            path.startswith("/account")
+            or path.startswith("/connect/")
+            or path.startswith("/v1/liveusb/")
+        ):
             await self.app(scope, receive, send)
             return
 
@@ -4847,7 +4923,7 @@ async def tunnel_watchdog():
     while True:
         try:
             await asyncio.sleep(30)
-            _prune_expired_liveusb_sessions()
+            _prune_expired_liveusb_sessions(force=True)
             for user, tunnel in list(active_tunnels.items()):
                 ws = tunnel.get("ws")
                 state = getattr(getattr(ws, "client_state", None), "name", "UNKNOWN")
@@ -4889,7 +4965,7 @@ async def lifespan(_app):
     except Exception as exc:                      # never block startup on this
         logger.warning("Link-key migration skipped: %s", exc)
     try:
-        pruned = _prune_expired_liveusb_sessions()
+        pruned = _prune_expired_liveusb_sessions(force=True)
         if pruned:
             logger.info("Pruned %d expired LiveUSB registry session(s) on startup", pruned)
     except Exception as exc:                      # never block startup on this

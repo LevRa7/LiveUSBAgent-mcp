@@ -646,3 +646,99 @@ def test_active_uplink_lock_blocks_down_and_disconnect_in_live_usb(monkeypatch, 
     # Explicit override via MESH_ALLOW_UPLINK_MUTATION=1 lifts the lock
     monkeypatch.setenv("MESH_ALLOW_UPLINK_MUTATION", "1")
     assert mcp_tools._check_active_uplink_lock("ip link set eth0 down") is None
+
+
+# ---------------------------------------------------------------------------
+# 8. Security hardening tests (F-07, F-08)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "bad_dev",
+    [
+        "/dev/mem",
+        "/dev/kmem",
+        "/dev/port",
+        "/dev/null",
+        "/dev/zero",
+        "/dev/shm",
+        "/dev/shm/evil",
+        "/dev/../etc/passwd",
+        "/dev//sda1",
+    ],
+)
+def test_valid_dev_path_rejects_dangerous_and_malformed_devices(bad_dev):
+    assert rescue._valid_dev_path(bad_dev) is False
+    res = rescue.plan_or_run_rescue_action(
+        {"action": "mount_auto", "device": bad_dev, "fstype": "ext4"}
+    )
+    assert "error" in res
+
+
+def test_valid_mountpoint_rejects_symlink_escape(monkeypatch):
+    monkeypatch.setattr(rescue, "_resolve_nearest_existing_realpath", lambda p: "/etc/evil")
+    assert rescue._valid_mountpoint("/mnt/rescue/symlink_escape") is False
+
+
+@pytest.mark.parametrize("bad_id", ["-rf", "../escape", "bad;cmd", "a" * 65, ".hidden"])
+def test_mount_auto_rejects_invalid_mapper_and_pool_names(linux_rescue_env, bad_id):
+    res_luks = rescue.plan_or_run_rescue_action(
+        {"action": "mount_auto", "device": "/dev/sda3", "fstype": "luks", "mapper_name": bad_id}
+    )
+    assert "error" in res_luks
+
+    res_zfs = rescue.plan_or_run_rescue_action(
+        {"action": "mount_auto", "fstype": "zfs", "pool_name": bad_id, "mountpoint": "/mnt/rescue/z"}
+    )
+    assert "error" in res_zfs
+
+
+def test_mount_auto_bitlocker_redacts_recovery_key_in_plan(linux_rescue_env):
+    secret = "111111-222222-333333-444444-555555-666666-777777-888888"
+    plan = rescue.plan_or_run_rescue_action(
+        {
+            "action": "mount_auto",
+            "device": "/dev/nvme0n1p3",
+            "fstype": "bitlocker",
+            "recovery_key": secret,
+        }
+    )
+    assert "-p***REDACTED***" in plan["argv"]
+    assert secret not in json.dumps(plan)
+    assert "-p***REDACTED***" in plan["planned_steps"][0]
+
+
+def test_recommended_execution_uses_shlex_join():
+    res = rescue.plan_or_run_rescue_action(
+        {"action": "ddrescue_plan", "device": "/dev/sda", "target_image": "/mnt/scratch/sda.img"}
+    )
+    assert "shlex.join(argv)" in res["recommended_execution"]
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "rfkill block all",
+        "rfkill block wifi",
+        "nmcli networking off",
+        "nmcli radio wifi off",
+        "nmcli con down uplink-profile",
+        "ip l s eth0 down",
+        "ip a f eth0",
+        "ip r del default",
+        "systemctl stop NetworkManager",
+        "systemctl restart systemd-networkd",
+        "systemctl stop wpa_supplicant",
+        "systemctl restart rhm-live-agent",
+        "iw dev eth0 disconnect",
+        "dhclient -r eth0",
+    ],
+)
+def test_active_uplink_lock_blocks_expanded_bypass_patterns(monkeypatch, restore_mcp_tools, cmd):
+    monkeypatch.setenv("MESH_SCENARIO", "live_usb")
+    monkeypatch.delenv("MESH_ALLOW_UPLINK_MUTATION", raising=False)
+    mcp_tools.sync_scenario_tools()
+    monkeypatch.setattr(mcp_tools._liveusb_bootstrap, "active_uplink_interface", lambda: "eth0")
+
+    err = mcp_tools._check_active_uplink_lock(cmd)
+    assert err is not None
+    assert "active_uplink_lock" in err

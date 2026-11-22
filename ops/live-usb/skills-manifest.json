@@ -1,0 +1,243 @@
+{
+  "schema_version": 1,
+  "destination": "skills/liveusb/external",
+  "lockfile": "ops/live-usb/skills-lock.json",
+  "repositories": [
+    {
+      "id": "linux-skills",
+      "repo": "peterbamuhigire/linux-skills",
+      "url": "https://github.com/peterbamuhigire/linux-skills.git",
+      "license": "MIT",
+      "category": "sysadmin",
+      "dest_subdir": "linux-skills",
+      "paths": [
+        "skills/linux-troubleshooting",
+        "skills/linux-disaster-recovery",
+        "skills/linux-disk-storage",
+        "skills/linux-filesystem-snapshots",
+        "skills/linux-service-management",
+        "skills/linux-log-management",
+        "skills/linux-network-admin",
+        "skills/linux-kernel-modules",
+        "skills/linux-perf-profiling"
+      ],
+      "fallback_all_skills": true,
+      "notes": "48 SKILL.md + 26 sk-* bash scripts for Linux troubleshooting, DR, storage, LVM/Btrfs/ZFS snapshots, systemd, journald, networking, kernel modules, and perf profiling."
+    },
+    {
+      "id": "linux-sysadmin-skills",
+      "repo": "HermeticOrmus/linux-sysadmin-skills",
+      "url": "https://github.com/HermeticOrmus/linux-sysadmin-skills.git",
+      "license": "MIT",
+      "category": "sysadmin",
+      "dest_subdir": "linux-sysadmin-skills",
+      "paths": [
+        "sysadmin-diagnose",
+        "sysadmin-performance",
+        "sysadmin-security",
+        "sysadmin-monitor",
+        "sysadmin-maintain"
+      ],
+      "fallback_all_skills": true,
+      "notes": "5 compact read-first Linux sysadmin scenarios."
+    },
+    {
+      "id": "agentic-awesome-skills",
+      "repo": "sickn33/agentic-awesome-skills",
+      "url": "https://github.com/sickn33/agentic-awesome-skills.git",
+      "license": "MIT",
+      "category": "sysadmin",
+      "dest_subdir": "agentic-awesome-skills",
+      "paths": [
+        "plugins/agentic-awesome-skills-claude/skills/linux-administration",
+        "plugins/agentic-awesome-skills-claude/skills/block-storage"
+      ],
+      "notes": "Cherry-picked Linux administration and block-storage (LVM, lvextend, mdadm RAID) skills."
+    },
+    {
+      "id": "awesome-copilot",
+      "repo": "github/awesome-copilot",
+      "url": "https://github.com/github/awesome-copilot.git",
+      "license": "MIT",
+      "category": "sysadmin",
+      "dest_subdir": "awesome-copilot",
+      "paths": [
+        "skills/debian-linux-triage",
+        "skills/arch-linux-triage"
+      ],
+      "notes": "Distro-specific Debian and Arch Linux triage skills."
+    },
+    {
+      "id": "devops-skills",
+      "repo": "NotHarshhaa/devops-skills",
+      "url": "https://github.com/NotHarshhaa/devops-skills.git",
+      "license": "MIT",
+      "category": "devops",
+      "dest_subdir": "devops-skills",
+      "paths": [
+        "."
+      ],
+      "notes": "Read-only incident triage, audit, and Docker/K8s/CI-CD review skills."
+    },
+    {
+      "id": "devops-sre-skills",
+      "repo": "bregman-arie/devops-sre-skills",
+      "url": "https://github.com/bregman-arie/devops-sre-skills.git",
+      "license": "Apache-2.0",
+      "category": "devops",
+      "dest_subdir": "devops-sre-skills",
+      "paths": [
+        "."
+      ],
+      "notes": "Read-only SRE incident triage and infrastructure audit skills."
+    },
+    {
+      "id": "nvme-programming-skill",
+      "repo": "ForceInjection/nvme-programming-skill",
+      "url": "https://github.com/ForceInjection/nvme-programming-skill.git",
+      "license": "MIT",
+      "category": "hardware",
+      "dest_subdir": "nvme-programming-skill",
+      "paths": [
+        "."
+      ],
+      "notes": "Deep NVMe diagnostics: CQE error codes, SMART logs, and namespaces."
+    },
+    {
+      "id": "claude-skills-stdlib",
+      "repo": "alirezarezvani/claude-skills",
+      "url": "https://github.com/alirezarezvani/claude-skills.git",
+      "license": "MIT",
+      "category": "sysadmin",
+      "dest_subdir": "claude-skills-stdlib",
+      "paths": [
+        "."
+      ],
+      "notes": "Stdlib-only Python diagnostic skills with zero pip dependencies."
+    },
+    {
+      "id": "claude-system-recovery-mode",
+      "repo": "danielrosehill/Claude-System-Recovery-Mode",
+      "url": "https://github.com/danielrosehill/Claude-System-Recovery-Mode.git",
+      "license": "MIT",
+      "category": "recovery",
+      "dest_subdir": "claude-system-recovery-mode",
+      "paths": [
+        "."
+      ],
+      "notes": "System recovery prompts and commands (/profile-os, /boot-log, /failed, /fix-packages, /network-check)."
+    },
+    {
+      "id": "claude-mods",
+      "repo": "0xDarkMatter/claude-mods",
+      "url": "https://github.com/0xDarkMatter/claude-mods.git",
+      "license": "MIT",
+      "category": "recovery",
+      "dest_subdir": "claude-mods",
+      "paths": [
+        "skills/windows-ops",
+        "skills/mac-ops",
+        "skills/net-ops"
+      ],
+      "notes": "Cross-OS playbooks: windows-ops, mac-ops (APFS/SMART/kernel panic), and net-ops."
+    },
+    {
+      "id": "anthropic-cybersecurity-skills",
+      "repo": "mukul975/Anthropic-Cybersecurity-Skills",
+      "url": "https://github.com/mukul975/Anthropic-Cybersecurity-Skills.git",
+      "license": "Apache-2.0",
+      "category": "forensics",
+      "dest_subdir": "anthropic-cybersecurity-skills",
+      "paths": [
+        "skills/linux-log-forensics",
+        "skills/disk-image-analysis",
+        "skills/windows-registry-forensics",
+        "skills/uefi-boot-forensics",
+        "skills/volatility-memory-forensics"
+      ],
+      "fallback_keywords": [
+        "linux-log",
+        "sleuth",
+        "disk-image",
+        "registry",
+        "uefi",
+        "boot",
+        "volatility",
+        "memory-forensics"
+      ],
+      "notes": "Forensics cherry-picks: Linux log forensics, Sleuth Kit disk image analysis, offline Windows Registry hives, UEFI/MBR/BCD boot diagnostics, and Volatility 3 memory forensics."
+    },
+    {
+      "id": "c3rb3r-btrfs-recovery",
+      "repo": "crt106/c3rb3r-btrfs-recovery",
+      "url": "https://github.com/crt106/c3rb3r-btrfs-recovery.git",
+      "license": "MIT",
+      "category": "recovery",
+      "dest_subdir": "c3rb3r-btrfs-recovery",
+      "paths": [
+        "."
+      ],
+      "notes": "Read-only Btrfs CoW recovery, mdadm/LVM assembly, and LiME RAM dump workflows."
+    },
+    {
+      "id": "memprocfs-skill",
+      "repo": "Tokeii0/memprocfs-skill",
+      "url": "https://github.com/Tokeii0/memprocfs-skill.git",
+      "license": "MIT",
+      "category": "forensics",
+      "dest_subdir": "memprocfs-skill",
+      "paths": [
+        "."
+      ],
+      "notes": "MemProcFS memory forensics skill."
+    },
+    {
+      "id": "hack-skills-volatility",
+      "repo": "yaklang/hack-skills",
+      "url": "https://github.com/yaklang/hack-skills.git",
+      "license": "MIT",
+      "category": "forensics",
+      "dest_subdir": "hack-skills",
+      "paths": [
+        "skills/memory-forensics-volatility"
+      ],
+      "notes": "Volatility / LiME / /proc/kcore memory forensics skill."
+    },
+    {
+      "id": "yana-ai-photorec",
+      "repo": "yanacuti1121/Yana-AI",
+      "url": "https://github.com/yanacuti1121/Yana-AI.git",
+      "license": "MIT",
+      "category": "recovery",
+      "dest_subdir": "yana-ai",
+      "paths": [
+        ".claude/skills/recovering-deleted-files-with-photorec"
+      ],
+      "notes": "Recovering deleted files with PhotoRec."
+    },
+    {
+      "id": "skills-collection-sleuthkit",
+      "repo": "marysatasselshaped667/skills-collection-1",
+      "url": "https://github.com/marysatasselshaped667/skills-collection-1.git",
+      "license": "MIT",
+      "category": "forensics",
+      "dest_subdir": "skills-collection-1",
+      "paths": [
+        "SKILLS/analyzing-slack-space-and-file-system-artifacts"
+      ],
+      "notes": "Sleuth Kit CLI slack space and filesystem artifact analysis."
+    },
+    {
+      "id": "claude-slash-commands-drive-health",
+      "repo": "danielrosehill/Claude-Slash-Commands",
+      "url": "https://github.com/danielrosehill/Claude-Slash-Commands.git",
+      "license": "MIT",
+      "category": "hardware",
+      "dest_subdir": "claude-slash-commands",
+      "paths": [
+        "commands-flat/check-drive-health.md"
+      ],
+      "notes": "Drive health diagnostic slash command."
+    }
+  ]
+}

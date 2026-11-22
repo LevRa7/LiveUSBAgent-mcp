@@ -398,11 +398,32 @@ def _platform_signals() -> Dict[str, Any]:
     }
 
 
+_LIVE_USB_MEDIUM_DIR = "/run/live/medium"
+_PROC_CMDLINE_PATH = "/proc/cmdline"
+
+
+def _is_live_usb_linux() -> bool:
+    """True when running inside a Linux Live USB environment.
+
+    Checks ``/run/live/medium`` and ``boot=live`` in ``/proc/cmdline``.
+    """
+    try:
+        if os.path.exists(_LIVE_USB_MEDIUM_DIR):
+            return True
+    except Exception:
+        pass
+    cmdline = _read_text(_PROC_CMDLINE_PATH)
+    if cmdline and "boot=live" in cmdline.split():
+        return True
+    return False
+
+
 def scenario() -> str:
     """The single place that decides which code path this node must take.
 
     The order is the contract, not a preference:
 
+    0. Explicit ``MESH_SCENARIO=live_usb`` override wins deterministically;
     1. ``os.name == "nt"`` wins outright. A phone is never Windows, and a
        Windows host that happens to export ``TERMUX_VERSION`` (a CI matrix, a
        wrapper script, a WSL environment leaking through) must still take the
@@ -410,20 +431,30 @@ def scenario() -> str:
     2. Termux is checked next, because a phone reports ``Linux`` from
        ``platform.system()`` and would otherwise be mistaken for a desktop;
     3. Darwin, because macOS is POSIX too but owns its tools;
-    4. Linux is the fallback, which is what a server, a container and an
-       unrecognised POSIX host all are.
+    4. Linux is the fallback, promoted to ``live_usb`` when ``/run/live/medium``
+       exists or ``boot=live`` is present in ``/proc/cmdline``.
 
     Nothing is cached: the answer costs a few environment reads and one
     ``os.path.isdir``, and a cached answer would make a node that was restarted
     with a changed environment - and every scenario test - lie.
     """
+    if os.environ.get("MESH_SCENARIO", "").strip().lower() == "live_usb":
+        return "live_usb"
     # The rule itself lives in core/platforms, which every other platform decision
     # already asks; this module only supplies the evidence it has already probed.
     # One decision point is the whole reason a Linux box cannot end up answering
     # like a phone.
     from core import platforms
 
-    return platforms.detect(termux_data_dir=_termux_data_dir(), system=platform.system())
+    detected = platforms.detect(termux_data_dir=_termux_data_dir(), system=platform.system())
+    if detected == "linux" and _is_live_usb_linux():
+        return "live_usb"
+    return detected
+
+
+def is_live_usb() -> bool:
+    """True when this node is running in a Live USB rescue environment."""
+    return scenario() == "live_usb"
 
 
 def scenario_report() -> Dict[str, Any]:
@@ -2284,10 +2315,11 @@ def _resolve_sections(sections: Optional[Iterable[str]]) -> List[str]:
 def _collect_one(name: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """One section through the matrix: ``_SECTION_IMPL[name][scenario()]``."""
     case = scenario()
+    impl_case = "linux" if case == "live_usb" else case
     row = _SECTION_IMPL.get(name)
     if row is None:
         return _unavailable("unknown section %r" % name, source="device.collect")
-    impl = row.get(case)
+    impl = row.get(impl_case)
     if impl is None:
         # An impossible pair is still an answer, never a KeyError: the contract
         # is that nothing in this module raises.

@@ -96,6 +96,18 @@ try:  # pragma: no cover - core/web_share.py is optional
 except Exception:  # pragma: no cover
     _web_share = None  # type: ignore
 
+# Optional: Live USB hardware diagnostics and OS recovery actions.
+try:  # pragma: no cover - core/rescue.py ships with Live USB nodes
+    from core import rescue as _rescue  # type: ignore
+except Exception:  # pragma: no cover
+    _rescue = None  # type: ignore
+
+# Optional: Progressive SKILL.md loader for Live USB operational playbooks.
+try:  # pragma: no cover - core/skills_loader.py ships with Live USB nodes
+    from core import skills_loader as _skills_loader  # type: ignore
+except Exception:  # pragma: no cover
+    _skills_loader = None  # type: ignore
+
 
 # ---------------------------------------------------------------------------
 # Platform / command shell
@@ -498,6 +510,8 @@ _READ_ONLY_ALLOWED = frozenset({
     # read-only mode; rescue_action is intentionally NOT here and is refused
     # centrally until its own dry-run/confirmation gate is wired.
     "rescue_info",
+    "list_skills",
+    "load_skill",
     "_http_share",
 })
 
@@ -3178,6 +3192,32 @@ def _tool_http_share(args: Dict[str, Any]) -> Dict[str, Any]:
     return _web_share.handle_http_request(args)
 
 
+def _tool_rescue_info(args: Dict[str, Any]) -> Dict[str, Any]:
+    if _rescue is None:
+        return {"error": "rescue module is not available on this node"}
+    return _rescue.handle_rescue_info(args)
+
+
+def _tool_rescue_action(args: Dict[str, Any]) -> Dict[str, Any]:
+    if _read_only_active():
+        return {"error": READ_ONLY_ERROR}
+    if _rescue is None:
+        return {"error": "rescue module is not available on this node"}
+    return _rescue.handle_rescue_action(args)
+
+
+def _tool_list_skills(args: Dict[str, Any]) -> Dict[str, Any]:
+    if _skills_loader is None:
+        return {"error": "skills_loader module is not available on this node"}
+    return _skills_loader.handle_list_skills(args)
+
+
+def _tool_load_skill(args: Dict[str, Any]) -> Dict[str, Any]:
+    if _skills_loader is None:
+        return {"error": "skills_loader module is not available on this node"}
+    return _skills_loader.handle_load_skill(args)
+
+
 # ---------------------------------------------------------------------------
 # Tool definitions (MCP schemas)
 # ---------------------------------------------------------------------------
@@ -3892,6 +3932,68 @@ _HANDLERS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
 }
 
 
+_RESCUE_TOOL_NAMES = ("rescue_info", "rescue_action")
+_SKILL_TOOL_NAMES = ("list_skills", "load_skill")
+
+
+def _is_live_usb_scenario() -> bool:
+    if _device is None:
+        return False
+    try:
+        return _device.scenario() == "live_usb"
+    except Exception:
+        return False
+
+
+def sync_scenario_tools() -> None:
+    """Register or unregister scenario-specific tools (such as Live USB rescue & skills).
+
+    On Windows, macOS, and standard Linux nodes, Live USB tools are omitted from
+    ``TOOLS`` and ``TOOL_ANNOTATIONS`` so the standard surface and annotation
+    policy stay unchanged. When ``scenario() == "live_usb"``, they are
+    registered with read-only / destructive annotations respectively.
+    """
+    is_live = _is_live_usb_scenario()
+    active_rescue = is_live and _rescue is not None
+    active_skills = is_live and _skills_loader is not None
+    existing_names = {spec.get("name") for spec in TOOLS}
+    if active_rescue:
+        TOOL_ANNOTATIONS["rescue_info"] = _ANNOTATIONS_READ_ONLY
+        TOOL_ANNOTATIONS["rescue_action"] = _ANNOTATIONS_DESTRUCTIVE
+        _HANDLERS["rescue_info"] = _tool_rescue_info
+        _HANDLERS["rescue_action"] = _tool_rescue_action
+        for raw_spec in _rescue.RESCUE_TOOLS_SPEC:
+            if raw_spec.get("name") not in existing_names:
+                TOOLS.append(dict(raw_spec))
+                existing_names.add(raw_spec.get("name"))
+    else:
+        TOOLS[:] = [spec for spec in TOOLS if spec.get("name") not in _RESCUE_TOOL_NAMES]
+        for name in _RESCUE_TOOL_NAMES:
+            TOOL_ANNOTATIONS.pop(name, None)
+            _HANDLERS.pop(name, None)
+
+    if active_skills:
+        TOOL_ANNOTATIONS["list_skills"] = _ANNOTATIONS_READ_ONLY
+        TOOL_ANNOTATIONS["load_skill"] = _ANNOTATIONS_READ_ONLY
+        _HANDLERS["list_skills"] = _tool_list_skills
+        _HANDLERS["load_skill"] = _tool_load_skill
+        for raw_spec in _skills_loader.SKILLS_TOOLS_SPEC:
+            if raw_spec.get("name") not in existing_names:
+                TOOLS.append(dict(raw_spec))
+                existing_names.add(raw_spec.get("name"))
+    else:
+        TOOLS[:] = [spec for spec in TOOLS if spec.get("name") not in _SKILL_TOOL_NAMES]
+        for name in _SKILL_TOOL_NAMES:
+            TOOL_ANNOTATIONS.pop(name, None)
+            _HANDLERS.pop(name, None)
+
+    if active_rescue or active_skills:
+        _attach_annotations(TOOLS)
+
+
+sync_scenario_tools()
+
+
 def _approval_summary(name: str, args: Any) -> str:
     """Short, human-readable request for the console menu (never the token)."""
     if not isinstance(args, dict):
@@ -3925,6 +4027,12 @@ def _usage_status(result: Any) -> Tuple[str, Optional[str]]:
 
 def _dispatch_tool(name: str, args: Any) -> Any:
     handler = _HANDLERS.get(name) if isinstance(name, str) else None
+    if handler is None and _is_live_usb_scenario() and (
+        (name in _RESCUE_TOOL_NAMES and _rescue is not None)
+        or (name in _SKILL_TOOL_NAMES and _skills_loader is not None)
+    ):
+        sync_scenario_tools()
+        handler = _HANDLERS.get(name)
     if handler is None:
         return {"error": "Unknown tool: %s" % (name,)}
     if args is None:

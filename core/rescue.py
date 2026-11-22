@@ -19,6 +19,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 _IS_WINDOWS = os.name == "nt"
@@ -741,6 +742,588 @@ def collect_filesystems(timeout: int = 5) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Partition table / RAID+LVM / guest OS / UEFI / Windows artifact collectors
+# ---------------------------------------------------------------------------
+
+#: Filesystems that can host a Linux root and are probed via a read-only mount.
+_LINUX_ROOT_FSTYPES = frozenset({"ext2", "ext3", "ext4", "btrfs", "xfs", "f2fs"})
+#: Filesystems that can host a Windows root (probed with ntfsls, never mounted here).
+_WIN_ROOT_FSTYPES = frozenset({"ntfs", "ntfs3", "fuseblk"})
+#: Filesystems that are reported as probed but cannot be inspected without a mount.
+_UNMOUNTABLE_FSTYPES = frozenset({"exfat", "vfat", "hfsplus", "apfs", "bitlocker"})
+
+#: Absolute root for temporary read-only guest probes.
+_RESCUE_PROBE_BASE = "/mnt/rescue/"
+
+_LSBLK_BLOCK_COLUMNS = "NAME,PATH,SIZE,TYPE,FSTYPE,LABEL,UUID,MOUNTPOINT"
+_EFI_BOOT_RE = re.compile(r"^Boot([0-9A-Fa-f]{4})(\*)?\s*(.*)$")
+
+
+def _remaining_timeout(deadline: float, cap: int = 15) -> int:
+    """Seconds left before ``deadline``, clamped to ``1..cap`` for a subprocess call."""
+    try:
+        left = int(deadline - time.monotonic())
+    except Exception:
+        left = 1
+    return max(1, min(int(cap), left))
+
+
+def _flatten_lsblk(nodes: Any) -> List[Dict[str, Any]]:
+    """Flatten nested ``lsblk -J`` blockdevice nodes (breadth-first, order preserved)."""
+    flat: List[Dict[str, Any]] = []
+    if not isinstance(nodes, list):
+        return flat
+    queue: List[Any] = list(nodes)
+    while queue:
+        node = queue.pop(0)
+        if not isinstance(node, dict):
+            continue
+        children = node.get("children")
+        flat.append({k: v for k, v in node.items() if k != "children"})
+        if isinstance(children, list):
+            queue.extend(children)
+    return flat
+
+
+def _lsblk_blockdevices(timeout: int, columns: str = _LSBLK_BLOCK_COLUMNS) -> Tuple[bool, str, List[Dict[str, Any]]]:
+    """Run ``lsblk -J -b`` and return (ok, reason, flattened_list)."""
+    rc, out, err = _run_cmd(["lsblk", "-J", "-b", "-o", columns], timeout=timeout)
+    if rc != 0:
+        return False, (err.strip() or f"lsblk exited with {rc}"), []
+    if not out.strip():
+        return False, "lsblk returned no output", []
+    try:
+        parsed = json.loads(out)
+    except Exception as exc:
+        return False, f"lsblk json parse error: {exc}", []
+    if not isinstance(parsed, dict):
+        return False, "lsblk json is not an object", []
+    return True, "", _flatten_lsblk(parsed.get("blockdevices"))
+
+
+def _parse_blkid_export(text: str) -> Dict[str, str]:
+    """Parse ``blkid -o export`` ``KEY=value`` lines into a dict."""
+    values: Dict[str, str] = {}
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        if key:
+            values[key] = value.strip()
+    return values
+
+
+def _parse_table_output(text: str, keys: Sequence[str]) -> List[Dict[str, Any]]:
+    """Parse whitespace-separated LVM ``--noheadings -o`` rows into dictionaries."""
+    rows: List[Dict[str, Any]] = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parts = stripped.split()
+        if len(parts) < len(keys):
+            parts.extend([None] * (len(keys) - len(parts)))  # type: ignore[list-item]
+        rows.append({key: parts[idx] for idx, key in enumerate(keys)})
+    return rows
+
+
+def _parse_os_release(text: str) -> Dict[str, str]:
+    """Parse ``/etc/os-release`` (or ``/usr/lib/os-release``) into a dict."""
+    fields: Dict[str, str] = {}
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        key = key.strip()
+        if key:
+            fields[key] = value
+    return fields
+
+
+def _parse_efibootmgr(text: str) -> Dict[str, Any]:
+    """Parse ``efibootmgr -v`` output into boot_current/boot_order/entries."""
+    boot_current: Optional[str] = None
+    boot_order: List[str] = []
+    entries: List[Dict[str, Any]] = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lowered = stripped.lower()
+        if lowered.startswith("bootcurrent:"):
+            boot_current = stripped.split(":", 1)[1].strip() or None
+            continue
+        if lowered.startswith("bootorder:"):
+            boot_order = [p.strip() for p in stripped.split(":", 1)[1].split(",") if p.strip()]
+            continue
+        match = _EFI_BOOT_RE.match(stripped)
+        if not match:
+            continue
+        label, _sep, device_path = match.group(3).partition("\t")
+        entries.append(
+            {
+                "index": match.group(1),
+                "active": bool(match.group(2)),
+                "label": label.strip(),
+                "device_path": device_path.strip(),
+            }
+        )
+    return {"boot_current": boot_current, "boot_order": boot_order, "entries": entries}
+
+
+def _blkid_type(device: str, timeout: int) -> str:
+    """Best-effort ``blkid -o value -s TYPE`` probe (returns '' on any failure)."""
+    rc, out, _err = _run_cmd(["blkid", "-o", "value", "-s", "TYPE", device], timeout=timeout)
+    if rc != 0 or not out.strip():
+        return ""
+    return out.strip().splitlines()[0].strip()
+
+
+def _ntfsls_artifacts(device: str, timeout: int) -> Tuple[Dict[str, bool], List[str]]:
+    """Probe ``Windows/System32/config`` with ntfsls without mounting the volume."""
+    artifacts: Dict[str, bool] = {"SAM": False, "SYSTEM": False, "SOFTWARE": False}
+    if not _which("ntfsls"):
+        return artifacts, [f"ntfsls is not installed; cannot probe {device} without mounting"]
+    rc, out, err = _run_cmd(
+        ["ntfsls", "-f", "-l", "-p", "Windows/System32/config", device],
+        timeout=timeout,
+    )
+    if rc != 0:
+        return artifacts, [f"ntfsls failed on {device}: {err.strip() or f'exited with {rc}'}"]
+    upper = out.upper()
+    for name in ("SAM", "SYSTEM", "SOFTWARE"):
+        artifacts[name] = bool(re.search(rf"(^|[^A-Z0-9_]){name}([^A-Z0-9_]|$)", upper))
+    return artifacts, []
+
+
+def collect_partitions(device: Optional[str] = None, timeout: int = 8) -> Dict[str, Any]:
+    """Read the partition table of ``device`` via ``sfdisk -J`` with an ``lsblk`` fallback."""
+    if _IS_WINDOWS:
+        return {"available": False, "reason": "partitions requires Linux"}
+    if not device or not _valid_dev_path(device):
+        return {
+            "available": False,
+            "reason": "partitions requires a valid device path, e.g. /dev/nvme0n1 or /dev/sda",
+        }
+
+    warnings: List[str] = []
+    rc, out, err = _run_cmd(["sfdisk", "-J", device], timeout=timeout)
+    table: Optional[Dict[str, Any]] = None
+    if rc == 0 and out.strip():
+        try:
+            parsed = json.loads(out)
+        except Exception as exc:
+            warnings.append(f"sfdisk json parse error: {exc}")
+            parsed = {}
+        if isinstance(parsed, dict) and isinstance(parsed.get("partitiontable"), dict):
+            table = parsed["partitiontable"]
+    elif rc != 0:
+        warnings.append(err.strip() or f"sfdisk exited with {rc}")
+
+    if table is not None and (isinstance(table.get("partitions"), list)):
+        partitions: List[Dict[str, Any]] = []
+        for index, part in enumerate(table.get("partitions") or [], start=1):
+            if not isinstance(part, dict):
+                continue
+            partitions.append(
+                {
+                    "index": index,
+                    "node": part.get("node"),
+                    "start": part.get("start"),
+                    "size": part.get("size"),
+                    "type": part.get("type"),
+                    "uuid": part.get("uuid"),
+                }
+            )
+        result: Dict[str, Any] = {
+            "available": True,
+            "source": "sfdisk",
+            "device": device,
+            "label": table.get("label") or table.get("label-id") or None,
+            "partitions": partitions,
+        }
+        rc_blk, out_blk, _err_blk = _run_cmd(["blkid", "-o", "export", device], timeout=min(timeout, 5))
+        if rc_blk == 0 and out_blk.strip():
+            blkid = _parse_blkid_export(out_blk)
+            if blkid:
+                result["blkid"] = blkid
+        if warnings:
+            result["warnings"] = warnings
+        return result
+
+    if table is not None:
+        warnings.append("sfdisk returned no partition entries")
+    warnings.append("falling back to lsblk")
+    ok, reason, nodes = _lsblk_blockdevices(timeout=timeout)
+    if not ok:
+        return {"available": False, "reason": reason or "lsblk failed", "source": "lsblk", "warnings": warnings}
+
+    partitions = []
+    for node in nodes:
+        if str(node.get("type") or "").lower() == "disk":
+            continue
+        path = str(node.get("path") or "")
+        if not path:
+            name = str(node.get("name") or "")
+            path = f"/dev/{name}" if name else ""
+        if not path:
+            continue
+        partitions.append(
+            {
+                "index": len(partitions) + 1,
+                "node": path,
+                "start": None,
+                "size": node.get("size"),
+                "type": node.get("fstype") or node.get("type"),
+                "uuid": node.get("uuid"),
+                "label": node.get("label"),
+                "mountpoint": node.get("mountpoint"),
+            }
+        )
+    if not partitions:
+        return {
+            "available": False,
+            "reason": f"no partitions could be read for {device}",
+            "source": "lsblk",
+            "warnings": warnings,
+        }
+    return {
+        "available": True,
+        "source": "lsblk",
+        "device": device,
+        "label": None,
+        "partitions": partitions,
+        "warnings": warnings,
+    }
+
+
+def collect_raid_lvm(timeout: int = 10) -> Dict[str, Any]:
+    """Inspect RAID, LVM, and dm-crypt topology without mounting anything."""
+    if _IS_WINDOWS:
+        return {"available": False, "reason": "raid_lvm requires Linux"}
+
+    ok, reason, nodes = _lsblk_blockdevices(timeout=timeout)
+    if not ok:
+        return {"available": False, "reason": reason or "lsblk failed", "source": "lsblk"}
+
+    devices: List[Dict[str, Any]] = []
+    for node in nodes:
+        kind = str(node.get("type") or "").strip().lower()
+        if not (kind.startswith("raid") or kind in ("lvm", "crypt")):
+            continue
+        devices.append(
+            {
+                "name": node.get("name"),
+                "path": node.get("path"),
+                "size": node.get("size"),
+                "type": kind,
+                "fstype": node.get("fstype"),
+                "mountpoint": node.get("mountpoint"),
+            }
+        )
+
+    warnings: List[str] = []
+    missing: List[str] = []
+
+    def _lvm_rows(binary: str, keys: Sequence[str], timeout_hint: int) -> List[Dict[str, Any]]:
+        if not _which(binary):
+            missing.append(binary)
+            return []
+        rc, out, err = _run_cmd([binary, "--noheadings", "-o", ",".join(keys)], timeout=timeout_hint)
+        if rc != 0:
+            warnings.append(f"{binary} failed: {err.strip() or f'exited with {rc}'}")
+            return []
+        return _parse_table_output(out, keys)
+
+    pvs = _lvm_rows("pvs", ("pv_name", "vg_name", "pv_size", "pv_free"), timeout)
+    vgs = _lvm_rows("vgs", ("vg_name", "pv_count", "lv_count", "vg_size", "vg_free"), timeout)
+    lvs = _lvm_rows("lvs", ("lv_name", "vg_name", "lv_size", "lv_attr"), timeout)
+
+    crypt: Dict[str, Any] = {}
+    for entry in devices:
+        if entry["type"] != "crypt":
+            continue
+        name = str(entry.get("name") or "")
+        if not name:
+            continue
+        if not _SAFE_IDENTIFIER_RE.match(name):
+            warnings.append(f"skipped crypt device with unsafe mapper name: {name}")
+            continue
+        if not _which("cryptsetup"):
+            missing.append("cryptsetup")
+            break
+        rc, out, err = _run_cmd(["cryptsetup", "status", name], timeout=min(timeout, 5))
+        if rc != 0:
+            # One inaccessible mapper must never fail the whole collector.
+            crypt[name] = {"available": False, "reason": err.strip() or f"cryptsetup exited with {rc}"}
+            continue
+        status: Dict[str, str] = {}
+        for line in out.splitlines():
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            status[key.strip().lower().replace(" ", "_")] = value.strip()
+        crypt[name] = {"available": True, "status": status}
+
+    result: Dict[str, Any] = {
+        "available": True,
+        "source": "lsblk",
+        "devices": devices,
+        "lvm": {"pvs": pvs, "vgs": vgs, "lvs": lvs},
+        "crypt": crypt,
+    }
+    if missing:
+        result["missing_binaries"] = sorted(set(missing))
+    if warnings:
+        result["warnings"] = warnings
+    return result
+
+
+def _probe_linux_root(device: str, fstype: str, deadline: float) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    """Mount ``device`` read-only under /mnt/rescue, read os-release/fstab, always umount."""
+    warnings: List[str] = []
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", os.path.basename(device.rstrip("/"))) or "unknown"
+    mountpoint = f"{_RESCUE_PROBE_BASE}_osprobe_{safe_name}"
+    if not mountpoint.startswith(_RESCUE_PROBE_BASE) or not mountpoint.strip("/"):
+        return None, [f"refusing unsafe probe mountpoint: {mountpoint}"]
+    try:
+        os.makedirs(mountpoint, exist_ok=True)
+    except Exception as exc:
+        return None, [f"could not create {mountpoint}: {type(exc).__name__}: {exc}"]
+
+    mounted = False
+    last_error = ""
+    for opts in ("ro,noload", "ro,norecovery", "ro"):
+        rc, out, err = _run_cmd(
+            ["mount", "-t", fstype, "-o", opts, device, mountpoint],
+            timeout=_remaining_timeout(deadline),
+        )
+        if rc == 0:
+            mounted = True
+            break
+        last_error = err.strip() or (out or "").strip() or f"mount exited with {rc}"
+        if deadline - time.monotonic() <= 0:
+            break
+    if not mounted:
+        return None, [f"mount failed for {device} ({fstype}): {last_error}"]
+
+    entry: Dict[str, Any] = {"device": device, "type": fstype, "name": None, "version": None, "evidence": []}
+    try:
+        os_release_path = ""
+        os_release: Dict[str, str] = {}
+        for candidate in ("/etc/os-release", "/usr/lib/os-release"):
+            os_release = _parse_os_release(_read_file_text(f"{mountpoint}{candidate}"))
+            if os_release:
+                os_release_path = candidate
+                break
+        if os_release:
+            entry["name"] = os_release.get("PRETTY_NAME") or os_release.get("NAME") or os_release.get("ID")
+            entry["version"] = (
+                os_release.get("VERSION_ID")
+                or os_release.get("VERSION")
+                or os_release.get("VERSION_CODENAME")
+            )
+            entry["id"] = os_release.get("ID")
+            entry["id_like"] = os_release.get("ID_LIKE")
+            entry["evidence"].append(os_release_path)
+        fstab = _read_file_text(f"{mountpoint}/etc/fstab")
+        if fstab.strip():
+            entry["fstab"] = [
+                line.strip()
+                for line in fstab.splitlines()
+                if line.strip() and not line.strip().startswith("#")
+            ]
+            entry["evidence"].append("/etc/fstab")
+    except Exception as exc:  # pragma: no cover - defensive contract
+        warnings.append(f"reading guest files failed on {device}: {type(exc).__name__}: {exc}")
+    finally:
+        rc_umount, _out_umount, err_umount = _run_cmd(
+            ["umount", mountpoint],
+            timeout=_remaining_timeout(deadline),
+        )
+        if rc_umount != 0:
+            warnings.append(
+                f"umount failed for {mountpoint}: {err_umount.strip() or f'exited with {rc_umount}'}"
+            )
+
+    if not entry["evidence"] or not entry.get("name"):
+        return None, warnings + [f"no os-release found on {device}"]
+    return entry, warnings
+
+
+def _probe_windows_root(device: str, deadline: float) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    """Probe a Windows root with ntfsls (no mount)."""
+    artifacts, warnings = _ntfsls_artifacts(device, timeout=_remaining_timeout(deadline))
+    if not any(artifacts.values()):
+        return None, warnings + [f"no Windows registry hives found on {device}"]
+    evidence = [f"ntfsls:{name}" for name, found in artifacts.items() if found]
+    return (
+        {
+            "device": device,
+            "type": "ntfs",
+            "name": "Windows",
+            "version": None,
+            "evidence": evidence,
+            "artifacts": artifacts,
+        },
+        warnings,
+    )
+
+
+def collect_installed_os(timeout: int = 12) -> Dict[str, Any]:
+    """Discover installed Linux/Windows roots on attached partitions without leaking mounts."""
+    if _IS_WINDOWS:
+        return {"available": False, "reason": "installed_os requires Linux"}
+
+    ok, reason, nodes = _lsblk_blockdevices(timeout=timeout)
+    if not ok:
+        return {"available": False, "reason": reason or "lsblk failed", "source": "lsblk"}
+
+    budget = max(1, int(timeout))
+    deadline = time.monotonic() + budget
+    operating_systems: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    probed = 0
+
+    candidates = [
+        node for node in nodes
+        if str(node.get("fstype") or "").strip() and str(node.get("type") or "").lower() != "disk"
+    ]
+    for node in candidates:
+        device = str(node.get("path") or "").strip()
+        fstype = _normalize_fstype(str(node.get("fstype") or ""))
+        if not device or not _valid_dev_path(device):
+            warnings.append(f"skipped invalid candidate device path: {device or '<empty>'}")
+            continue
+        if deadline - time.monotonic() <= 0:
+            warnings.append(
+                f"probe deadline ({budget}s) reached; {len(candidates) - probed} candidate(s) not probed"
+            )
+            break
+        probed += 1
+        if fstype in _LINUX_ROOT_FSTYPES:
+            entry, entry_warnings = _probe_linux_root(device, fstype, deadline)
+        elif fstype in _WIN_ROOT_FSTYPES:
+            entry, entry_warnings = _probe_windows_root(device, deadline)
+        elif fstype in _UNMOUNTABLE_FSTYPES:
+            entry, entry_warnings = None, [f"{device} ({fstype}): unsupported_without_mount"]
+        else:
+            entry, entry_warnings = None, [
+                f"{device} ({fstype or 'unknown'}): no os-release (unsupported filesystem)"
+            ]
+        warnings.extend(entry_warnings)
+        if entry:
+            operating_systems.append(entry)
+
+    result: Dict[str, Any] = {
+        "available": True,
+        "source": "lsblk",
+        "operating_systems": operating_systems,
+        "probed": probed,
+        "warnings": warnings,
+    }
+    if not operating_systems:
+        result["reason"] = "no installed operating system could be identified"
+    return result
+
+
+def collect_boot_efi(timeout: int = 8) -> Dict[str, Any]:
+    """Parse UEFI boot entries via efibootmgr -v (BIOS systems report unavailable)."""
+    if _IS_WINDOWS:
+        return {"available": False, "reason": "boot_efi requires Linux"}
+    try:
+        uefi_present = os.path.exists("/sys/firmware/efi")
+    except Exception:
+        uefi_present = False
+    if not uefi_present:
+        return {
+            "available": False,
+            "reason": "system is not booted in UEFI mode",
+            "source": "efibootmgr",
+        }
+    rc, out, err = _run_cmd(["efibootmgr", "-v"], timeout=timeout)
+    if rc != 0 or not out.strip():
+        return {
+            "available": False,
+            "reason": err.strip() or f"efibootmgr exited with {rc}",
+            "source": "efibootmgr",
+        }
+    parsed = _parse_efibootmgr(out)
+    return {
+        "available": True,
+        "source": "efibootmgr",
+        "boot_current": parsed["boot_current"],
+        "boot_order": parsed["boot_order"],
+        "entries": parsed["entries"],
+        "raw": out,
+    }
+
+
+def collect_win_artifacts(timeout: int = 8) -> Dict[str, Any]:
+    """Locate Windows registry hives (SAM/SYSTEM/SOFTWARE) on NTFS partitions using ntfsls."""
+    if _IS_WINDOWS:
+        return {"available": False, "reason": "win_artifacts requires Linux"}
+
+    ok, reason, nodes = _lsblk_blockdevices(timeout=timeout)
+    if not ok:
+        return {"available": False, "reason": reason or "lsblk failed", "source": "lsblk"}
+
+    if not _which("ntfsls"):
+        return {
+            "available": True,
+            "source": "lsblk",
+            "partitions": [],
+            "reason": "ntfsls is not installed; Windows registry hives cannot be probed without mounting",
+        }
+
+    probe_timeout = max(1, min(int(timeout), 5))
+    partitions: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    for node in nodes:
+        if str(node.get("type") or "").lower() == "disk":
+            continue
+        device = str(node.get("path") or "").strip()
+        if not device or not _valid_dev_path(device):
+            continue
+        raw_fstype = str(node.get("fstype") or "").strip()
+        fstype = _normalize_fstype(raw_fstype)
+        blkid_type = _blkid_type(device, timeout=probe_timeout)
+        combined = f"{raw_fstype} {fstype} {blkid_type}".lower()
+        bitlocker = "bitlocker" in combined
+        if not bitlocker and fstype not in _WIN_ROOT_FSTYPES and "ntfs" not in combined:
+            continue
+        artifacts: Dict[str, bool] = {"SAM": False, "SYSTEM": False, "SOFTWARE": False}
+        if not bitlocker:
+            artifacts, artifact_warnings = _ntfsls_artifacts(device, timeout=probe_timeout)
+            warnings.extend(artifact_warnings)
+        partitions.append(
+            {
+                "device": device,
+                "fstype": blkid_type or raw_fstype or ("bitlocker" if bitlocker else ""),
+                "bitlocker": bitlocker,
+                "artifacts": artifacts,
+            }
+        )
+
+    result: Dict[str, Any] = {
+        "available": True,
+        "source": "lsblk+ntfsls",
+        "partitions": partitions,
+    }
+    if warnings:
+        result["warnings"] = warnings
+    if not partitions:
+        result["reason"] = "no NTFS or BitLocker partition found"
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Recovery action planner & executor
 # ---------------------------------------------------------------------------
 
@@ -1139,6 +1722,16 @@ def handle_rescue_info(args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             return collect_disks(timeout=timeout)
         if section == "smart":
             return collect_smart(device=device, timeout=timeout)
+        if section == "partitions":
+            return collect_partitions(device=device, timeout=timeout)
+        if section == "raid_lvm":
+            return collect_raid_lvm(timeout=timeout)
+        if section == "installed_os":
+            return collect_installed_os(timeout=timeout)
+        if section == "boot_efi":
+            return collect_boot_efi(timeout=timeout)
+        if section == "win_artifacts":
+            return collect_win_artifacts(timeout=timeout)
         if section == "dmesg_io":
             return collect_dmesg_io(device=device, timeout=min(timeout, 5))
         if section == "ram_info":
@@ -1149,6 +1742,9 @@ def handle_rescue_info(args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             return {
                 "section": "summary",
                 "disks": collect_disks(timeout=timeout),
+                "partitions": collect_partitions(device=device, timeout=min(timeout, 5)),
+                "installed_os": collect_installed_os(timeout=min(timeout, 5)),
+                "boot_efi": collect_boot_efi(timeout=min(timeout, 5)),
                 "dmesg_io": collect_dmesg_io(device=device, timeout=min(timeout, 5)),
                 "ram_info": collect_ram_info(timeout=timeout),
                 "filesystems": collect_filesystems(timeout=min(timeout, 5)),
@@ -1157,6 +1753,11 @@ def handle_rescue_info(args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             out: Dict[str, Any] = {
                 "section": "all",
                 "disks": collect_disks(timeout=timeout),
+                "partitions": collect_partitions(device=device, timeout=timeout),
+                "raid_lvm": collect_raid_lvm(timeout=timeout),
+                "installed_os": collect_installed_os(timeout=timeout),
+                "boot_efi": collect_boot_efi(timeout=timeout),
+                "win_artifacts": collect_win_artifacts(timeout=timeout),
                 "dmesg_io": collect_dmesg_io(device=device, timeout=min(timeout, 5)),
                 "ram_info": collect_ram_info(timeout=timeout),
                 "filesystems": collect_filesystems(timeout=min(timeout, 5)),
@@ -1165,10 +1766,13 @@ def handle_rescue_info(args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
                 out["smart"] = collect_smart(device=device, timeout=timeout)
             return out
 
+        # Unreachable while RESCUE_SECTIONS is in sync with the dispatch above; kept so an
+        # unknown section still degrades cleanly instead of claiming a Linux requirement.
         return {
             "available": False,
             "section": section,
-            "reason": f"section '{section}' collector requires a Linux Live USB environment",
+            "reason": f"section '{section}' has no collector in this build",
+            "valid_sections": list(RESCUE_SECTIONS),
         }
     except Exception as exc:  # pragma: no cover - defensive contract
         return {"error": f"{type(exc).__name__}: {exc}"}

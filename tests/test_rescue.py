@@ -742,3 +742,566 @@ def test_active_uplink_lock_blocks_expanded_bypass_patterns(monkeypatch, restore
     err = mcp_tools._check_active_uplink_lock(cmd)
     assert err is not None
     assert "active_uplink_lock" in err
+
+
+# ---------------------------------------------------------------------------
+# 9. Read-only collectors: partitions, RAID/LVM, installed OS, UEFI, Windows
+# ---------------------------------------------------------------------------
+
+def _lsblk_disk(*partitions, name="sda", size=512110190592):
+    """Build one lsblk disk node with the given partition children."""
+    return {
+        "name": name,
+        "path": f"/dev/{name}",
+        "size": size,
+        "type": "disk",
+        "fstype": None,
+        "label": None,
+        "uuid": None,
+        "mountpoint": None,
+        "children": [
+            {
+                "name": node,
+                "path": f"/dev/{node}",
+                "size": 100000000000,
+                "type": "part",
+                "fstype": fstype,
+                "label": label,
+                "uuid": uuid,
+                "mountpoint": mountpoint,
+            }
+            for node, fstype, label, uuid, mountpoint in partitions
+        ],
+    }
+
+
+LSBLK_LINUX = json.dumps(
+    {
+        "blockdevices": [
+            _lsblk_disk(
+                ("sda1", "vfat", "EFI", "AAAA-1111", None),
+                ("sda2", "ext4", "root", "uuid-ext4", None),
+            )
+        ]
+    }
+)
+
+LSBLK_WIN = json.dumps(
+    {
+        "blockdevices": [
+            _lsblk_disk(
+                ("nvme0n1p3", "ntfs", "Windows", "uuid-ntfs", None),
+                ("nvme0n1p4", None, None, None, None),
+            )
+        ]
+    }
+)
+
+LSBLK_RESCUE = json.dumps(
+    {
+        "blockdevices": [
+            {
+                "name": "sda",
+                "path": "/dev/sda",
+                "size": 512110190592,
+                "type": "disk",
+                "fstype": None,
+                "label": None,
+                "uuid": None,
+                "mountpoint": None,
+                "children": [
+                    {
+                        "name": "sda1",
+                        "path": "/dev/sda1",
+                        "size": 1073741824,
+                        "type": "raid1",
+                        "fstype": "linux_raid_member",
+                        "label": None,
+                        "uuid": "raid-uuid",
+                        "mountpoint": None,
+                    },
+                    {
+                        "name": "md0",
+                        "path": "/dev/md0",
+                        "size": 1072693248,
+                        "type": "raid1",
+                        "fstype": "LVM2_member",
+                        "label": None,
+                        "uuid": "md-uuid",
+                        "mountpoint": None,
+                        "children": [
+                            {
+                                "name": "vg0-root",
+                                "path": "/dev/mapper/vg0-root",
+                                "size": 900000000,
+                                "type": "lvm",
+                                "fstype": "ext4",
+                                "label": "root",
+                                "uuid": "lv-uuid",
+                                "mountpoint": None,
+                            }
+                        ],
+                    },
+                    {
+                        "name": "luks-abc",
+                        "path": "/dev/mapper/luks-abc",
+                        "size": 100000000,
+                        "type": "crypt",
+                        "fstype": "ext4",
+                        "label": None,
+                        "uuid": "luks-uuid",
+                        "mountpoint": None,
+                    },
+                ],
+            }
+        ]
+    }
+)
+
+SFDISK_GPT = json.dumps(
+    {
+        "partitiontable": {
+            "label": "gpt",
+            "id": "1A2B3C4D-0000-4000-8000-000000000000",
+            "device": "/dev/nvme0n1",
+            "unit": "sectors",
+            "firstlba": 2048,
+            "lastlba": 1000215215,
+            "partitions": [
+                {
+                    "node": "/dev/nvme0n1p1",
+                    "start": 2048,
+                    "size": 1048576,
+                    "type": "EFI System",
+                    "uuid": "C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
+                },
+                {
+                    "node": "/dev/nvme0n1p2",
+                    "start": 1050624,
+                    "size": 999110656,
+                    "type": "Linux filesystem",
+                    "uuid": "0FC6E1B2-1111-4222-8333-444455556666",
+                },
+            ],
+        }
+    }
+)
+
+
+def test_collect_partitions_parses_sfdisk_json(linux_rescue_env):
+    blkid_out = "DEVNAME=/dev/nvme0n1\nPTTYPE=gpt\nPTUUID=1A2B3C4D\n"
+    calls: List[List[str]] = []
+
+    def fake_run(argv, timeout=8):
+        calls.append(list(argv))
+        if argv[0] == "sfdisk":
+            return 0, SFDISK_GPT, ""
+        if argv[0] == "blkid":
+            return 0, blkid_out, ""
+        return 1, "", "unexpected"
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    res = rescue.collect_partitions("/dev/nvme0n1")
+
+    assert res["available"] is True
+    assert res["source"] == "sfdisk"
+    assert res["device"] == "/dev/nvme0n1"
+    assert res["label"] == "gpt"
+    assert [p["node"] for p in res["partitions"]] == ["/dev/nvme0n1p1", "/dev/nvme0n1p2"]
+    assert res["partitions"][0]["type"] == "EFI System"
+    assert res["partitions"][0]["start"] == 2048
+    assert res["partitions"][1]["size"] == 999110656
+    assert res["partitions"][1]["uuid"] == "0FC6E1B2-1111-4222-8333-444455556666"
+    assert res["blkid"]["PTTYPE"] == "gpt"
+    assert calls[0] == ["sfdisk", "-J", "/dev/nvme0n1"]
+
+
+def test_collect_partitions_rejects_invalid_device(linux_rescue_env):
+    assert rescue.collect_partitions(None)["available"] is False
+    assert rescue.collect_partitions("/dev/../etc/passwd")["available"] is False
+    assert "device" in rescue.collect_partitions("")["reason"].lower()
+
+
+def test_collect_partitions_falls_back_to_lsblk_when_sfdisk_fails(linux_rescue_env):
+    def fake_run(argv, timeout=8):
+        if argv[0] == "sfdisk":
+            return 1, "", "sfdisk: cannot open /dev/sda: Permission denied"
+        if argv[0] == "lsblk":
+            return 0, LSBLK_LINUX, ""
+        return 1, "", "unexpected"
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    res = rescue.collect_partitions("/dev/sda")
+
+    assert res["available"] is True
+    assert res["source"] == "lsblk"
+    assert [p["node"] for p in res["partitions"]] == ["/dev/sda1", "/dev/sda2"]
+    assert res["partitions"][1]["type"] == "ext4"
+    assert any("sfdisk" in warning for warning in res["warnings"])
+
+
+def test_collect_raid_lvm_parses_lsblk_and_lvm(linux_rescue_env):
+    outputs = {
+        "pvs": "  /dev/md0 vg0 1023.00g 500.00g\n",
+        "vgs": "  vg0 1 1 1023.00g 500.00g\n",
+        "lvs": "  root vg0 900.00g -wi-ao----\n",
+        "cryptsetup": (
+            "/dev/mapper/luks-abc is active.\n"
+            "  type:    LUKS2\n"
+            "  cipher:  aes-xts-plain64\n"
+            "  keysize: 512 bits\n"
+            "  device:  /dev/sda3\n"
+            "  status:  active\n"
+        ),
+    }
+
+    def fake_run(argv, timeout=10):
+        if argv[0] == "lsblk":
+            return 0, LSBLK_RESCUE, ""
+        if argv[0] in outputs:
+            return 0, outputs[argv[0]], ""
+        return 1, "", "unexpected"
+
+    linux_rescue_env.setattr(rescue, "_which", lambda name: f"/usr/sbin/{name}")
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    res = rescue.collect_raid_lvm()
+
+    assert res["available"] is True
+    assert res["source"] == "lsblk"
+    kinds = [d["type"] for d in res["devices"]]
+    assert "raid1" in kinds and "lvm" in kinds and "crypt" in kinds
+    assert res["lvm"]["pvs"][0]["pv_name"] == "/dev/md0"
+    assert res["lvm"]["pvs"][0]["vg_name"] == "vg0"
+    assert res["lvm"]["vgs"][0]["pv_count"] == "1"
+    assert res["lvm"]["lvs"][0]["lv_name"] == "root"
+    assert res["crypt"]["luks-abc"]["available"] is True
+    assert res["crypt"]["luks-abc"]["status"]["type"] == "LUKS2"
+    assert res["crypt"]["luks-abc"]["status"]["keysize"] == "512 bits"
+
+
+def test_collect_raid_lvm_tolerates_missing_binaries_and_failed_mappers(linux_rescue_env):
+    def fake_run(argv, timeout=10):
+        if argv[0] == "lsblk":
+            return 0, LSBLK_RESCUE, ""
+        if argv[0] == "cryptsetup":
+            return 4, "", "Device luks-abc is not active."
+        return 127, "", "binary not found"
+
+    # Only cryptsetup exists; pvs/vgs/lvs are missing entirely.
+    linux_rescue_env.setattr(
+        rescue, "_which", lambda name: "/usr/sbin/cryptsetup" if name == "cryptsetup" else None
+    )
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    res = rescue.collect_raid_lvm()
+
+    assert res["available"] is True
+    assert res["lvm"] == {"pvs": [], "vgs": [], "lvs": []}
+    assert res["missing_binaries"] == ["lvs", "pvs", "vgs"]
+    assert res["crypt"]["luks-abc"]["available"] is False
+    assert "not active" in res["crypt"]["luks-abc"]["reason"]
+
+
+def test_collect_raid_lvm_lsblk_failure_is_a_reason(linux_rescue_env):
+    linux_rescue_env.setattr(rescue, "_run_cmd", lambda argv, timeout=10: (1, "", "lsblk: not found"))
+    res = rescue.collect_raid_lvm()
+    assert res["available"] is False
+    assert "lsblk" in res["reason"]
+
+
+OS_RELEASE_DEBIAN = (
+    'PRETTY_NAME="Debian GNU/Linux 13 (Trixie)"\n'
+    'NAME="Debian GNU/Linux"\n'
+    'VERSION_ID="13"\n'
+    'VERSION="13 (Trixie)"\n'
+    "VERSION_CODENAME=trixie\n"
+    "ID=debian\n"
+    "ID_LIKE=debian\n"
+)
+FSTAB_DEBIAN = (
+    "# /etc/fstab: static file system information.\n"
+    "UUID=uuid-ext4 / ext4 errors=remount-ro 0 1\n"
+    "UUID=AAAA-1111 /boot/efi vfat umask=0077 0 1\n"
+)
+
+
+def test_collect_installed_os_reads_os_release_and_always_umounts(linux_rescue_env):
+    calls: List[List[str]] = []
+
+    def fake_run(argv, timeout=15):
+        calls.append(list(argv))
+        if argv[0] == "lsblk":
+            return 0, LSBLK_LINUX, ""
+        if argv[0] in ("mount", "umount"):
+            return 0, "", ""
+        return 1, "", "unexpected"
+
+    def fake_read(path):
+        if path.endswith("/etc/os-release"):
+            return OS_RELEASE_DEBIAN
+        if path.endswith("/etc/fstab"):
+            return FSTAB_DEBIAN
+        return ""
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    linux_rescue_env.setattr(rescue, "_read_file_text", fake_read)
+    linux_rescue_env.setattr(os, "makedirs", lambda *args, **kwargs: None)
+
+    res = rescue.collect_installed_os()
+
+    assert res["available"] is True
+    assert res["probed"] == 2  # sda1 vfat + sda2 ext4 candidates
+    assert len(res["operating_systems"]) == 1
+    linux_root = res["operating_systems"][0]
+    assert linux_root["device"] == "/dev/sda2"
+    assert linux_root["type"] == "ext4"
+    assert linux_root["name"] == "Debian GNU/Linux 13 (Trixie)"
+    assert linux_root["version"] == "13"
+    assert "/etc/os-release" in linux_root["evidence"]
+    assert any("/boot/efi" in line for line in linux_root["fstab"])
+    assert any("vfat" in warning and "unsupported_without_mount" in warning for warning in res["warnings"])
+
+    mount_calls = [call for call in calls if call[0] == "mount"]
+    assert mount_calls[0] == [
+        "mount",
+        "-t",
+        "ext4",
+        "-o",
+        "ro,noload",
+        "/dev/sda2",
+        "/mnt/rescue/_osprobe_sda2",
+    ]
+    umount_calls = [call for call in calls if call[0] == "umount"]
+    assert umount_calls == [["umount", "/mnt/rescue/_osprobe_sda2"]]
+
+
+def test_collect_installed_os_mount_failure_warns_and_does_not_raise(linux_rescue_env):
+    calls: List[List[str]] = []
+
+    def fake_run(argv, timeout=15):
+        calls.append(list(argv))
+        if argv[0] == "lsblk":
+            return 0, LSBLK_LINUX, ""
+        if argv[0] == "mount":
+            return 32, "", "mount: /mnt/rescue/_osprobe_sda2: wrong fs type"
+        if argv[0] == "umount":
+            return 0, "", ""
+        return 1, "", "unexpected"
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    linux_rescue_env.setattr(rescue, "_read_file_text", lambda path: "")
+    linux_rescue_env.setattr(os, "makedirs", lambda *args, **kwargs: None)
+
+    res = rescue.collect_installed_os()
+
+    assert res["available"] is True
+    assert res["operating_systems"] == []
+    assert any("mount failed" in warning for warning in res["warnings"])
+    assert "reason" in res
+    # Nothing was ever mounted, so no umount may be attempted.
+    assert not [call for call in calls if call[0] == "umount"]
+    # All three read-only option sets are attempted before giving up.
+    assert len([call for call in calls if call[0] == "mount"]) == 3
+
+
+def test_collect_installed_os_umounts_even_when_reading_os_release_raises(linux_rescue_env):
+    calls: List[List[str]] = []
+
+    def fake_run(argv, timeout=15):
+        calls.append(list(argv))
+        if argv[0] == "lsblk":
+            return 0, LSBLK_LINUX, ""
+        return 0, "", ""
+
+    def boom(path):
+        raise RuntimeError("emulated I/O error on dying media")
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    linux_rescue_env.setattr(rescue, "_read_file_text", boom)
+    linux_rescue_env.setattr(os, "makedirs", lambda *args, **kwargs: None)
+
+    res = rescue.collect_installed_os()
+
+    assert res["available"] is True
+    assert any("reading guest files failed" in warning for warning in res["warnings"])
+    umount_calls = [call for call in calls if call[0] == "umount"]
+    assert umount_calls == [["umount", "/mnt/rescue/_osprobe_sda2"]]
+
+
+def test_collect_installed_os_probes_ntfs_with_ntfsls_and_never_mounts(linux_rescue_env):
+    calls: List[List[str]] = []
+
+    def fake_run(argv, timeout=15):
+        calls.append(list(argv))
+        if argv[0] == "lsblk":
+            return 0, LSBLK_WIN, ""
+        if argv[0] == "ntfsls":
+            return 0, "SAM\nSYSTEM\nSOFTWARE\nSECURITY\n", ""
+        return 1, "", "unexpected"
+
+    linux_rescue_env.setattr(rescue, "_which", lambda name: "/usr/bin/ntfsls" if name == "ntfsls" else None)
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    linux_rescue_env.setattr(rescue, "_read_file_text", lambda path: "")
+    linux_rescue_env.setattr(os, "makedirs", lambda *args, **kwargs: None)
+
+    res = rescue.collect_installed_os()
+
+    assert res["available"] is True
+    windows = [entry for entry in res["operating_systems"] if entry["name"] == "Windows"]
+    assert len(windows) == 1
+    assert windows[0]["device"] == "/dev/nvme0n1p3"
+    assert not [call for call in calls if call[0] == "mount"]
+
+
+def test_collect_boot_efi_reports_bios_mode_without_probing(linux_rescue_env):
+    linux_rescue_env.setattr(os.path, "exists", lambda path: False)
+    linux_rescue_env.setattr(
+        rescue, "_run_cmd", lambda argv, timeout=8: pytest.fail("efibootmgr must not run on BIOS")
+    )
+
+    res = rescue.collect_boot_efi()
+
+    assert res["available"] is False
+    assert res["reason"] == "system is not booted in UEFI mode"
+    assert res["source"] == "efibootmgr"
+
+
+def test_collect_boot_efi_parses_efibootmgr(linux_rescue_env):
+    efi_out = (
+        "BootCurrent: 0002\n"
+        "Timeout: 1 seconds\n"
+        "BootOrder: 0002,0001,0000\n"
+        "Boot0000* Windows Boot Manager\tHD(1,GPT,aaaa,0x800,0x100000)/File(\\EFI\\Microsoft\\Boot\\bootmgfw.efi)\n"
+        "Boot0001* debian\tHD(1,GPT,bbbb,0x800,0x100000)/File(\\EFI\\debian\\shimx64.efi)\n"
+        "Boot0002* UEFI: USB\tPciRoot(0x0)/Pci(0x14,0x0)/USB(0x1,0x0)/HD(1,MBR,0x0,0x800,0x100000)\n"
+    )
+    linux_rescue_env.setattr(os.path, "exists", lambda path: path == "/sys/firmware/efi")
+    linux_rescue_env.setattr(rescue, "_run_cmd", lambda argv, timeout=8: (0, efi_out, ""))
+
+    res = rescue.collect_boot_efi()
+
+    assert res["available"] is True
+    assert res["source"] == "efibootmgr"
+    assert res["boot_current"] == "0002"
+    assert res["boot_order"] == ["0002", "0001", "0000"]
+    assert len(res["entries"]) == 3
+    debian = res["entries"][1]
+    assert debian["index"] == "0001"
+    assert debian["active"] is True
+    assert debian["label"] == "debian"
+    assert "shimx64.efi" in debian["device_path"]
+    assert res["entries"][0]["label"] == "Windows Boot Manager"
+    assert res["raw"].startswith("BootCurrent: 0002")
+
+
+def test_collect_win_artifacts_with_ntfsls_detects_hives_and_bitlocker(linux_rescue_env):
+    calls: List[List[str]] = []
+
+    def fake_run(argv, timeout=8):
+        calls.append(list(argv))
+        if argv[0] == "lsblk":
+            return 0, LSBLK_WIN, ""
+        if argv[0] == "blkid":
+            if argv[-1] == "/dev/nvme0n1p4":
+                return 0, "BitLocker\n", ""
+            return 0, "ntfs\n", ""
+        if argv[0] == "ntfsls":
+            return 0, "SAM\nSYSTEM\nSECURITY\nDEFAULT\n", ""
+        return 1, "", "unexpected"
+
+    linux_rescue_env.setattr(rescue, "_which", lambda name: "/usr/bin/ntfsls" if name == "ntfsls" else None)
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+
+    res = rescue.collect_win_artifacts()
+
+    assert res["available"] is True
+    assert len(res["partitions"]) == 2
+    ntfs_part = res["partitions"][0]
+    assert ntfs_part["device"] == "/dev/nvme0n1p3"
+    assert ntfs_part["fstype"] == "ntfs"
+    assert ntfs_part["bitlocker"] is False
+    assert ntfs_part["artifacts"] == {"SAM": True, "SYSTEM": True, "SOFTWARE": False}
+    locked_part = res["partitions"][1]
+    assert locked_part["device"] == "/dev/nvme0n1p4"
+    assert locked_part["bitlocker"] is True
+    assert locked_part["artifacts"] == {"SAM": False, "SYSTEM": False, "SOFTWARE": False}
+    # No mounting is allowed in this collector.
+    assert not [call for call in calls if call[0] == "mount"]
+    ntfsls_calls = [call for call in calls if call[0] == "ntfsls"]
+    assert ntfsls_calls and ntfsls_calls[0][-1] == "/dev/nvme0n1p3"
+
+
+def test_collect_win_artifacts_without_ntfsls_is_honest(linux_rescue_env):
+    linux_rescue_env.setattr(rescue, "_which", lambda name: None)
+    linux_rescue_env.setattr(rescue, "_run_cmd", lambda argv, timeout=8: (0, LSBLK_WIN, ""))
+
+    res = rescue.collect_win_artifacts()
+
+    assert res["available"] is True
+    assert res["partitions"] == []
+    assert "ntfsls" in res["reason"]
+
+
+@pytest.mark.parametrize(
+    "section", ["partitions", "raid_lvm", "installed_os", "boot_efi", "win_artifacts"]
+)
+def test_handle_rescue_info_dispatches_each_new_section(linux_rescue_env, section):
+    calls: List[List[str]] = []
+
+    def fake_run(argv, timeout=10):
+        calls.append(list(argv))
+        if argv[0] == "lsblk":
+            return 0, LSBLK_LINUX, ""
+        if argv[0] == "sfdisk":
+            return 0, SFDISK_GPT, ""
+        if argv[0] == "efibootmgr":
+            return 0, "BootCurrent: 0001\nBootOrder: 0001\nBoot0001* debian\tHD(1,GPT,x,0x800,0x100000)\n", ""
+        if argv[0] == "ntfsls":
+            return 1, "", "ntfsls: no such file"
+        if argv[0] in ("mount", "umount"):
+            return 0, "", ""
+        return 1, "", "not available"
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    linux_rescue_env.setattr(rescue, "_read_file_text", lambda path: "")
+    linux_rescue_env.setattr(rescue, "_which", lambda name: None)
+    linux_rescue_env.setattr(os, "makedirs", lambda *args, **kwargs: None)
+    linux_rescue_env.setattr(os.path, "exists", lambda path: True)
+
+    res = rescue.handle_rescue_info({"section": section, "device": "/dev/sda"})
+
+    assert isinstance(res, dict)
+    assert "available" in res
+    dumped = json.dumps(res)
+    assert "Linux Live USB environment" not in dumped
+    assert "schema_ready" not in dumped
+
+
+def test_handle_rescue_info_unknown_section_degrades_cleanly(linux_rescue_env):
+    res = rescue.handle_rescue_info({"section": "definitely_not_a_section"})
+    assert "error" in res
+    assert res["valid_sections"] == list(rescue.RESCUE_SECTIONS)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: rescue.collect_partitions("/dev/sda"),
+        lambda: rescue.collect_raid_lvm(),
+        lambda: rescue.collect_installed_os(),
+        lambda: rescue.collect_boot_efi(),
+        lambda: rescue.collect_win_artifacts(),
+    ],
+    ids=["partitions", "raid_lvm", "installed_os", "boot_efi", "win_artifacts"],
+)
+def test_new_collectors_are_unavailable_on_windows(monkeypatch, call):
+    monkeypatch.setattr(rescue, "_IS_WINDOWS", True)
+    monkeypatch.setattr(rescue, "_run_cmd", lambda *args, **kwargs: pytest.fail("no subprocess on Windows"))
+    monkeypatch.setattr(rescue, "_which", lambda name: pytest.fail("no binary lookup on Windows"))
+    monkeypatch.setattr(rescue, "_read_file_text", lambda path: pytest.fail("no file read on Windows"))
+    monkeypatch.setattr(os, "makedirs", lambda *args, **kwargs: pytest.fail("no mountpoint on Windows"))
+    monkeypatch.setattr(os.path, "exists", lambda path: pytest.fail("no /sys probe on Windows"))
+
+    res = call()
+
+    assert res["available"] is False
+    assert "requires Linux" in res["reason"]

@@ -73,7 +73,7 @@ APFS: `apfs-fuse` собран и установлен; DKMS-модуль `linux
 | Физическое железо | ⏳ не проверялось |
 
 Лог загрузки: [`artifacts/qemu-boot-uefi-kernel.log`](artifacts/qemu-boot-uefi-kernel.log).
-Скриншот GRUB: `qemu-grub2.png` (в рабочем дереве).
+Скриншот GRUB: [`artifacts/qemu-grub2.png`](artifacts/qemu-grub2.png).
 Сборка и загрузка выполнялись в WSL Debian 13.5; артефакт скопирован в `artifacts/`.
 
 ---

@@ -50,3 +50,6 @@ artifacts/**
 
 # Isolated container state created by 'rhm' inside the selected project.
 .rhm-sandbox/
+
+# Superpowers subagent-driven-development workspace (ledger, briefs, reviews).
+.superpowers/

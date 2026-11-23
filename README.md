@@ -252,6 +252,7 @@ LiveUSBAgent-mcp is designed to be transparent about both its power and its buil
 
 - **LiveUSB ISO build & QEMU testing guide:** [ops/live-usb/README.md](ops/live-usb/README.md)
 - **LiveUSB build, write and boot guide:** [docs/liveusb/README.md](docs/liveusb/README.md)
+- **Kiosk startup screens (network vs QR):** [docs/liveusb/STARTUP_UI.md](docs/liveusb/STARTUP_UI.md)
 - **LiveUSB troubleshooting (no Wi-Fi, no tunnel, I/O errors, RAM OOM):** [docs/liveusb/TROUBLESHOOTING.md](docs/liveusb/TROUBLESHOOTING.md)
 - **Russian README:** [README_RU.md](README_RU.md)
 - **Architecture & development roadmap:** [ProjectPlan.md](ProjectPlan.md)

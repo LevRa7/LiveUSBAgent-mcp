@@ -741,6 +741,31 @@ def test_kiosk_ui_exposes_open_terminal_control():
     assert "openTerminal" in js_text
 
 
+def test_kiosk_initial_view_prefers_network_until_a_ready_session_exists():
+    """No internet -> Wi-Fi/LAN screen; a ready session -> QR + token screen."""
+    html_text = (KIOSK_UI_DIR / "index.html").read_text(encoding="utf-8")
+    js_text = (KIOSK_UI_DIR / "app.js").read_text(encoding="utf-8")
+
+    # The network view is the visible default; the ready view starts hidden.
+    assert '<section id="view-network" class="view-panel"' in html_text
+    assert '<section id="view-ready" class="view-panel is-hidden"' in html_text
+
+    # Both the status poll and the Wi-Fi scan run on startup.
+    assert "fetchStatus();" in js_text
+    assert "scanWifi();" in js_text
+    assert "window.setInterval(fetchStatus, 3000);" in js_text
+
+    # Only a registered session (internet + gateway) switches to the QR view.
+    assert "session.ready" in js_text
+    assert 'setView("ready", false)' in js_text
+
+    # The ready view really contains the QR and the session token.
+    ready_html = html_text.split('id="view-ready"', 1)[1]
+    assert 'id="qr-image"' in ready_html
+    assert 'id="session-token"' in ready_html
+    assert "/api/qr.svg" in ready_html
+
+
 def test_http_security_headers_and_host_origin_csrf_rejection(running_server):
     base = running_server["base_url"]
 

@@ -21,7 +21,7 @@
 | Область | Было | Стало |
 | :--- | :--- | :--- |
 | Rescue-API | 5 секций и 4 действия не реализованы | все 12 секций и 11 действий |
-| Тесты | 5 failed / 1756 passed | **0 failed / 1857 passed / 8 skipped** |
+| Тесты | 5 failed / 1756 passed | **0 failed / 1858 passed / 8 skipped** |
 | Версия | 0.6.0 | **0.1.0** |
 | ISO | не собран | **1.5 ГБ, собран и загружен в QEMU** |
 | `--check` | отсутствовал | **36/36 PASS** |
@@ -82,7 +82,7 @@ APFS: `apfs-fuse` собран и установлен; DKMS-модуль `linux
 
 | Проверка | Результат |
 | :--- | :--- |
-| `py -m pytest tests -q` | **1857 passed, 8 skipped, 0 failed** |
+| `py -m pytest tests -q` | **1858 passed, 8 skipped, 0 failed** |
 | `tests/test_rescue.py` | 155 passed |
 | `tests/test_liveusb_iso_pipeline.py` | 22 passed |
 | `build-iso.sh --check` | **36/36 PASS**, exit 0 |

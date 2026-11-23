@@ -149,6 +149,8 @@ fail without failing the workflow: it is an artifact producer, not a gate.
 
 - [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) — no Wi-Fi, iPhone trust, no
   tunnel, I/O errors, RAM OOM, Secure Boot, wrong gateway scheme.
+- [`STARTUP_UI.md`](STARTUP_UI.md) — the network screen (no internet) and the
+  QR/token screen (registered session), with rendered screenshots.
 - [`ops/live-usb/README.md`](../../ops/live-usb/README.md) — the detailed build,
   test and hardware guide.
 - [`docs/releases/v0.1.0.md`](../releases/v0.1.0.md) — what changed in this

@@ -263,6 +263,7 @@ LiveUSB-сессия намеренно даёт ИИ-агенту широки�
 
 - **Руководство по сборке LiveUSB ISO и тестированию в QEMU:** [ops/live-usb/README.md](ops/live-usb/README.md)
 - **Сборка, запись и загрузка LiveUSB (англ.):** [docs/liveusb/README.md](docs/liveusb/README.md)
+- **Стартовые экраны Kiosk (сеть vs QR):** [docs/liveusb/STARTUP_UI.md](docs/liveusb/STARTUP_UI.md)
 - **Диагностика проблем LiveUSB — нет Wi-Fi, туннеля, ошибки I/O, OOM (англ.):** [docs/liveusb/TROUBLESHOOTING.md](docs/liveusb/TROUBLESHOOTING.md)
 - **Английская версия README:** [README.md](README.md)
 - **Архитектура и план развития:** [ProjectPlan.md](ProjectPlan.md)

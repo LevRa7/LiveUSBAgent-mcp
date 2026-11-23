@@ -204,12 +204,12 @@ Files: `core/rescue.py`, `tests/test_rescue.py`.
 ## Task 4 — Release and LiveUSB checks
 
 Files: `VERSION`, `package.json`, `core/version.py`,
-`npm/gemini-computer-use/package.json`, `docs/releases/v0.7.0.md`,
+`npm/gemini-computer-use/package.json`, `docs/releases/v0.1.0.md`,
 `ops/live-usb/build-iso.sh`, `docs/liveusb/`,
 `.github/workflows/liveusb-iso.yml`, `README.md`/`README_RU.md` only if needed.
 
-1. Bump `0.6.0` → `0.7.0` in the four version sources and add
-   `docs/releases/v0.7.0.md`. Keep `REPO_SLUG` unchanged unless every test and
+1. Bump `0.6.0` → `0.1.0` in the four version sources and add
+   `docs/releases/v0.1.0.md`. Keep `REPO_SLUG` unchanged unless every test and
    script that pins it is updated in the same commit.
 2. Add `--check` to `build-iso.sh`: validate required repo files, hook, udev,
    systemd unit text, package list non-empty, and `bash -n` the hook; exit 0

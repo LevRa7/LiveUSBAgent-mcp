@@ -151,6 +151,6 @@ fail without failing the workflow: it is an artifact producer, not a gate.
   tunnel, I/O errors, RAM OOM, Secure Boot, wrong gateway scheme.
 - [`ops/live-usb/README.md`](../../ops/live-usb/README.md) — the detailed build,
   test and hardware guide.
-- [`docs/releases/v0.7.0.md`](../releases/v0.7.0.md) — what changed in this
+- [`docs/releases/v0.1.0.md`](../releases/v0.1.0.md) — what changed in this
   release.
 - [`README.md`](../../README.md) — what the product is and how onboarding works.

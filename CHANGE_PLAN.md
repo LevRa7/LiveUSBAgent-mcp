@@ -1,5 +1,7 @@
 # План изменений: `remote-harness-liveusb` (LiveUSB Edition)
 
+> **Нумерация независимого форка начинается с `0.1.0`.** Upstream-база — `0.6.0`; форк не продолжает её номер, а начинает собственную линейку. Упоминания версии ниже приведены к `0.1.0`.
+
 ## 0. Паспорт проекта
 
 | Параметр | Значение |
@@ -66,7 +68,7 @@ UEFI/BIOS → Debian Live (squashfs + tmpfs, toram)
 | D3 | **Rescue включён по умолчанию в этом форке** (`MESH_RESCUE=1`), но уважает `MESH_RESCUE=0` | Продукт форка — именно rescue; обратная совместимость с upstream-семантикой сохраняется | Публикация инструментов условная, тесты гоняют оба режима |
 | D4 | **Весь форк-специфичный код изолирован**: `core/liveusb.py`, `core/liveusb_net.py`, `core/rescue.py`, `ops/live-usb/**`; в `core/mcp_tools.py` — один блок под маркером `# LIVEUSB-FORK` | Упрощает `git merge upstream/main` | Конфликты при синхронизации — только в 2–3 точках |
 | D5 | **Обрезка поверхности — только из релиза, не из дерева.** Windows GUI-установщик, трей, `status_web/`, npm-алиас, Telegram-QR не входят в релизные артефакты и документацию, но остаются в репозитории | Удаление увеличивает конфликты с upstream и не даёт выигрыша | Релиз = ISO + `install.sh` + `core/` |
-| D6 | **Версия форка — `0.7.0`** в `VERSION` и `package.json` одновременно | `tests/test_version_single_source.py` сверяет оба файла и шаблон `MAJOR.MINOR.PATCH` | Обновляется одним коммитом (этап 0) |
+| D6 | **Версия форка — `0.1.0`** в `VERSION` и `package.json` одновременно | `tests/test_version_single_source.py` сверяет оба файла и шаблон `MAJOR.MINOR.PATCH` | Обновляется одним коммитом (этап 0) |
 
 ---
 
@@ -92,7 +94,7 @@ UEFI/BIOS → Debian Live (squashfs + tmpfs, toram)
 | `tests/test_live_iso_assets.py` | Новый: манифест ↔ файлы, юниты, отсутствие лишних зависимостей | 4 |
 | `README_RU.md`, `README.md`, `docs/liveusb/*` | Раздел LiveUSB, сборка, запись флешки, troubleshooting | 5 |
 | `ProjectPlan.md` | Синхронизировать с D1/D2, закрыть чекбоксы | 2, 5 |
-| `VERSION`, `package.json` | `0.6.0` → `0.7.0` | 0 |
+| `VERSION`, `package.json` | `0.6.0` → `0.1.0` | 0 |
 | `tests/test_tool_annotations.py` | Разрешить `rescue_action` в `DESTRUCTIVE`, `rescue_info` в `READ_ONLY` | 1 |
 | `tests/test_web_share.py` | Обновить закреплённый порядок/количество инструментов | 1 |
 
@@ -102,7 +104,7 @@ UEFI/BIOS → Debian Live (squashfs + tmpfs, toram)
 
 ### Этап 0 — Идентичность проекта и базовая линия (0,5 дня)
 
-- **T0.1** `VERSION` и `package.json` → `0.7.0`; `py -m pytest tests/test_version_single_source.py -q` зелёный.
+- **T0.1** `VERSION` и `package.json` → `0.1.0`; `py -m pytest tests/test_version_single_source.py -q` зелёный.
 - **T0.2** `docs/UPSTREAM.md`: база `c31973b`, политика синхронизации (раздел 9), список конфликтных точек, правило маркеров `# LIVEUSB-FORK`.
 - **T0.3** Раздел «LiveUSB Edition» в `README_RU.md` и `README.md`: что это, чем отличается от upstream, MIT-атрибуция, ссылка на этот план.
 - **T0.4** Зафиксировать базовую линию: `py -m pytest tests -q` → `1585 passed, 8 skipped` (Windows), прогон на Linux — в CI.
@@ -189,7 +191,7 @@ UEFI/BIOS → Debian Live (squashfs + tmpfs, toram)
 - `docs/liveusb/README.md`: требования к хосту сборки, команды, запись (`dd`/Rufus), Secure Boot, отсутствие firmware, диагностика D-state.
 - `docs/liveusb/TROUBLESHOOTING.md`: таблица «симптом → причина → действие» (нет Wi-Fi, нет туннеля, `dmesg` I/O-ошибки, RAM OOM).
 - Обновить `ProjectPlan.md` (чекбоксы), `CHANGELOG`, `README_RU.md`.
-- Тег `v0.7.0`, артефакты: ISO, `.sha256`, заметки к релизу.
+- Тег `v0.1.0`, артефакты: ISO, `.sha256`, заметки к релизу.
 
 ---
 
@@ -259,7 +261,7 @@ py -m pytest tests -q            # после каждого merge
 ## 10. Первые коммиты
 
 1. `docs: add LiveUSB fork change plan and upstream policy`
-2. `chore: set fork version 0.7.0`
+2. `chore: set fork version 0.1.0`
 3. `test(rescue): fixtures and contract tests for rescue_info (red)`
 4. `feat(rescue): partitions, raid_lvm, installed_os, boot_efi, win_artifacts collectors`
 5. `feat(rescue): register rescue_info as a published MCP tool`

@@ -1,12 +1,12 @@
 # Отчёт о готовности LiveUSBAgent-mcp — финальный
 
-**Дата:** 23.11.2026, ~06:50 IST  
-**Ветка:** `complete-liveusb` (worktree), HEAD `a9d954e`  
-**База:** `e4eebfa`; сверх неё 10 коммитов, 28 файлов, `+3 840 / −29`  
-**Версия:** `0.7.0`  
+**Дата:** 23.11.2026, ~06:50 IST
+**Ветка:** `complete-liveusb` (worktree), локальный тег `v0.1.0`
+**База:** `e4eebfa`; сверх неё 13 коммитов, все изменения в ветке
+**Версия:** `0.1.0`
 **Статус:** код и тесты доведены; ISO/QEMU/железо и публикация остаются внешними шагами
 
-> Изменения лежат в отдельной ветке `complete-liveusb`. `main` не изменён; создан локальный тег `v0.7.0` на `584ff8a`, merge и push не выполнялись. Чтобы получить доработки в основном дереве, ветку нужно влить в `main`.
+> Изменения лежат в отдельной ветке `complete-liveusb`. `main` не изменён; создан локальный тег `v0.1.0`, merge и push не выполнялись. Чтобы получить доработки в основном дереве, ветку нужно влить в `main`.
 
 ---
 
@@ -19,7 +19,7 @@
 | Rescue-API | 5 секций и 4 действия не реализованы | все 12 секций и 11 действий имеют реализацию или честный отказ |
 | Тесты | 5 failed / 1756 passed | **1856 passed / 8 skipped / 0 failed** |
 | ISO-проверка | `--check` отсутствовал | `build-iso.sh --check` — **32/32 PASS** без root и `lb` |
-| Релиз | 0.6.0, без notes/CI | **0.7.0**, release notes, LiveUSB CI, docs |
+| Релиз | 0.6.0, без notes/CI | **0.1.0**, release notes, LiveUSB CI, docs |
 | Kiosk | без кнопки терминала | кнопка + `xterm` в образе + `DISPLAY` для сервера |
 | CI | без LiveUSB-джобы | `.github/workflows/liveusb-iso.yml` |
 | Документация | README обещал несуществующее | README/EN/RU + `docs/liveusb/*` приведены к коду |
@@ -71,9 +71,9 @@
 
 ### 3.1. Версия и релиз
 
-- `0.7.0` в [`VERSION`](VERSION#L1), [`core/version.py`](core/version.py#L23), [`package.json`](package.json#L2-L3), npm-алиасе.
-- [`docs/releases/v0.7.0.md`](docs/releases/v0.7.0.md) — release notes с ограничениями.
-- README EN/RU содержат `**Version:** 0.7.0` и ссылку на notes.
+- `0.1.0` в [`VERSION`](VERSION#L1), [`core/version.py`](core/version.py#L23), [`package.json`](package.json#L2-L3), npm-алиасе.
+- [`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md) — release notes с ограничениями.
+- README EN/RU содержат `**Version:** 0.1.0` и ссылку на notes.
 - `.gitattributes` фиксирует LF для `*.sh`, `*.hook.chroot`, `*.rules` ([`.gitattributes`](.gitattributes)).
 
 ### 3.2. `build-iso.sh --check`
@@ -146,7 +146,7 @@ PASS: 32 asset checks passed (root and live-build not required)
    ./ops/live-usb/test-qemu.sh --mode bios --ram 2048
    ```
 2. **Проверить на реальном железе:** Wi-Fi, iPhone/Android tethering, APFS/ZFS/BitLocker, Secure Boot, кнопка «Открыть терминал» на `xterm`/`:0`.
-3. **Влить ветку `complete-liveusb` в `main`**, запушить ветку и локальный тег `v0.7.0`, выпустить ISO + `.sha256` + release notes.
+3. **Влить ветку `complete-liveusb` в `main`**, запушить ветку и локальный тег `v0.1.0`, выпустить ISO + `.sha256` + release notes.
 4. **P1-8:** внешние скиллы всё ещё не запинены по commit SHA — `fetch-skills.sh` клонирует HEAD и только записывает SHA в lockfile; `skills-lock.json` не используется для checkout. Это риск воспроизводимости/снабжения.
 5. **P2:** `REPO_SLUG`/`package.json` всё ещё указывают на upstream `remote-harness-mcp`; `docs/CHATGPT_CONNECT_RU.md` остаётся untracked и устаревшим; `AgentDFIR`/`avml` не запекаются, хотя `ProjectPlan` их упоминает.
 

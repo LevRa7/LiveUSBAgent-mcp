@@ -7,7 +7,8 @@ Serves the Russian kiosk UI from ops/live-usb/kiosk_ui/ and exposes JSON/SVG
 endpoints for network status, Wi-Fi management, LiveUSB session state, QR, the
 allowlisted local application launcher, and the «Настройки сети» dialog
 (read-only snapshot plus IPv4/DNS, PPPoE, WireGuard and OpenVPN through
-NetworkManager).
+NetworkManager, and AmneziaWG awg-quick configs plus HTTPS subscription/QR
+import).
 """
 
 from __future__ import annotations
@@ -27,12 +28,13 @@ import socket
 import subprocess
 import tempfile
 import time
+import urllib.request
 import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
@@ -2031,6 +2033,934 @@ def apply_network_openvpn(
     return _network_action(action)
 
 
+# --- AmneziaWG (obfuscated WireGuard) and subscription import ---------------
+#
+# AmneziaWG keeps the WireGuard .conf format and adds the Jc/Jmin/Jmax/S1/S2/
+# H1-H4 obfuscation keys to [Interface]; awg-quick activates such a file exactly
+# like wg-quick. This section therefore mirrors the WireGuard action above:
+# validate every field first (400), write the config with PRIVATE_FILE_MODE
+# through a temp file + os.replace (atomic, 0600), then run
+# `awg-quick up <path>` as an argv list (never shell=True). Missing awg-quick,
+# missing root or a failing command is a 503; no response, message or diagnostic
+# ever contains the PrivateKey/PresharedKey values.
+#
+# AMNEZIA_CONFIG_DIR is module-level on purpose: the unit tests point it at
+# tmp_path and a real LiveUSB uses the default /etc/amnezia/amneziawg.
+
+AMNEZIA_CONFIG_DIR = Path("/etc/amnezia/amneziawg")
+AMNEZIA_CONFIG_SUFFIX = ".conf"
+AMNEZIA_MAX_NAME_LEN = 32
+AMNEZIA_MAX_CONFIG_BYTES = 64 * 1024
+AMNEZIA_MAX_LINE_CHARS = 4096
+AMNEZIA_REQUIRED_INTERFACE_KEYS = ("PrivateKey", "Address")
+AMNEZIA_REQUIRED_PEER_KEYS = ("PublicKey", "Endpoint")
+AMNEZIA_OPTIONAL_NUMERIC_KEYS = (
+    "Jc",
+    "Jmin",
+    "Jmax",
+    "S1",
+    "S2",
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+)
+AMNEZIA_SECRET_FIELDS = ("PrivateKey", "PresharedKey")
+# awg-quick runs PreUp/PostUp/PreDown/PostDown through `sh -c` as root, so a
+# pasted config must never be able to smuggle a hook in.
+AMNEZIA_FORBIDDEN_KEYS = ("PreUp", "PostUp", "PreDown", "PostDown")
+_AMNEZIA_KEY_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,31}$")
+_AMNEZIA_SECTION_HEADER_RE = re.compile(r"^\s*\[\s*interface\s*\]\s*$", re.IGNORECASE)
+_AMNEZIA_SECRET_LINE_RE = re.compile(
+    r"(?im)^(\s*)(privatekey|presharedkey)(\s*)=.*$"
+)
+_AMNEZIA_SECRET_VALUE_KEYS = tuple(name.lower() for name in AMNEZIA_SECRET_FIELDS)
+
+SUBSCRIPTION_MAX_URL_LEN = 2048
+SUBSCRIPTION_MAX_BYTES = 1024 * 1024
+SUBSCRIPTION_TIMEOUT_SECONDS = 15.0
+SUBSCRIPTION_USER_AGENT = "rhm-kiosk/1.0 (AmneziaWG subscription import)"
+SUBSCRIPTION_QR_MAX_SVG_BYTES = 512 * 1024
+
+
+def _is_root() -> bool:
+    """True when the process runs as root (non-POSIX hosts cannot be checked)."""
+    get_euid = getattr(os, "geteuid", None)
+    if get_euid is None:
+        return True
+    try:
+        return int(get_euid()) == 0
+    except Exception:
+        return True
+
+
+def _awg_quick_path() -> str:
+    """Return the resolved awg-quick path, or "" when it is not installed."""
+    try:
+        return str(shutil.which("awg-quick") or "")
+    except Exception:
+        return ""
+
+
+def _require_awg_quick() -> str:
+    """Raise NetworkUnavailableError unless awg-quick and root are available."""
+    path = _awg_quick_path()
+    if not path:
+        raise NetworkUnavailableError(
+            "AmneziaWG (awg-quick) не установлен или недоступен в этой системе"
+        )
+    if not _is_root():
+        raise NetworkUnavailableError(
+            "Для запуска AmneziaWG нужны права root: перезапустите киоск через sudo"
+        )
+    return path
+
+
+def _redact_secret_assignment(match: "re.Match[str]") -> str:
+    """Replace a `PrivateKey = ...` line with a marker that keeps the key name."""
+    return f"{match.group(1)}{match.group(2)}{match.group(3)}= ***"
+
+
+def _scrub_amnezia_secrets(
+    value: Any, secrets: Tuple[str, ...] = ()
+) -> str:
+    """One-line diagnostic text with every AmneziaWG secret removed."""
+    text = _AMNEZIA_SECRET_LINE_RE.sub(_redact_secret_assignment, str(value or ""))
+    return _sanitize_detail(text, tuple(secrets))
+
+
+def _amnezia_secret_values(config: str) -> Tuple[str, ...]:
+    """Collect the PrivateKey/PresharedKey values so messages can redact them."""
+    values: List[str] = []
+    for raw_line in str(config or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";")) or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip().lower() in _AMNEZIA_SECRET_VALUE_KEYS:
+            secret = value.strip()
+            if secret and secret not in values:
+                values.append(secret)
+    return tuple(values)
+
+
+def _section_values(entries: List[Tuple[str, str]], key: str) -> List[str]:
+    """All values of one INI key (WireGuard allows repeating some keys)."""
+    lowered = key.lower()
+    return [value for name, value in entries if name.lower() == lowered]
+
+
+def _section_first_value(entries: List[Tuple[str, str]], key: str) -> str:
+    values = _section_values(entries, key)
+    return values[0] if values else ""
+
+
+def _require_section_keys(
+    entries: List[Tuple[str, str]], required: Tuple[str, ...], section: str
+) -> None:
+    """Raise 400 when a required key is missing from a section."""
+    present = {name.lower() for name, _value in entries}
+    for key in required:
+        if key.lower() not in present:
+            raise NetworkValidationError(
+                f"Конфигурация AmneziaWG: в [{section}] отсутствует обязательный параметр {key}"
+            )
+
+
+def _validate_amnezia_key(value: Any, field: str) -> None:
+    """Validate the shape of a WireGuard-style key value (never echoed)."""
+    text = str(value or "").strip()
+    if not text:
+        raise NetworkValidationError(f"Конфигурация AmneziaWG: {field} не указан")
+    if len(text) > 128 or any(char.isspace() for char in text):
+        raise NetworkValidationError(
+            f"Конфигурация AmneziaWG: {field} имеет недопустимый формат"
+        )
+
+
+def _validate_amnezia_addresses(value: Any) -> None:
+    """Validate the Address list (one or more IP/prefix entries)."""
+    parts = [part.strip() for part in str(value or "").split(",") if part.strip()]
+    if not parts:
+        raise NetworkValidationError(
+            "Конфигурация AmneziaWG: Address должен содержать IP-адрес с префиксом"
+        )
+    for part in parts:
+        try:
+            ipaddress.ip_interface(part)
+        except ValueError:
+            raise NetworkValidationError(
+                "Конфигурация AmneziaWG: Address "
+                f"«{_sanitize_detail(part, limit=48)}» не является IP-адресом с префиксом"
+            )
+
+
+def _validate_amnezia_dns(value: Any) -> None:
+    """Validate an optional DNS list: IP addresses or plain host names."""
+    for part in re.split(r"[,\s]+", str(value or "")):
+        candidate = part.strip()
+        if not candidate:
+            continue
+        try:
+            ipaddress.ip_address(candidate)
+            continue
+        except ValueError:
+            pass
+        if not _HOSTNAME_RE.match(candidate):
+            raise NetworkValidationError(
+                "Конфигурация AmneziaWG: DNS "
+                f"«{_sanitize_detail(candidate, limit=48)}» не является IP-адресом или доменом"
+            )
+
+
+def _validate_amnezia_allowed_ips(value: Any) -> None:
+    """Validate one AllowedIPs value (comma/space separated CIDR networks)."""
+    parts = [part for part in re.split(r"[,\s]+", str(value or "")) if part]
+    if not parts:
+        raise NetworkValidationError(
+            "Конфигурация AmneziaWG: AllowedIPs должен содержать подсеть в формате CIDR"
+        )
+    for part in parts:
+        try:
+            ipaddress.ip_network(part, strict=False)
+        except ValueError:
+            raise NetworkValidationError(
+                "Конфигурация AmneziaWG: AllowedIPs "
+                f"«{_sanitize_detail(part, limit=48)}» не является подсетью в формате CIDR"
+            )
+
+
+def _parse_amnezia_ini(text: str) -> Dict[str, Any]:
+    """Parse a WireGuard/AmneziaWG INI into [Interface] and [Peer] entry lists."""
+    sections: List[Tuple[str, List[Tuple[str, str]]]] = []
+    current: Optional[Tuple[str, List[Tuple[str, str]]]] = None
+    forbidden = {name.lower() for name in AMNEZIA_FORBIDDEN_KEYS}
+
+    for raw_line in text.split("\n"):
+        if len(raw_line) > AMNEZIA_MAX_LINE_CHARS:
+            raise NetworkValidationError(
+                "Конфигурация AmneziaWG: строка длиннее "
+                f"{AMNEZIA_MAX_LINE_CHARS} символов"
+            )
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith(";"):
+            continue
+
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            if section.lower() not in ("interface", "peer"):
+                raise NetworkValidationError(
+                    "Конфигурация AmneziaWG: неизвестная секция "
+                    f"«{_sanitize_detail(section, limit=32)}»"
+                )
+            current = (section.lower(), [])
+            sections.append(current)
+            continue
+
+        if "=" not in line:
+            raise NetworkValidationError(
+                "Конфигурация AmneziaWG: ожидается строка «Параметр = Значение»"
+            )
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if current is None:
+            raise NetworkValidationError(
+                "Конфигурация AmneziaWG: параметр указан вне секции [Interface]/[Peer]"
+            )
+        if not _AMNEZIA_KEY_NAME_RE.match(key):
+            raise NetworkValidationError(
+                "Конфигурация AmneziaWG: недопустимое имя параметра "
+                f"«{_sanitize_detail(key, limit=32)}»"
+            )
+        if key.lower() in forbidden:
+            raise NetworkValidationError(
+                f"Конфигурация AmneziaWG: параметр {key} запрещён "
+                "(хуки awg-quick выполняются от root)"
+            )
+        if not value:
+            raise NetworkValidationError(
+                f"Конфигурация AmneziaWG: параметр {key} не заполнен"
+            )
+        current[1].append((key, value))
+
+    interface_entries = [entries for name, entries in sections if name == "interface"]
+    peer_entries = [entries for name, entries in sections if name == "peer"]
+    if len(interface_entries) != 1:
+        raise NetworkValidationError(
+            "Конфигурация AmneziaWG: требуется ровно одна секция [Interface]"
+        )
+    if not peer_entries:
+        raise NetworkValidationError(
+            "Конфигурация AmneziaWG: требуется хотя бы одна секция [Peer]"
+        )
+    return {"interface": interface_entries[0], "peers": peer_entries}
+
+
+def validate_amnezia_config(raw: Any) -> str:
+    """Validate an AmneziaWG .conf body and return the text written to disk.
+
+    Rejects control characters, lines longer than AMNEZIA_MAX_LINE_CHARS, a
+    body larger than AMNEZIA_MAX_CONFIG_BYTES, unknown sections, awg-quick
+    root hooks and malformed values. The original key order is preserved so
+    newer AmneziaWG parameters survive untouched.
+    """
+    text = raw if isinstance(raw, str) else ""
+    if not text.strip():
+        raise NetworkValidationError("Конфигурация AmneziaWG: не указана")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    for char in text:
+        if char in ("\n", "\t"):
+            continue
+        if ord(char) < 32 or ord(char) == 127:
+            raise NetworkValidationError(
+                "Конфигурация AmneziaWG: содержит недопустимые управляющие символы"
+            )
+    if len(text.encode("utf-8")) > AMNEZIA_MAX_CONFIG_BYTES:
+        raise NetworkValidationError(
+            "Конфигурация AmneziaWG: больше "
+            f"{AMNEZIA_MAX_CONFIG_BYTES // 1024} КБ"
+        )
+
+    parsed = _parse_amnezia_ini(text)
+    interface = parsed["interface"]
+    peers = parsed["peers"]
+
+    _require_section_keys(interface, AMNEZIA_REQUIRED_INTERFACE_KEYS, "Interface")
+    for peer in peers:
+        _require_section_keys(peer, AMNEZIA_REQUIRED_PEER_KEYS, "Peer")
+
+    _validate_amnezia_key(
+        _section_first_value(interface, "PrivateKey"), "PrivateKey"
+    )
+    _validate_amnezia_addresses(_section_first_value(interface, "Address"))
+    _validate_amnezia_dns(_section_first_value(interface, "DNS"))
+    for key in AMNEZIA_OPTIONAL_NUMERIC_KEYS:
+        for value in _section_values(interface, key):
+            if not re.match(r"^\d{1,10}$", value):
+                raise NetworkValidationError(
+                    f"Конфигурация AmneziaWG: {key} должен быть целым числом"
+                )
+    for key in ("MTU", "PersistentKeepalive"):
+        for value in _section_values(interface, key):
+            if not re.match(r"^\d{1,5}$", value):
+                raise NetworkValidationError(
+                    f"Конфигурация AmneziaWG: {key} должен быть числом"
+                )
+
+    for peer in peers:
+        _validate_amnezia_key(_section_first_value(peer, "PublicKey"), "PublicKey")
+        endpoint = _section_first_value(peer, "Endpoint")
+        try:
+            validate_endpoint(endpoint)
+        except NetworkValidationError as exc:
+            raise NetworkValidationError(f"Конфигурация AmneziaWG: {exc}")
+        for value in _section_values(peer, "PresharedKey"):
+            _validate_amnezia_key(value, "PresharedKey")
+        for value in _section_values(peer, "AllowedIPs"):
+            _validate_amnezia_allowed_ips(value)
+        for value in _section_values(peer, "PersistentKeepalive"):
+            if not re.match(r"^\d{1,5}$", value):
+                raise NetworkValidationError(
+                    "Конфигурация AmneziaWG: PersistentKeepalive должен быть числом"
+                )
+
+    normalized = [line.rstrip() for line in text.split("\n")]
+    while normalized and not normalized[0]:
+        normalized.pop(0)
+    while normalized and not normalized[-1]:
+        normalized.pop()
+    return "\n".join(normalized) + "\n"
+
+
+def _write_private_config_atomic(path: Path, text: str) -> None:
+    """Write ``path`` with PRIVATE_FILE_MODE atomically (temp file + replace)."""
+    data = text.encode("utf-8")
+    temp_path = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    # Without O_BINARY a Windows os.open would rewrite "\n" as "\r\n" and make
+    # the config unreadable as the exact text that was validated.
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    descriptor = os.open(str(temp_path), flags, PRIVATE_FILE_MODE)
+    try:
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError(f"не удалось записать {path.name}")
+                view = view[written:]
+            try:
+                os.fsync(descriptor)
+            except OSError:
+                pass
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        try:
+            os.chmod(str(temp_path), PRIVATE_FILE_MODE)
+        except OSError:
+            # Windows has no POSIX bits; the os.open mode above is authoritative.
+            pass
+        os.replace(str(temp_path), str(path))
+    except BaseException:
+        try:
+            os.unlink(str(temp_path))
+        except OSError:
+            pass
+        raise
+
+
+def _run_awg_quick(
+    verb: str,
+    config_path: Path,
+    run_cmd: CommandRunner,
+    *,
+    secrets: Tuple[str, ...] = (),
+) -> str:
+    """Run `awg-quick <verb> <path>`; raise NetworkUnavailableError on failure."""
+    executable = _awg_quick_path() or "awg-quick"
+    argv = [executable, verb, str(config_path)]
+    try:
+        rc, out, err = run_cmd(argv, 30.0)
+    except Exception as exc:
+        raise NetworkUnavailableError(
+            f"Не удалось выполнить awg-quick {verb}: "
+            f"{_scrub_amnezia_secrets(exc, secrets)}"
+        )
+    if rc == 0:
+        return _scrub_amnezia_secrets(out, secrets)
+    if rc == 127:
+        raise NetworkUnavailableError("AmneziaWG (awg-quick) не найден в системе")
+    if rc == 124:
+        raise NetworkUnavailableError(f"awg-quick не ответил вовремя: {verb}")
+    detail = _scrub_amnezia_secrets(err or out, secrets)
+    message = f"awg-quick не смог выполнить «{verb}»"
+    if detail:
+        message = f"{message} — {detail}"
+    raise NetworkUnavailableError(message)
+
+
+def _write_and_start_amnezia(
+    name: str, config: str, run_cmd: CommandRunner
+) -> Tuple[Path, str]:
+    """Write <name>.conf 0600 and bring it up; remove it again on failure."""
+    _require_awg_quick()
+
+    target_dir = Path(AMNEZIA_CONFIG_DIR)
+    path = target_dir / f"{name}{AMNEZIA_CONFIG_SUFFIX}"
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        raise NetworkUnavailableError(
+            "Не удалось создать каталог AmneziaWG: "
+            f"{_sanitize_detail(str(exc))}"
+        )
+    try:
+        _write_private_config_atomic(path, config)
+    except Exception as exc:
+        raise NetworkUnavailableError(
+            "Не удалось записать конфигурацию AmneziaWG: "
+            f"{_sanitize_detail(str(exc))}"
+        )
+    try:
+        output = _run_awg_quick(
+            "up", path, run_cmd, secrets=_amnezia_secret_values(config)
+        )
+    except NetworkUnavailableError:
+        # Do not leave a half-applied config behind for the next boot.
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    return path, output
+
+
+def list_amnezia_configs(directory: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """List every ``*.conf`` in the AmneziaWG directory (never raises)."""
+    base = Path(directory) if directory is not None else Path(AMNEZIA_CONFIG_DIR)
+    try:
+        entries = sorted(
+            base.glob(f"*{AMNEZIA_CONFIG_SUFFIX}"),
+            key=lambda item: item.name.lower(),
+        )
+    except Exception:
+        return []
+
+    files: List[Dict[str, Any]] = []
+    for entry in entries:
+        try:
+            if not entry.is_file():
+                continue
+            info = entry.stat()
+        except OSError:
+            continue
+        files.append(
+            {
+                "name": entry.name[: -len(AMNEZIA_CONFIG_SUFFIX)],
+                "path": str(entry),
+                "size": int(info.st_size),
+                "mtime": int(info.st_mtime),
+            }
+        )
+    return files
+
+
+def _parse_awg_show_interfaces(output: str) -> List[str]:
+    """Extract interface names from `awg show` / `wg show`-style output."""
+    names: List[str] = []
+    for raw_line in str(output or "").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("interface:"):
+            continue
+        name = line.split(":", 1)[1].strip()
+        if re.match(r"^[A-Za-z0-9_.:-]{1,32}$", name) and name not in names:
+            names.append(name)
+    return names
+
+
+def amnezia_status(run_cmd: CommandRunner = default_run_cmd) -> Dict[str, Any]:
+    """Best-effort `awg show` status for GET /api/network/amnezia (never raises)."""
+    result: Dict[str, Any] = {
+        "available": bool(_awg_quick_path()),
+        "ok": False,
+        "output": "",
+        "interfaces": [],
+        "message": "",
+    }
+    if not result["available"]:
+        result["message"] = "AmneziaWG (awg-quick) не установлен в этой системе"
+        return result
+
+    try:
+        rc, out, err = run_cmd(["awg", "show"], 5.0)
+    except Exception as exc:
+        result["message"] = (
+            f"awg show недоступен: {_scrub_amnezia_secrets(exc)}"
+        )
+        return result
+
+    if rc == 0:
+        result["ok"] = True
+        result["output"] = _scrub_amnezia_secrets(out)
+        result["interfaces"] = _parse_awg_show_interfaces(out)
+        return result
+
+    detail = _scrub_amnezia_secrets(err or out)
+    result["message"] = "awg show недоступен" + (f": {detail}" if detail else "")
+    return result
+
+
+def amnezia_overview(run_cmd: CommandRunner = default_run_cmd) -> Dict[str, Any]:
+    """Read-only AmneziaWG picture for GET /api/network/amnezia (never raises)."""
+    try:
+        return {
+            "ok": True,
+            "awg_available": bool(_awg_quick_path()),
+            "config_dir": str(AMNEZIA_CONFIG_DIR),
+            "files": list_amnezia_configs(),
+            "status": amnezia_status(run_cmd),
+            "redacted": True,
+            "timestamp": int(time.time()),
+        }
+    except Exception:
+        return {
+            "ok": True,
+            "awg_available": False,
+            "config_dir": str(AMNEZIA_CONFIG_DIR),
+            "files": [],
+            "status": {
+                "available": False,
+                "ok": False,
+                "output": "",
+                "interfaces": [],
+                "message": "AmneziaWG недоступен в этой системе",
+            },
+            "redacted": True,
+            "timestamp": int(time.time()),
+        }
+
+
+# --- Subscription import: HTTPS-only fetch with an SSRF guard ---------------
+
+
+def _resolve_host_addresses(host: str, port: int) -> List[str]:
+    """Resolve ``host`` to its IP addresses; 400 when the name cannot resolve."""
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except (socket.gaierror, OSError, UnicodeError, ValueError):
+        raise NetworkValidationError(
+            "URL подписки: не удалось разрешить имя хоста"
+        )
+    addresses: List[str] = []
+    for info in infos or []:
+        try:
+            sockaddr = info[4]
+        except (IndexError, TypeError):
+            continue
+        if isinstance(sockaddr, tuple) and sockaddr:
+            address = str(sockaddr[0])
+            if address and address not in addresses:
+                addresses.append(address)
+    if not addresses:
+        raise NetworkValidationError(
+            "URL подписки: не удалось разрешить имя хоста"
+        )
+    return addresses
+
+
+def _is_forbidden_address(address: str) -> bool:
+    """True for loopback/private/link-local/reserved/multicast/subnet addresses."""
+    try:
+        ip = ipaddress.ip_address(str(address))
+    except ValueError:
+        return True
+
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        return _is_forbidden_address(str(mapped))
+
+    if (
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_unspecified
+        or getattr(ip, "is_reserved", False)
+        or getattr(ip, "is_site_local", False)
+    ):
+        return True
+    if isinstance(ip, ipaddress.IPv4Address):
+        # CGNAT 100.64.0.0/10 is not covered by is_private on older Pythons.
+        if ip in ipaddress.ip_network("100.64.0.0/10"):
+            return True
+    return False
+
+
+def validate_subscription_url(raw: Any) -> str:
+    """Validate an HTTPS subscription URL and reject non-public destinations.
+
+    The host is resolved here, so a loopback/private/link-local/reserved answer
+    is a 400 before any socket is opened (the redirect handler repeats the same
+    check for each hop).
+    """
+    text = raw.strip() if isinstance(raw, str) else ""
+    if not text:
+        raise NetworkValidationError("URL подписки: не указан")
+    if len(text) > SUBSCRIPTION_MAX_URL_LEN:
+        raise NetworkValidationError(
+            f"URL подписки: не длиннее {SUBSCRIPTION_MAX_URL_LEN} символов"
+        )
+    for char in text:
+        if ord(char) < 33 or ord(char) == 127:
+            raise NetworkValidationError(
+                "URL подписки: содержит недопустимые пробелы или управляющие символы"
+            )
+
+    try:
+        parsed = urlparse(text)
+        port = parsed.port
+    except ValueError:
+        raise NetworkValidationError("URL подписки: некорректный порт или адрес")
+    if parsed.scheme.lower() != "https":
+        raise NetworkValidationError("URL подписки: допустим только HTTPS")
+    host = parsed.hostname
+    if not host:
+        raise NetworkValidationError("URL подписки: не указан хост")
+    if parsed.username or parsed.password:
+        raise NetworkValidationError(
+            "URL подписки: не должен содержать логин или пароль"
+        )
+    effective_port = int(port) if port is not None else 443
+    if effective_port < 1 or effective_port > 65535:
+        raise NetworkValidationError("URL подписки: некорректный порт")
+
+    for address in _resolve_host_addresses(host, effective_port):
+        if _is_forbidden_address(address):
+            raise NetworkValidationError(
+                "URL подписки: адрес указывает на локальную, частную или "
+                "служебную сеть — загрузка запрещена"
+            )
+    return text
+
+
+class _SubscriptionRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-apply the HTTPS/SSRF guard to every redirect hop."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        validate_subscription_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _fetch_subscription_bytes(url: str) -> bytes:
+    """HTTPS GET with a 15 s timeout and a hard 1 MiB cap; failures are 503."""
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": SUBSCRIPTION_USER_AGENT,
+            "Accept": "*/*",
+        },
+        method="GET",
+    )
+    opener = urllib.request.build_opener(_SubscriptionRedirectHandler())
+    try:
+        with opener.open(request, timeout=SUBSCRIPTION_TIMEOUT_SECONDS) as response:
+            data = response.read(SUBSCRIPTION_MAX_BYTES + 1)
+    except NetworkValidationError:
+        raise
+    except Exception as exc:
+        raise NetworkUnavailableError(
+            "Не удалось загрузить подписку: "
+            f"{_sanitize_detail(str(exc))}"
+        )
+    if not data:
+        raise NetworkUnavailableError("Подписка пуста: сервер вернул 0 байт")
+    if len(data) > SUBSCRIPTION_MAX_BYTES:
+        raise NetworkUnavailableError(
+            "Подписка больше 1 МБ — загрузка отклонена"
+        )
+    return data
+
+
+def _looks_like_amnezia_config(text: str) -> bool:
+    """True when the first meaningful line is a [Interface] header."""
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith(";"):
+            continue
+        return bool(_AMNEZIA_SECTION_HEADER_RE.match(line))
+    return False
+
+
+def _decode_subscription_base64(text: str) -> Optional[str]:
+    """Decode base64/base64url (padded or not); None when it is not base64."""
+    compact = "".join(str(text or "").split())
+    if not compact or len(compact) > SUBSCRIPTION_MAX_BYTES * 2:
+        return None
+    candidate = compact.replace("-", "+").replace("_", "/").rstrip("=")
+    remainder = len(candidate) % 4
+    if remainder == 1:
+        return None
+    try:
+        data = base64.b64decode(
+            candidate + "=" * ((4 - remainder) % 4), validate=True
+        )
+    except (ValueError, TypeError):
+        return None
+    if not data or len(data) > SUBSCRIPTION_MAX_BYTES:
+        return None
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return None
+
+
+def decode_subscription_config(raw: Any) -> Tuple[str, str]:
+    """Return (validated config, "plain"|"base64") from a subscription body."""
+    if isinstance(raw, str):
+        payload = raw.encode("utf-8")
+    elif isinstance(raw, (bytes, bytearray)):
+        payload = bytes(raw)
+    else:
+        raise NetworkValidationError("Подписка: некорректное содержимое ответа")
+    if len(payload) > SUBSCRIPTION_MAX_BYTES:
+        raise NetworkUnavailableError("Подписка больше 1 МБ — загрузка отклонена")
+
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise NetworkValidationError(
+            "Подписка: содержимое не является текстом UTF-8"
+        )
+    stripped = text.strip()
+    if not stripped:
+        raise NetworkValidationError("Подписка: сервер вернул пустой ответ")
+
+    if _looks_like_amnezia_config(stripped):
+        return validate_amnezia_config(stripped), "plain"
+
+    decoded = _decode_subscription_base64(stripped)
+    if decoded is not None and _looks_like_amnezia_config(decoded):
+        return validate_amnezia_config(decoded), "base64"
+
+    raise NetworkValidationError(
+        "Подписка: неподдерживаемый формат — ожидается AmneziaWG .conf "
+        "([Interface]) или base64/base64url от него"
+    )
+
+
+def _derive_amnezia_name(host: str) -> str:
+    """Build a safe file stem from a subscription host name."""
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]", "-", str(host or "")).strip("-._")
+    cleaned = cleaned[:AMNEZIA_MAX_NAME_LEN].strip("-._")
+    if not cleaned or not re.match(r"^[A-Za-z0-9]", cleaned):
+        return "amnezia"
+    return cleaned
+
+
+def _read_text_quietly(path: Path) -> str:
+    """Read a config for secret extraction; "" when it cannot be read."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+# --- POST /api/network/amnezia, /down and /subscription actions -------------
+
+
+def apply_network_amnezia(
+    body: Any,
+    run_cmd: CommandRunner = default_run_cmd,
+) -> Tuple[int, Dict[str, Any]]:
+    """Write an AmneziaWG .conf 0600 and bring it up with `awg-quick up`."""
+
+    def action() -> Tuple[int, Dict[str, Any]]:
+        if not isinstance(body, dict):
+            raise NetworkValidationError("Некорректное тело запроса")
+
+        name = validate_connection_name(
+            body.get("name"), "Имя AmneziaWG-подключения", max_len=AMNEZIA_MAX_NAME_LEN
+        )
+        config = validate_amnezia_config(body.get("config"))
+        path, output = _write_and_start_amnezia(name, config, run_cmd)
+
+        return int(HTTPStatus.OK), {
+            "ok": True,
+            "name": name,
+            "path": str(path),
+            "output": output,
+            "redacted": True,
+            "message": f"AmneziaWG-подключение {name} поднято",
+        }
+
+    return _network_action(action)
+
+
+def apply_network_amnezia_down(
+    body: Any,
+    run_cmd: CommandRunner = default_run_cmd,
+) -> Tuple[int, Dict[str, Any]]:
+    """Bring an existing AmneziaWG config down with `awg-quick down`."""
+
+    def action() -> Tuple[int, Dict[str, Any]]:
+        if not isinstance(body, dict):
+            raise NetworkValidationError("Некорректное тело запроса")
+
+        name = validate_connection_name(
+            body.get("name"), "Имя AmneziaWG-подключения", max_len=AMNEZIA_MAX_NAME_LEN
+        )
+        _require_awg_quick()
+
+        path = Path(AMNEZIA_CONFIG_DIR) / f"{name}{AMNEZIA_CONFIG_SUFFIX}"
+        if not path.is_file():
+            raise NetworkValidationError(
+                f"AmneziaWG: конфигурация «{name}» не найдена"
+            )
+
+        output = _run_awg_quick(
+            "down",
+            path,
+            run_cmd,
+            secrets=_amnezia_secret_values(_read_text_quietly(path)),
+        )
+        return int(HTTPStatus.OK), {
+            "ok": True,
+            "name": name,
+            "path": str(path),
+            "output": output,
+            "redacted": True,
+            "message": f"AmneziaWG-подключение {name} остановлено",
+        }
+
+    return _network_action(action)
+
+
+def apply_network_amnezia_subscription(
+    body: Any,
+    run_cmd: CommandRunner = default_run_cmd,
+) -> Tuple[int, Dict[str, Any]]:
+    """Fetch an HTTPS subscription, decode it and bring the config up."""
+
+    def action() -> Tuple[int, Dict[str, Any]]:
+        if not isinstance(body, dict):
+            raise NetworkValidationError("Некорректное тело запроса")
+
+        url = validate_subscription_url(body.get("url"))
+        host = str(urlparse(url).hostname or "").lower()
+
+        raw_name = body.get("name")
+        if isinstance(raw_name, str) and raw_name.strip():
+            name = validate_connection_name(
+                raw_name,
+                "Имя AmneziaWG-подключения",
+                max_len=AMNEZIA_MAX_NAME_LEN,
+            )
+        else:
+            name = _derive_amnezia_name(host)
+
+        # Fail fast before any outbound request when awg-quick/root is missing.
+        _require_awg_quick()
+
+        raw = _fetch_subscription_bytes(url)
+        if len(raw) > SUBSCRIPTION_MAX_BYTES:
+            raise NetworkUnavailableError(
+                "Подписка больше 1 МБ — загрузка отклонена"
+            )
+        config, source_format = decode_subscription_config(raw)
+        path, output = _write_and_start_amnezia(name, config, run_cmd)
+
+        return int(HTTPStatus.OK), {
+            "ok": True,
+            "name": name,
+            "source": "subscription",
+            "format": source_format,
+            "host": host,
+            "path": str(path),
+            "output": output,
+            "redacted": True,
+            "message": (
+                f"Подписка загружена: AmneziaWG-подключение {name} поднято"
+            ),
+        }
+
+    return _network_action(action)
+
+
+def render_subscription_qr_svg(
+    url: str,
+    run_cmd: CommandRunner = default_run_cmd,
+) -> str:
+    """Render an SVG QR of an HTTPS subscription URL; 400/503 on failure."""
+    validated = validate_subscription_url(url)
+    try:
+        rc, out, err = run_cmd(
+            ["qrencode", "-t", "SVG", "-m", "2", "-o", "-", "--", validated],
+            10.0,
+        )
+    except Exception as exc:
+        raise NetworkUnavailableError(
+            f"Не удалось построить QR-код: {_sanitize_detail(str(exc))}"
+        )
+    if rc == 127:
+        raise NetworkUnavailableError("qrencode не установлен в этой системе")
+    if rc == 124:
+        raise NetworkUnavailableError("qrencode не ответил вовремя")
+    if rc != 0 or "<svg" not in str(out or "").lower():
+        detail = _sanitize_detail(err or out, limit=120)
+        message = "qrencode не смог построить QR-код для этой ссылки"
+        if detail:
+            message = f"{message} — {detail}"
+        raise NetworkUnavailableError(message)
+    if len(out.encode("utf-8")) > SUBSCRIPTION_QR_MAX_SVG_BYTES:
+        raise NetworkUnavailableError("QR-код получился слишком большим")
+    return out
+
+
 class KioskServer(ThreadingHTTPServer):
     """ThreadingHTTPServer carrying injectable runtime dependencies for tests."""
 
@@ -2206,6 +3136,12 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/network":
                 self._handle_network()
                 return
+            if path == "/api/network/amnezia":
+                self._handle_network_amnezia()
+                return
+            if path == "/api/network/subscription/qr":
+                self._handle_network_subscription_qr()
+                return
             self._serve_static(path)
         except Exception:
             self._send_json(
@@ -2243,6 +3179,15 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/network/openvpn":
                 self._handle_network_openvpn()
+                return
+            if path == "/api/network/amnezia":
+                self._handle_network_amnezia_up()
+                return
+            if path == "/api/network/amnezia/down":
+                self._handle_network_amnezia_down()
+                return
+            if path == "/api/network/subscription":
+                self._handle_network_subscription()
                 return
             self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Not found"})
         except Exception:
@@ -2430,7 +3375,7 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
         self,
         action: Callable[[Dict[str, Any], CommandRunner], Tuple[int, Dict[str, Any]]],
     ) -> None:
-        """Shared JSON-body plumbing for the four POST /api/network/* actions."""
+        """Shared JSON-body plumbing for the POST /api/network/* actions."""
         body, err = self._read_json_body()
         if err is not None or body is None:
             self._send_json(
@@ -2463,6 +3408,48 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
     def _handle_network_openvpn(self) -> None:
         """POST /api/network/openvpn — import a pasted .ovpn and bring it up."""
         self._handle_network_action(apply_network_openvpn)
+
+    def _handle_network_amnezia(self) -> None:
+        """GET /api/network/amnezia — configured files plus best-effort status."""
+        self._send_json(HTTPStatus.OK, amnezia_overview(self.server.run_cmd))
+
+    def _handle_network_amnezia_up(self) -> None:
+        """POST /api/network/amnezia — write a 0600 config and bring it up."""
+        self._handle_network_action(apply_network_amnezia)
+
+    def _handle_network_amnezia_down(self) -> None:
+        """POST /api/network/amnezia/down — `awg-quick down` one config."""
+        self._handle_network_action(apply_network_amnezia_down)
+
+    def _handle_network_subscription(self) -> None:
+        """POST /api/network/subscription — fetch, decode and bring up."""
+        self._handle_network_action(apply_network_amnezia_subscription)
+
+    def _handle_network_subscription_qr(self) -> None:
+        """GET /api/network/subscription/qr?url=... — SVG QR of the URL."""
+        try:
+            query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+            raw_url = (query.get("url") or [""])[0]
+            svg = render_subscription_qr_svg(raw_url, self.server.run_cmd)
+        except NetworkValidationError as exc:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST, {"ok": False, "message": str(exc)}
+            )
+            return
+        except NetworkUnavailableError as exc:
+            self._send_json(
+                HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "message": str(exc)}
+            )
+            return
+        except Exception:
+            self._send_json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {"ok": False, "message": "Не удалось построить QR-код"},
+            )
+            return
+        self._send_bytes(
+            HTTPStatus.OK, svg.encode("utf-8"), "image/svg+xml; charset=utf-8"
+        )
 
     def _handle_qr_svg(self) -> None:
         session = read_session_state(self.server.state_dir)

@@ -80,6 +80,7 @@
       pppoe: document.getElementById("net-panel-pppoe"),
       wireguard: document.getElementById("net-panel-wireguard"),
       openvpn: document.getElementById("net-panel-openvpn"),
+      amnezia: document.getElementById("net-panel-amnezia"),
     },
     netCurrentFeedback: document.getElementById("net-current-feedback"),
     netCurrentHostname: document.getElementById("net-current-hostname"),
@@ -122,6 +123,24 @@
     netOpenvpnConfig: document.getElementById("net-openvpn-config"),
     netOpenvpnFeedback: document.getElementById("net-openvpn-feedback"),
     btnNetOpenvpnSubmit: document.getElementById("btn-net-openvpn-submit"),
+    netAwgForm: document.getElementById("net-awg-form"),
+    netAwgName: document.getElementById("net-awg-name"),
+    netAwgConfig: document.getElementById("net-awg-config"),
+    netAwgFeedback: document.getElementById("net-awg-feedback"),
+    btnNetAwgSubmit: document.getElementById("btn-net-awg-submit"),
+    btnNetAwgDown: document.getElementById("btn-net-awg-down"),
+    netAwgAvailable: document.getElementById("net-awg-available"),
+    netAwgDir: document.getElementById("net-awg-dir"),
+    netAwgFiles: document.getElementById("net-awg-files"),
+    netAwgIfaces: document.getElementById("net-awg-ifaces"),
+    netAwgShow: document.getElementById("net-awg-show"),
+    netAwgSubForm: document.getElementById("net-awg-sub-form"),
+    netAwgSubUrl: document.getElementById("net-awg-sub-url"),
+    netAwgQr: document.getElementById("net-awg-qr"),
+    netAwgQrFrame: document.getElementById("net-awg-qr-frame"),
+    netAwgQrHint: document.getElementById("net-awg-qr-hint"),
+    btnNetAwgSubLoad: document.getElementById("btn-net-awg-sub-load"),
+    btnNetAwgSubCopy: document.getElementById("btn-net-awg-sub-copy"),
   };
 
   const INTERNET_BANNER_NO_INTERNET =
@@ -616,9 +635,10 @@
   // are wiped from the fields right away. Nothing is ever logged.
 
   const MASKED_LINK_KEY = "••••••••";
-  const NETWORK_TABS = ["current", "ip", "pppoe", "wireguard", "openvpn"];
+  const NETWORK_TABS = ["current", "ip", "pppoe", "wireguard", "openvpn", "amnezia"];
   const DEFAULT_OPENVPN_NAME = "rhm-openvpn";
   const DEFAULT_WIREGUARD_KEEPALIVE = 25;
+  const DEFAULT_AMNEZIAWG_NAME = "rhm-awg";
 
   function setNetworkFeedback(feedbackEl, text, kind) {
     if (!feedbackEl) {
@@ -638,12 +658,16 @@
     setNetworkFeedback(els.netPppoeFeedback, "", "");
     setNetworkFeedback(els.netWgFeedback, "", "");
     setNetworkFeedback(els.netOpenvpnFeedback, "", "");
+    setNetworkFeedback(els.netAwgFeedback, "", "");
   }
 
   function resetNetworkSecretFields() {
     els.netPppoePassword.value = "";
     els.netWgPrivateKey.value = "";
     els.netOpenvpnConfig.value = "";
+    els.netAwgConfig.value = "";
+    els.netAwgSubUrl.value = "";
+    updateAmneziaQr();
   }
 
   function setNetworkTab(tabName) {
@@ -660,6 +684,9 @@
       btn.classList.toggle("is-active", isActive);
       btn.setAttribute("aria-selected", isActive ? "true" : "false");
     });
+    if (target === "amnezia") {
+      loadAmneziaState();
+    }
   }
 
   function renderNetworkLinkKey() {
@@ -895,6 +922,7 @@
     renderNetworkLinkKey();
     clearNetworkFeedback();
     resetNetworkSecretFields();
+    renderAmneziaState({});
     syncNetworkIpMode();
     setNetworkTab("current");
     loadNetworkInfo();
@@ -1027,6 +1055,223 @@
     els.netOpenvpnConfig.value = "";
   }
 
+  // --- AmneziaWG import, subscription and QR ------------------------------
+  // The pasted INI may contain PrivateKey/PresharedKey values: it is only
+  // posted to the local server, wiped after a successful import, and any
+  // status text is redacted before it reaches the DOM.
+
+  function amneziaFileNames(files) {
+    const items = Array.isArray(files) ? files : [];
+    return items
+      .map(function (entry) {
+        if (typeof entry === "string") {
+          return entry;
+        }
+        if (entry && typeof entry === "object") {
+          return entry.name || entry.file || "";
+        }
+        return "";
+      })
+      .filter(Boolean);
+  }
+
+  function amneziaStatusText(status) {
+    if (!status) {
+      return "Статус недоступен";
+    }
+    if (typeof status === "string") {
+      return status.trim() || "Статус недоступен";
+    }
+    const output = typeof status.output === "string" ? status.output.trim() : "";
+    if (output) {
+      return output;
+    }
+    return status.message || "Статус недоступен";
+  }
+
+  function redactAmneziaSecrets(text) {
+    return String(text || "").replace(
+      /^(\s*)(PrivateKey|PresharedKey)(\s*=\s*).*$/gim,
+      function (_line, indent, key, separator) {
+        return indent + key + separator + "[скрыто]";
+      }
+    );
+  }
+
+  function renderAmneziaState(data) {
+    const source = data || {};
+
+    if (source.awg_available === true) {
+      els.netAwgAvailable.textContent = "доступен";
+    } else if (source.awg_available === false) {
+      els.netAwgAvailable.textContent = "недоступен";
+    } else {
+      els.netAwgAvailable.textContent = "—";
+    }
+
+    els.netAwgDir.textContent = source.config_dir || "—";
+
+    const files = amneziaFileNames(source.files);
+    els.netAwgFiles.textContent = files.length > 0 ? files.join(", ") : "нет конфигураций";
+
+    const status = source.status || {};
+    const interfaces = Array.isArray(status.interfaces)
+      ? status.interfaces.filter(Boolean)
+      : [];
+    els.netAwgIfaces.textContent = interfaces.length > 0 ? interfaces.join(", ") : "нет";
+
+    els.netAwgShow.textContent = redactAmneziaSecrets(amneziaStatusText(source.status));
+  }
+
+  async function loadAmneziaState(preserveFeedback) {
+    try {
+      const resp = await fetch("/api/network/amnezia", { cache: "no-store" });
+      let data = {};
+      try {
+        data = await resp.json();
+      } catch (_parseErr) {
+        data = {};
+      }
+      if (!resp.ok || data.ok === false) {
+        renderAmneziaState({});
+        setNetworkFeedback(
+          els.netAwgFeedback,
+          data.message || data.error || "Состояние AmneziaWG недоступно",
+          "is-error"
+        );
+        return;
+      }
+      renderAmneziaState(data);
+      if (!preserveFeedback) {
+        setNetworkFeedback(els.netAwgFeedback, "", "");
+      }
+    } catch (_err) {
+      renderAmneziaState({});
+      setNetworkFeedback(els.netAwgFeedback, "Сервер недоступен", "is-error");
+    }
+  }
+
+  let amneziaQrTimer = null;
+
+  function scheduleAmneziaQr() {
+    if (amneziaQrTimer !== null) {
+      window.clearTimeout(amneziaQrTimer);
+    }
+    amneziaQrTimer = window.setTimeout(function () {
+      amneziaQrTimer = null;
+      updateAmneziaQr();
+    }, 400);
+  }
+
+  function flushAmneziaQr() {
+    if (amneziaQrTimer !== null) {
+      window.clearTimeout(amneziaQrTimer);
+      amneziaQrTimer = null;
+    }
+    updateAmneziaQr();
+  }
+
+  function updateAmneziaQr() {
+    const url = els.netAwgSubUrl.value.trim();
+    if (!url) {
+      els.netAwgQrFrame.classList.add("is-hidden");
+      els.netAwgQr.removeAttribute("src");
+      els.netAwgQrHint.textContent = "QR-код появится после ввода HTTPS-ссылки подписки.";
+      els.netAwgQrHint.classList.remove("is-warn");
+      return;
+    }
+    els.netAwgQr.src = "/api/network/subscription/qr?url=" + encodeURIComponent(url);
+    els.netAwgQrFrame.classList.remove("is-hidden");
+    els.netAwgQrHint.textContent = "QR-код ссылки подписки";
+    els.netAwgQrHint.classList.remove("is-warn");
+  }
+
+  async function submitNetworkAmnezia(event) {
+    event.preventDefault();
+    const name = els.netAwgName.value.trim() || DEFAULT_AMNEZIAWG_NAME;
+    const config = els.netAwgConfig.value.trim();
+    const payload = { name: name, config: config };
+    if (!payload.config) {
+      setNetworkFeedback(els.netAwgFeedback, "Вставьте конфигурацию AmneziaWG", "is-error");
+      return;
+    }
+
+    const ok = await postNetworkJson(
+      "/api/network/amnezia",
+      payload,
+      els.btnNetAwgSubmit,
+      els.netAwgFeedback
+    );
+    if (ok) {
+      els.netAwgConfig.value = "";
+      await loadAmneziaState(true);
+    }
+  }
+
+  async function stopNetworkAmnezia() {
+    const name = els.netAwgName.value.trim() || DEFAULT_AMNEZIAWG_NAME;
+    const payload = { name: name };
+    const ok = await postNetworkJson(
+      "/api/network/amnezia/down",
+      payload,
+      els.btnNetAwgDown,
+      els.netAwgFeedback
+    );
+    if (ok) {
+      await loadAmneziaState(true);
+    }
+  }
+
+  async function submitNetworkSubscription(event) {
+    event.preventDefault();
+    const url = els.netAwgSubUrl.value.trim();
+    const name = els.netAwgName.value.trim() || DEFAULT_AMNEZIAWG_NAME;
+    const payload = { url: url, name: name };
+    if (!payload.url) {
+      setNetworkFeedback(els.netAwgFeedback, "Введите URL подписки", "is-error");
+      return;
+    }
+
+    flushAmneziaQr();
+    const ok = await postNetworkJson(
+      "/api/network/subscription",
+      payload,
+      els.btnNetAwgSubLoad,
+      els.netAwgFeedback
+    );
+    if (ok) {
+      await loadAmneziaState(true);
+    }
+  }
+
+  async function copySubscriptionUrl() {
+    const url = els.netAwgSubUrl.value.trim();
+    if (!url) {
+      setNetworkFeedback(els.netAwgFeedback, "Введите URL подписки", "is-error");
+      return;
+    }
+    let copied = false;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        await navigator.clipboard.writeText(url);
+        copied = true;
+      } catch (_err) {
+        copied = false;
+      }
+    }
+    if (copied) {
+      setNetworkFeedback(els.netAwgFeedback, "Ссылка скопирована", "is-ok");
+      return;
+    }
+    els.netAwgSubUrl.focus();
+    els.netAwgSubUrl.select();
+    setNetworkFeedback(
+      els.netAwgFeedback,
+      "Не удалось скопировать автоматически. Ссылка выделена — нажмите Ctrl+C.",
+      "is-error"
+    );
+  }
+
   const OSK_ROWS_LOWER = [
     ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "_"],
     ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
@@ -1148,6 +1393,21 @@
   els.netPppoeForm.addEventListener("submit", submitNetworkPppoe);
   els.netWgForm.addEventListener("submit", submitNetworkWireguard);
   els.netOpenvpnForm.addEventListener("submit", submitNetworkOpenvpn);
+  els.netAwgForm.addEventListener("submit", submitNetworkAmnezia);
+  els.btnNetAwgDown.addEventListener("click", stopNetworkAmnezia);
+  els.netAwgSubForm.addEventListener("submit", submitNetworkSubscription);
+  els.btnNetAwgSubCopy.addEventListener("click", copySubscriptionUrl);
+  els.netAwgSubUrl.addEventListener("input", scheduleAmneziaQr);
+  els.netAwgQr.addEventListener("load", function () {
+    els.netAwgQrFrame.classList.remove("is-hidden");
+    els.netAwgQrHint.textContent = "QR-код ссылки подписки";
+    els.netAwgQrHint.classList.remove("is-warn");
+  });
+  els.netAwgQr.addEventListener("error", function () {
+    els.netAwgQrFrame.classList.add("is-hidden");
+    els.netAwgQrHint.textContent = "QR-код недоступен: нужна корректная HTTPS-ссылка.";
+    els.netAwgQrHint.classList.add("is-warn");
+  });
   els.btnModalClose.addEventListener("click", closeWifiModal);
   els.btnModalCancel.addEventListener("click", closeWifiModal);
   els.wifiForm.addEventListener("submit", submitWifiConnect);

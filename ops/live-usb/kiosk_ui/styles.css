@@ -562,6 +562,56 @@ body {
   line-height: 1.45;
 }
 
+.net-awg-state {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 0;
+}
+
+.net-awg-show {
+  margin: 0 0 16px;
+  padding: 12px 16px;
+  min-height: 48px;
+  background-color: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+.net-awg-qr-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.net-qr-frame {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #ffffff;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.net-qr-image {
+  display: block;
+  width: 180px;
+  height: 180px;
+}
+
+.net-awg-qr-side {
+  display: flex;
+  flex: 1 1 240px;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .feedback-line.is-ok {
   color: var(--ok-text);
 }

@@ -206,6 +206,7 @@
         <button type="button" class="tab-btn" id="net-tab-pppoe" data-network-tab="pppoe" role="tab" aria-selected="false" aria-controls="net-panel-pppoe">PPPoE</button>
         <button type="button" class="tab-btn" id="net-tab-wireguard" data-network-tab="wireguard" role="tab" aria-selected="false" aria-controls="net-panel-wireguard">WireGuard</button>
         <button type="button" class="tab-btn" id="net-tab-openvpn" data-network-tab="openvpn" role="tab" aria-selected="false" aria-controls="net-panel-openvpn">OpenVPN</button>
+        <button type="button" class="tab-btn" id="net-tab-amnezia" data-network-tab="amnezia" role="tab" aria-selected="false" aria-controls="net-panel-amnezia">AmneziaWG</button>
       </div>
 
       <section id="net-panel-current" class="network-panel" role="tabpanel" aria-labelledby="net-tab-current">
@@ -387,6 +388,72 @@
 
           <div class="modal-actions">
             <button type="submit" class="btn btn-primary" id="btn-net-openvpn-submit">Импортировать OpenVPN</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="net-panel-amnezia" class="network-panel is-hidden" role="tabpanel" aria-labelledby="net-tab-amnezia">
+        <h3 class="net-subheading">Текущее состояние</h3>
+        <div class="net-awg-state">
+          <div class="net-kv">
+            <span class="net-k">AmneziaWG (awg-quick)</span>
+            <span id="net-awg-available" class="net-v">—</span>
+          </div>
+          <div class="net-kv">
+            <span class="net-k">Каталог конфигураций</span>
+            <span id="net-awg-dir" class="net-v mono">—</span>
+          </div>
+          <div class="net-kv">
+            <span class="net-k">Конфигурации</span>
+            <span id="net-awg-files" class="net-v mono">нет конфигураций</span>
+          </div>
+          <div class="net-kv">
+            <span class="net-k">Интерфейсы</span>
+            <span id="net-awg-ifaces" class="net-v mono">нет</span>
+          </div>
+        </div>
+        <pre id="net-awg-show" class="net-awg-show mono">Статус недоступен</pre>
+
+        <div id="net-awg-feedback" class="feedback-line is-hidden" role="status"></div>
+
+        <h3 class="net-subheading">Импорт AmneziaWG</h3>
+        <form id="net-awg-form" class="modal-form" autocomplete="off">
+          <div class="field-group">
+            <label class="field-label" for="net-awg-name">Имя подключения</label>
+            <input id="net-awg-name" name="name" type="text" class="text-input mono" value="rhm-awg" placeholder="rhm-awg">
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="net-awg-config">Конфигурация AmneziaWG (INI)</label>
+            <textarea id="net-awg-config" name="config" class="text-input text-area mono" rows="10" spellcheck="false"
+              placeholder="[Interface]&#10;Address = 10.8.0.2/32&#10;...&#10;[Peer]&#10;Endpoint = vpn.example.org:51820"></textarea>
+            <span class="field-hint">Формат: INI с секциями [Interface] и [Peer]. Конфигурация содержит закрытые ключи, отправляется только локальному серверу и очищается из формы после успешного импорта.</span>
+          </div>
+
+          <div class="modal-actions">
+            <button type="button" class="btn btn-secondary" id="btn-net-awg-down">Остановить</button>
+            <button type="submit" class="btn btn-primary" id="btn-net-awg-submit">Поднять AmneziaWG</button>
+          </div>
+        </form>
+
+        <h3 class="net-subheading">Подписка</h3>
+        <form id="net-awg-sub-form" class="modal-form" autocomplete="off">
+          <div class="field-group">
+            <label class="field-label" for="net-awg-sub-url">URL подписки (HTTPS)</label>
+            <input id="net-awg-sub-url" name="url" type="url" class="text-input mono" placeholder="https://sub.example.com/awg" autocomplete="off">
+          </div>
+
+          <div class="net-awg-qr-row">
+            <div id="net-awg-qr-frame" class="net-qr-frame is-hidden">
+              <img id="net-awg-qr" class="net-qr-image" alt="QR-код ссылки подписки">
+            </div>
+            <div class="net-awg-qr-side">
+              <span id="net-awg-qr-hint" class="field-hint">QR-код появится после ввода HTTPS-ссылки подписки.</span>
+              <div class="modal-actions">
+                <button type="button" class="btn btn-secondary" id="btn-net-awg-sub-copy">Скопировать ссылку</button>
+                <button type="submit" class="btn btn-primary" id="btn-net-awg-sub-load">Загрузить подписку</button>
+              </div>
+            </div>
           </div>
         </form>
       </section>

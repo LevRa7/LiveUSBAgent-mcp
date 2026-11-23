@@ -102,7 +102,8 @@ PYEOF
 
 check_assets() {
     local rel_path package token output
-    local package_text unit_text grub_text
+    local package_text unit_text grub_text hook_text
+    local hook_rel="ops/live-usb/hooks/0100-build-apfs-and-drivers.hook.chroot"
     local -a required_files=(
         "core/agent.py"
         "core/rescue.py"
@@ -156,8 +157,28 @@ check_assets() {
         # Kiosk GUI «Настройки сети»: PPPoE, WireGuard and OpenVPN tooling
         ppp
         wireguard-tools
+        openresolv
         openvpn
         network-manager-openvpn
+        # AmneziaWG build deps: awg/awg-quick need libmnl + pkg-config, and the
+        # kernel module build needs libelf. Debian 13 ships no amneziawg-tools
+        # package, so both halves are compiled in the 0100 chroot hook.
+        libmnl-dev
+        libelf-dev
+        pkg-config
+    )
+    # Markers the 0100 chroot hook must keep so awg/awg-quick and the unsigned
+    # DKMS kernel module really reach the image.
+    local -a amneziawg_hook_tokens=(
+        "amneziawg-tools.git"
+        "amneziawg-linux-kernel-module.git"
+        "/usr/local/bin/awg"
+        "/usr/local/bin/awg-quick"
+        "dkms.conf"
+        "dkms add"
+        "dkms build"
+        "dkms install"
+        "Secure Boot"
     )
     local -a unit_tokens=(
         "core.agent --ephemeral-liveusb"
@@ -246,7 +267,30 @@ check_assets() {
         done
     fi
 
+    echo "[check] AmneziaWG chroot hook (source-built awg/awg-quick + DKMS module)"
+    if [[ ! -s "${REPO_ROOT}/${hook_rel}" ]]; then
+        check_fail "0100 hook missing; cannot verify the AmneziaWG build"
+    else
+        hook_text="$(<"${REPO_ROOT}/${hook_rel}")"
+        for token in "${amneziawg_hook_tokens[@]}"; do
+            if grep -qF -e "${token}" <<<"${hook_text}"; then
+                check_pass "0100 hook contains: ${token}"
+            else
+                check_fail "0100 hook is missing: ${token}"
+            fi
+        done
+    fi
+
+    # Debian 13 (trixie) has no amneziawg-tools package: the tools are built from
+    # source in the hook. An apt entry would fail the whole live-build.
+    if [[ -n "${package_text:-}" ]] && grep -qxF -e "amneziawg-tools" <<<"${package_text}"; then
+        check_fail "package list declares amneziawg-tools, which Debian 13 does not ship"
+    else
+        check_pass "no amneziawg-tools apt package declared (built from source in the 0100 hook)"
+    fi
+
     echo
+
     if [[ "${CHECK_FAILED}" -eq 0 ]]; then
         printf 'PASS: %d asset checks passed (root and live-build not required)\n' "${CHECK_TOTAL}"
         return 0
@@ -345,6 +389,12 @@ build-essential
 cmake
 git
 pkg-config
+# AmneziaWG build deps: libmnl-dev/libmnl, libelf-dev (Debian's out-of-tree
+# module builds expect it) and pkg-config (the tools Makefile probes it for the
+# systemd unit dir). Debian 13 (trixie) has no amneziawg-tools / amneziawg-dkms
+# package, so both halves are compiled in the 0100 chroot hook instead.
+libmnl-dev
+libelf-dev
 libfuse3-dev
 libbz2-dev
 libattr1-dev
@@ -364,6 +414,7 @@ libimobiledevice-utils
 ipheth-utils
 ifuse
 wireguard-tools
+openresolv
 openssh-client
 curl
 ca-certificates

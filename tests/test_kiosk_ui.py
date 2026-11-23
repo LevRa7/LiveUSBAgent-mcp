@@ -14,7 +14,10 @@ markup/JS contract the kiosk server and the UX plan rely on:
   ``session.ready`` and respects an explicit operator choice;
 * the network view carries a «Настройки сети» dialog with the five documented
   tabs, the ``/api/network`` read-only snapshot with a masked link key, and the
-  four JSON editors for IP/DNS, PPPoE, WireGuard and OpenVPN.
+  four JSON editors for IP/DNS, PPPoE, WireGuard and OpenVPN;
+* a sixth «AmneziaWG» tab imports an AmneziaWG INI, stops a configured tunnel,
+  loads a subscription URL, shows its QR code and copies the link, without
+  ever rendering private/preshared keys.
 
 No browser is required: every assertion is a static contract over the shipped
 files.
@@ -592,6 +595,232 @@ def test_network_settings_styles_reuse_existing_tokens(css_text: str) -> None:
     assert ".feedback-line.is-ok" in css_text
     assert ".feedback-line.is-error" in css_text
     assert "150ms ease-out" in css_text
+    assert "linear-gradient" not in css_text
+    assert "radial-gradient" not in css_text
+    assert "transition: all" not in css_text
+
+
+# --- AmneziaWG tab (docs/plans/2026-11-23-amneziawg.md) ----------------------
+
+AMNEZIA_PANEL_MARKER = 'id="net-panel-amnezia"'
+
+
+@pytest.fixture(scope="module")
+def amnezia_panel(network_modal: str) -> str:
+    """Markup of the AmneziaWG settings panel only."""
+    assert AMNEZIA_PANEL_MARKER in network_modal, "AmneziaWG settings panel is missing"
+    tail = network_modal.split(AMNEZIA_PANEL_MARKER, 1)[1]
+    return AMNEZIA_PANEL_MARKER + tail.split("<!-- /network-settings -->", 1)[0]
+
+
+def flat_source(text: str) -> str:
+    """Whitespace-insensitive view of a source file for wrapped calls."""
+    return re.sub(r"\s+", " ", text)
+
+
+def function_slice(js_text: str, start: str, end: str) -> str:
+    """Slice one JS function out of app.js between two boundary markers."""
+    _head, sep, rest = js_text.partition(start)
+    assert sep, f"Missing JS function: {start}"
+    body, sep, _tail = rest.partition(end)
+    assert sep, f"Missing JS boundary after {start}: {end}"
+    return body
+
+
+def test_network_settings_has_amneziawg_tab_after_openvpn(
+    network_modal: str, amnezia_panel: str, js_text: str
+) -> None:
+    """«AmneziaWG» is a sixth tab placed right after OpenVPN."""
+    assert 'id="net-tab-amnezia"' in network_modal
+    assert 'data-network-tab="amnezia"' in network_modal
+    assert 'aria-controls="net-panel-amnezia"' in network_modal
+    assert "AmneziaWG" in network_modal
+    assert 'id="net-panel-amnezia" class="network-panel is-hidden"' in network_modal
+    assert 'role="tabpanel"' in amnezia_panel
+    assert network_modal.index('id="net-tab-openvpn"') < network_modal.index(
+        'id="net-tab-amnezia"'
+    )
+
+    assert 'amnezia: document.getElementById("net-panel-amnezia")' in js_text
+    assert '"amnezia"' in js_text
+    assert "loadAmneziaState" in js_text
+    assert "async function loadAmneziaState(preserveFeedback)" in js_text
+    # Opening the tab refreshes the live state exactly once per activation.
+    assert re.search(
+        r'if \(target === "amnezia"\) \{\s*loadAmneziaState\(\);\s*\}', js_text
+    )
+
+
+def test_amneziawg_form_posts_exact_bodies(
+    html_text: str, amnezia_panel: str, js_text: str
+) -> None:
+    """Name + INI textarea + raise/stop buttons post the documented bodies."""
+    for element_id in (
+        "net-awg-form",
+        "net-awg-name",
+        "net-awg-config",
+        "net-awg-feedback",
+        "btn-net-awg-submit",
+        "btn-net-awg-down",
+    ):
+        assert f'id="{element_id}"' in amnezia_panel, f"Missing AmneziaWG field: {element_id}"
+
+    name_tag = html_tag(amnezia_panel, "net-awg-name")
+    assert 'value="rhm-awg"' in name_tag, "AmneziaWG name must default to rhm-awg"
+
+    textarea_tag = html_tag(amnezia_panel, "net-awg-config")
+    assert textarea_tag.startswith("<textarea")
+    assert 'name="config"' in textarea_tag
+    assert "value=" not in textarea_tag
+    # The panel teaches the INI shape without shipping secret key names.
+    assert "[Interface]" in amnezia_panel
+    assert "[Peer]" in amnezia_panel
+
+    assert 'type="submit"' in html_tag(amnezia_panel, "btn-net-awg-submit")
+    assert "Поднять AmneziaWG" in amnezia_panel
+    assert 'type="button"' in html_tag(amnezia_panel, "btn-net-awg-down")
+    assert "Остановить" in amnezia_panel
+
+    flat_js = flat_source(js_text)
+    assert "DEFAULT_AMNEZIAWG_NAME" in js_text
+    assert 'const payload = { name: name, config: config };' in flat_js
+    assert 'const payload = { name: name };' in flat_js
+    assert 'postNetworkJson( "/api/network/amnezia", payload' in flat_js
+    assert 'postNetworkJson( "/api/network/amnezia/down", payload' in flat_js
+    assert 'els.netAwgForm.addEventListener("submit", submitNetworkAmnezia)' in js_text
+    assert 'els.btnNetAwgDown.addEventListener("click", stopNetworkAmnezia)' in js_text
+    # Both editors live in the same dialog as every other settings tab.
+    assert html_text.count('id="network-settings-backdrop"') == 1
+
+
+def test_amneziawg_subscription_qr_uses_encoded_url(
+    amnezia_panel: str, js_text: str
+) -> None:
+    """Subscription URL, QR endpoint and copy button share one encoded URL."""
+    for element_id in (
+        "net-awg-sub-form",
+        "net-awg-sub-url",
+        "btn-net-awg-sub-load",
+        "btn-net-awg-sub-copy",
+        "net-awg-qr",
+        "net-awg-qr-hint",
+    ):
+        assert f'id="{element_id}"' in amnezia_panel, f"Missing subscription field: {element_id}"
+
+    assert 'type="url"' in html_tag(amnezia_panel, "net-awg-sub-url")
+    assert "Загрузить подписку" in amnezia_panel
+    assert "Скопировать ссылку" in amnezia_panel
+    qr_tag = html_tag(amnezia_panel, "net-awg-qr")
+    assert qr_tag.startswith("<img")
+    assert "QR" in qr_tag
+
+    assert 'els.netAwgQr.src = "/api/network/subscription/qr?url=" + encodeURIComponent(url);' in js_text
+    assert "encodeURIComponent" in js_text
+    # The previous QR must not keep the subscription URL in the DOM after close.
+    assert 'els.netAwgQr.removeAttribute("src");' in js_text
+    flat_js = flat_source(js_text)
+    assert 'const payload = { url: url, name: name };' in flat_js
+    assert 'postNetworkJson( "/api/network/subscription", payload' in flat_js
+    assert "navigator.clipboard.writeText" in js_text
+    assert "copySubscriptionUrl" in js_text
+    assert 'els.netAwgSubUrl.addEventListener("input", scheduleAmneziaQr)' in js_text
+    assert "scheduleAmneziaQr" in js_text
+    assert "window.setTimeout" in js_text
+    assert "window.clearTimeout" in js_text
+    assert 'els.btnNetAwgSubCopy.addEventListener("click", copySubscriptionUrl)' in js_text
+    assert 'els.netAwgSubForm.addEventListener("submit", submitNetworkSubscription)' in js_text
+
+
+def test_amneziawg_tab_renders_live_state(amnezia_panel: str, js_text: str) -> None:
+    """GET /api/network/amnezia fills availability, files, interfaces and show."""
+    for element_id in (
+        "net-awg-available",
+        "net-awg-dir",
+        "net-awg-files",
+        "net-awg-ifaces",
+        "net-awg-show",
+    ):
+        assert f'id="{element_id}"' in amnezia_panel, f"Missing live-state element: {element_id}"
+
+    assert 'fetch("/api/network/amnezia"' in js_text
+    render = function_slice(
+        js_text, "function renderAmneziaState", "async function loadAmneziaState"
+    )
+    for field in ("source.awg_available", "source.config_dir", "source.files", "source.status"):
+        assert field in render, f"Live state field not rendered: {field}"
+    assert "amneziaFileNames" in js_text
+    assert "redactAmneziaSecrets(amneziaStatusText(source.status))" in render
+    assert "textContent" in render
+    assert "innerHTML" not in render
+    # A failing snapshot still reaches the operator as an error line.
+    assert 'setNetworkFeedback(els.netAwgFeedback' in js_text
+    assert 'data.message || data.error || "Состояние AmneziaWG недоступно"' in js_text
+
+
+def test_amneziawg_clears_config_after_success_and_never_renders_keys(
+    amnezia_panel: str, js_text: str
+) -> None:
+    """A successful import wipes the INI; key material is never rendered."""
+    submit = function_slice(
+        js_text, "async function submitNetworkAmnezia", "async function stopNetworkAmnezia"
+    )
+    assert re.search(r'if \(ok\) \{\s*els\.netAwgConfig\.value = "";', submit), (
+        "The INI textarea must be cleared only after a successful POST"
+    )
+    reset = function_slice(
+        js_text, "function resetNetworkSecretFields", "function setNetworkTab"
+    )
+    assert 'els.netAwgConfig.value = ""' in reset
+    assert 'els.netAwgSubUrl.value = ""' in reset
+
+    render = function_slice(
+        js_text, "function renderAmneziaState", "async function loadAmneziaState"
+    )
+    assert "netAwgConfig" not in render
+    assert "netAwgShow.innerHTML" not in js_text
+
+    redact = function_slice(
+        js_text, "function redactAmneziaSecrets", "function renderAmneziaState"
+    )
+    assert "PrivateKey" in redact
+    assert "PresharedKey" in redact
+    # Secret key names never appear in the shipped markup: the tab only warns.
+    assert "PrivateKey" not in amnezia_panel
+    assert "PresharedKey" not in amnezia_panel
+    assert "закрытые ключи" in amnezia_panel
+
+
+def test_amneziawg_feedback_states_and_busy_buttons(
+    amnezia_panel: str, js_text: str
+) -> None:
+    """Every action reports through one is-ok/is-error line and locks its button."""
+    assert 'id="net-awg-feedback" class="feedback-line is-hidden"' in amnezia_panel
+    assert 'role="status"' in html_tag(amnezia_panel, "net-awg-feedback")
+
+    flat_js = flat_source(js_text)
+    assert 'els.btnNetAwgSubmit, els.netAwgFeedback' in flat_js
+    assert 'els.btnNetAwgDown, els.netAwgFeedback' in flat_js
+    assert 'els.btnNetAwgSubLoad, els.netAwgFeedback' in flat_js
+    assert 'setNetworkFeedback(els.netAwgFeedback, "Ссылка скопирована", "is-ok")' in js_text
+    # A successful action keeps its message while the status block refreshes.
+    assert js_text.count("loadAmneziaState(true)") == 3
+    assert "preserveFeedback" in js_text
+    assert "postNetworkJson" in js_text
+    assert "button.disabled = true" in js_text
+    assert "button.disabled = false" in js_text
+
+
+def test_amneziawg_styles_reuse_existing_tokens(css_text: str) -> None:
+    """The new surfaces use the same palette and 150ms ease-out motion."""
+    for selector in (
+        ".net-awg-state",
+        ".net-awg-show",
+        ".net-awg-qr-row",
+        ".net-qr-frame",
+        ".net-qr-image",
+        ".net-awg-qr-side",
+    ):
+        assert selector in css_text, f"Missing AmneziaWG style: {selector}"
     assert "linear-gradient" not in css_text
     assert "radial-gradient" not in css_text
     assert "transition: all" not in css_text

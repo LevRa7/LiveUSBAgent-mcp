@@ -21,10 +21,10 @@
 | Область | Было | Стало |
 | :--- | :--- | :--- |
 | Rescue-API | 5 секций и 4 действия не реализованы | все 12 секций и 11 действий |
-| Тесты | 5 failed / 1756 passed | **0 failed / 1952 passed / 8 skipped** |
+| Тесты | 5 failed / 1756 passed | **0 failed / 2025 passed / 8 skipped** |
 | Версия | 0.6.0 | **0.1.0** |
 | ISO | не собран | **1.5 ГБ, собран и загружен в QEMU** |
-| `--check` | отсутствовал | **54/54 PASS** |
+| `--check` | отсутствовал | **68/68 PASS** |
 | Kiosk terminal | не было | кнопка + `xterm` + `DISPLAY` |
 | CI/docs | неполные | LiveUSB CI, `docs/liveusb/*`, release notes |
 
@@ -120,10 +120,10 @@ APFS: `apfs-fuse` собран и установлен; DKMS-модуль `linux
 
 | Проверка | Результат |
 | :--- | :--- |
-| `py -m pytest tests -q` | **1952 passed, 8 skipped, 0 failed** |
+| `py -m pytest tests -q` | **2025 passed, 8 skipped, 0 failed** |
 | `tests/test_rescue.py` | 155 passed |
 | `tests/test_liveusb_iso_pipeline.py` | 24 passed |
-| `build-iso.sh --check` | **54/54 PASS**, exit 0 |
+| `build-iso.sh --check` | **68/68 PASS**, exit 0 |
 | `bash -n` build-iso / start-kiosk / hook | exit 0 |
 | `compileall`, `node --check app.js` | exit 0 |
 

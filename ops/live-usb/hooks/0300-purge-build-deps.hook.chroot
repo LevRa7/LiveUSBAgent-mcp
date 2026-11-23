@@ -42,6 +42,9 @@ build_only=(
     libbz2-dev
     libattr1-dev
     zlib1g-dev
+    libmnl-dev
+    libelf-dev
+    pkg-config
 )
 log "Purging build-only packages: ${build_only[*]}"
 if ! DEBIAN_FRONTEND=noninteractive apt-get purge -y --auto-remove "${build_only[@]}"; then

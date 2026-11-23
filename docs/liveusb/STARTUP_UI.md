@@ -105,7 +105,21 @@ The default public domain is now
 `racknerd-5a24bf9.merino-carob.ts.net` — the old domain is gone from the
 active code, docs and tests.
 
-## 7. The same UI on the built ISO
+## 7. AmneziaWG and subscriptions
+
+![AmneziaWG tab](images/network-settings-amnezia.png)
+
+The **AmneziaWG** tab accepts the AmneziaWG INI (`Jc/Jmin/Jmax/S1/S2/H1-H4`),
+shows `awg show` status, starts/stops through `awg-quick`, and imports a
+subscription URL over HTTPS. A plain config or base64/base64url-encoded config
+is accepted; the subscription URL is also rendered as a QR that a phone can
+scan. Private and preshared keys are never returned or rendered.
+
+The ISO builds `awg`/`awg-quick` and the unsigned AmneziaWG kernel module in
+the chroot hook (warns and continues if a source build fails). Secure Boot must
+be off for the module.
+
+## 8. The same UI on the built ISO
 
 ![Kiosk running from the built ISO](images/kiosk-image-pending.png)
 

@@ -4,6 +4,8 @@
 #   - Detects chroot kernel version(s) under /lib/modules/ (never uses host uname -r)
 #   - Builds installed DKMS modules (apfs-dkms, zfs-dkms) against chroot kernel headers
 #   - Builds & installs apfs-fuse into /usr/local/bin/apfs-fuse
+#   - Builds & installs AmneziaWG: awg/awg-quick from source into /usr/local/bin and
+#     the (UNSIGNED) amneziawg kernel module through DKMS for every chroot kernel
 #   - Optionally installs broadcom-sta-dkms while preserving brcmfmac for modern chips
 #   - Configures /etc/modules-load.d/rhm-liveusb.conf (graceful non-fatal loading)
 #   - Enables NetworkManager.service, usbmuxd.service, and rhm-live-agent.service
@@ -91,7 +93,255 @@ build_apfs_fuse() {
     rm -rf "${tmp_dir}"
 }
 
-# 4. Optional broadcom-sta-dkms (preserving brcmfmac for newer Broadcom chips)
+# 4. AmneziaWG (obfuscated WireGuard): build awg / awg-quick from source and
+#    install the out-of-tree kernel module through DKMS.
+#
+#    Debian 13 (trixie) ships no amneziawg-tools / amneziawg-dkms package, so
+#    both halves are compiled here. Layout checked against upstream HEAD:
+#      - amneziawg-tools has no top-level Makefile: build in src/. That build
+#        names the binary "wg" and the install target renames it to awg, while
+#        awg-quick is generated from wg-quick/linux.bash. src/Makefile installs
+#        awg-quick only when its $(BINDIR)/bash probe succeeds, so WITH_WGQUICK
+#        is passed explicitly.
+#      - amneziawg-linux-kernel-module also has no top-level Makefile and no
+#        top-level dkms.conf: src/ holds the Kbuild plus src/dkms.conf, and its
+#        own `make -C src dkms-install` flattens source + dkms.conf into
+#        /usr/src/amneziawg-<version>, the layout DKMS expects.
+#
+#    Every step below warns and continues: a failed source build must never
+#    abort the ISO. The kiosk then reports awg_available=false and the plain
+#    WireGuard tab keeps working.
+#
+#    SECURE BOOT: the amneziawg kernel module is UNSIGNED. When Secure Boot is
+#    enforcing, the kernel refuses to load it and `awg-quick up` fails with
+#    "Operation not permitted" even though awg/awg-quick are installed. The user
+#    must either disable Secure Boot, sign the module and enroll a MOK, or fall
+#    back to plain WireGuard.
+AMNEZIAWG_TOOLS_REPO="https://github.com/amnezia-vpn/amneziawg-tools.git"
+AMNEZIAWG_MODULE_REPO="https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git"
+# Fallback DKMS identity, used only when the module tree ships no dkms.conf.
+AMNEZIAWG_VERSION="1.0.0"
+
+build_amneziawg_tools() {
+    if ! command -v git >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
+        warn "git or make missing; skipping the AmneziaWG userspace build."
+        return 0
+    fi
+
+    local tmp_dir="/tmp/rhm-build-amneziawg-tools"
+    local stage="${tmp_dir}/stage"
+    rm -rf "${tmp_dir}"
+    log "Cloning amneziawg-tools..."
+    if ! git clone --depth 1 "${AMNEZIAWG_TOOLS_REPO}" "${tmp_dir}"; then
+        warn "Failed to clone amneziawg-tools; awg/awg-quick will be missing."
+        rm -rf "${tmp_dir}"
+        return 0
+    fi
+
+    if [[ ! -f "${tmp_dir}/src/Makefile" ]]; then
+        warn "amneziawg-tools layout changed (no src/Makefile); awg/awg-quick will be missing."
+        rm -rf "${tmp_dir}"
+        return 0
+    fi
+
+    log "Building amneziawg-tools (awg, awg-quick)..."
+    if ! make -C "${tmp_dir}/src" WITH_WGQUICK=yes; then
+        warn "amneziawg-tools build failed; awg/awg-quick will be missing."
+        rm -rf "${tmp_dir}"
+        return 0
+    fi
+
+    # Stage `make install` under DESTDIR and copy the two binaries explicitly, so
+    # an upstream PREFIX/destination change cannot leave them outside the
+    # directory the kiosk resolves through PATH.
+    mkdir -p "${stage}" /usr/local/bin
+    if make -C "${tmp_dir}/src" install DESTDIR="${stage}" PREFIX=/usr WITH_WGQUICK=yes >/dev/null 2>&1; then
+        log "amneziawg-tools 'make install' staged into ${stage}."
+    else
+        warn "amneziawg-tools 'make install' failed; installing the built binaries directly."
+    fi
+
+    if [[ -f "${stage}/usr/bin/awg" ]]; then
+        install -m 0755 "${stage}/usr/bin/awg" /usr/local/bin/awg
+    elif [[ -f "${stage}/usr/local/bin/awg" ]]; then
+        install -m 0755 "${stage}/usr/local/bin/awg" /usr/local/bin/awg
+    elif [[ -f "${tmp_dir}/src/wg" ]]; then
+        # The tools build names the binary "wg"; upstream installs it as "awg".
+        install -m 0755 "${tmp_dir}/src/wg" /usr/local/bin/awg
+    else
+        warn "awg binary not found after the build; awg will be missing from the image."
+    fi
+
+    if [[ -f "${stage}/usr/bin/awg-quick" ]]; then
+        install -m 0755 "${stage}/usr/bin/awg-quick" /usr/local/bin/awg-quick
+    elif [[ -f "${stage}/usr/local/bin/awg-quick" ]]; then
+        install -m 0755 "${stage}/usr/local/bin/awg-quick" /usr/local/bin/awg-quick
+    elif [[ -f "${tmp_dir}/src/wg-quick/linux.bash" ]]; then
+        install -m 0755 "${tmp_dir}/src/wg-quick/linux.bash" /usr/local/bin/awg-quick
+    else
+        warn "awg-quick binary not found after the build; awg-quick will be missing from the image."
+    fi
+
+    # Config home the kiosk writes into. The staged `make install` only creates
+    # it below $DESTDIR, so create the real one (0700, as upstream does).
+    mkdir -p -m 0700 /etc/amnezia/amneziawg || warn "could not create /etc/amnezia/amneziawg"
+
+    if [[ -x /usr/local/bin/awg && -x /usr/local/bin/awg-quick ]]; then
+        log "Installed /usr/local/bin/awg and /usr/local/bin/awg-quick."
+    else
+        warn "AmneziaWG userspace incomplete; the AmneziaWG tab will report awg_available=false."
+    fi
+
+    # libmnl0 arrives as a dependency of the libmnl-dev build dep that
+    # 0300-purge-build-deps.hook.chroot purges. awg revisions that link libmnl
+    # would break if `apt-get purge --auto-remove` took libmnl0 with it, so keep
+    # the runtime library pinned even though the current tree links libc only.
+    if dpkg-query -W -f='${Status}' libmnl0 2>/dev/null | grep -q "install ok installed"; then
+        apt-mark manual libmnl0 >/dev/null 2>&1 || warn "could not mark libmnl0 manual"
+    fi
+
+    rm -rf "${tmp_dir}"
+    return 0
+}
+
+# Read a KEY="value" assignment out of a dkms.conf (empty when the key is absent).
+dkms_conf_field() {
+    local conf="$1"
+    local key="$2"
+    sed -n "s/^[[:space:]]*${key}=[\"']\{0,1\}\([^\"']*\)[\"']\{0,1\}[[:space:]]*$/\1/p" "${conf}" 2>/dev/null | head -n 1
+}
+
+build_amneziawg_module() {
+    if [[ ${#KVERSIONS[@]} -eq 0 ]]; then
+        warn "No chroot kernel version found; skipping the AmneziaWG kernel module."
+        return 0
+    fi
+    if ! command -v dkms >/dev/null 2>&1; then
+        warn "dkms missing; skipping the AmneziaWG kernel module."
+        return 0
+    fi
+    if ! command -v git >/dev/null 2>&1; then
+        warn "git missing; skipping the AmneziaWG kernel module."
+        return 0
+    fi
+
+    local tmp_dir="/tmp/rhm-build-amneziawg-module"
+    local pkg_name="amneziawg"
+    local version="${AMNEZIAWG_VERSION}"
+    local src_dir=""
+    local kver
+    local candidate
+    local declared
+    local built=0
+
+    rm -rf "${tmp_dir}"
+    log "Cloning amneziawg-linux-kernel-module..."
+    if ! git clone --depth 1 "${AMNEZIAWG_MODULE_REPO}" "${tmp_dir}"; then
+        warn "Failed to clone amneziawg-linux-kernel-module; the awg kernel module will be missing."
+        rm -rf "${tmp_dir}"
+        return 0
+    fi
+
+    if [[ ! -d "${tmp_dir}/src" ]]; then
+        warn "amneziawg module layout changed (no src/ directory); skipping the kernel module."
+        rm -rf "${tmp_dir}"
+        return 0
+    fi
+
+    # Preferred path: upstream's own packaging target, which flattens src/
+    # (Kbuild, sources, dkms.conf) into /usr/src/amneziawg-<version>.
+    if grep -qs '^dkms-install:' "${tmp_dir}/src/Makefile"; then
+        log "Staging the amneziawg module with the upstream dkms-install target..."
+        if ! make -C "${tmp_dir}/src" dkms-install; then
+            warn "'make dkms-install' failed; using a manual DKMS layout instead."
+        fi
+    fi
+    for candidate in /usr/src/amneziawg-*/dkms.conf; do
+        if [[ -f "${candidate}" ]]; then
+            src_dir="$(dirname "${candidate}")"
+            break
+        fi
+    done
+
+    # Fallback: reproduce that flattened layout by hand. Flattening src/ to the
+    # package root is what makes DKMS's default kbuild invocation find Kbuild.
+    if [[ -z "${src_dir}" ]]; then
+        if [[ -f "${tmp_dir}/src/dkms.conf" ]]; then
+            declared="$(dkms_conf_field "${tmp_dir}/src/dkms.conf" PACKAGE_VERSION)"
+            if [[ -n "${declared}" ]]; then
+                version="${declared}"
+            fi
+            declared="$(dkms_conf_field "${tmp_dir}/src/dkms.conf" PACKAGE_NAME)"
+            if [[ -n "${declared}" ]]; then
+                pkg_name="${declared}"
+            fi
+        fi
+        src_dir="/usr/src/${pkg_name}-${version}"
+        rm -rf "${src_dir}"
+        mkdir -p "${src_dir}"
+        if ! cp -a "${tmp_dir}/src/." "${src_dir}/"; then
+            warn "Could not stage the amneziawg module sources into ${src_dir}."
+            rm -rf "${tmp_dir}" "${src_dir}"
+            return 0
+        fi
+        if [[ ! -f "${src_dir}/dkms.conf" ]]; then
+            log "amneziawg module tree has no dkms.conf; writing a minimal one."
+            cat <<EOF > "${src_dir}/dkms.conf"
+PACKAGE_NAME="${pkg_name}"
+PACKAGE_VERSION="${version}"
+BUILT_MODULE_NAME[0]="amneziawg"
+BUILT_MODULE_LOCATION[0]=""
+DEST_MODULE_LOCATION[0]="/kernel/net"
+AUTOINSTALL="yes"
+EOF
+        fi
+    fi
+    rm -rf "${tmp_dir}"
+
+    # Honour whatever identity the installed dkms.conf declares, so `dkms add`
+    # cannot disagree with it (a mismatch would skip the build silently).
+    if [[ -f "${src_dir}/dkms.conf" ]]; then
+        declared="$(dkms_conf_field "${src_dir}/dkms.conf" PACKAGE_VERSION)"
+        if [[ -n "${declared}" ]]; then
+            version="${declared}"
+        fi
+        declared="$(dkms_conf_field "${src_dir}/dkms.conf" PACKAGE_NAME)"
+        if [[ -n "${declared}" ]]; then
+            pkg_name="${declared}"
+        fi
+        log "Using the DKMS identity ${pkg_name} ${version} from ${src_dir}/dkms.conf."
+    fi
+
+    if ! dkms add -m "${pkg_name}" -v "${version}"; then
+        warn "dkms add ${pkg_name} failed; trying to build it anyway in case it is already registered."
+    fi
+
+    for kver in "${KVERSIONS[@]}"; do
+        if [[ ! -d "/lib/modules/${kver}/build" ]]; then
+            warn "Kernel headers missing at /lib/modules/${kver}/build; skipping the AmneziaWG module for ${kver}."
+            continue
+        fi
+        log "DKMS build/install amneziawg for kernel ${kver}..."
+        if ! dkms build -m "${pkg_name}" -v "${version}" -k "${kver}"; then
+            warn "dkms build ${pkg_name} failed for ${kver}; awg userspace is still installed."
+            continue
+        fi
+        # --force: replace a module the live kernel may already have loaded.
+        if dkms install -m "${pkg_name}" -v "${version}" -k "${kver}" --force; then
+            built=$((built + 1))
+            log "Installed the amneziawg kernel module for ${kver} (unsigned; needs Secure Boot off)."
+        else
+            warn "dkms install ${pkg_name} failed for ${kver}; the module may be missing at runtime."
+        fi
+    done
+
+    if [[ "${built}" -eq 0 ]]; then
+        warn "No amneziawg kernel module was installed; AmneziaWG cannot bring an interface up without it."
+    fi
+    return 0
+}
+
+# 5. Optional broadcom-sta-dkms (preserving brcmfmac for newer Broadcom chips)
 install_broadcom_sta() {
     if ! apt-cache show broadcom-sta-dkms >/dev/null 2>&1; then
         log "broadcom-sta-dkms not available in configured repositories; skipping."
@@ -123,6 +373,10 @@ install_broadcom_sta() {
 }
 
 build_apfs_fuse
+# AmneziaWG before build_dkms_modules: `dkms autoinstall` below then also picks
+# up the freshly registered amneziawg module (AUTOINSTALL="yes").
+build_amneziawg_tools
+build_amneziawg_module
 install_broadcom_sta
 build_dkms_modules
 
@@ -131,7 +385,7 @@ for kver in "${KVERSIONS[@]}"; do
     depmod -a "${kver}" || warn "depmod failed for ${kver}"
 done
 
-# 5. Configure kernel modules to load at boot (graceful non-fatal loading)
+# 6. Configure kernel modules to load at boot (graceful non-fatal loading)
 log "Writing /etc/modules-load.d/rhm-liveusb.conf..."
 mkdir -p /etc/modules-load.d
 cat <<'EOF' > /etc/modules-load.d/rhm-liveusb.conf
@@ -154,7 +408,7 @@ cat <<'EOF' > /etc/systemd/system/systemd-modules-load.service.d/rhm-nonfatal.co
 SuccessExitStatus=1
 EOF
 
-# 6. Enable NetworkManager, usbmuxd, and rhm-live-agent services
+# 7. Enable NetworkManager, usbmuxd, and rhm-live-agent services
 log "Enabling NetworkManager, usbmuxd, and rhm-live-agent.service..."
 systemctl enable NetworkManager.service || true
 systemctl enable usbmuxd.service || true

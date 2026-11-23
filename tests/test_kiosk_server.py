@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import importlib.util
+import base64
 import json
 import os
 import re
 import stat
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -1930,4 +1932,800 @@ def test_network_actions_reject_malformed_json_without_touching_nmcli(
     assert data["ok"] is False
     assert data["message"]
     assert network_server["calls"] == []
+
+
+# --- 6. AmneziaWG (awg-quick) + subscription import ------------------------
+
+AWG_PRIVATE_KEY = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk="
+AWG_PEER_KEY = "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg="
+AWG_PRESHARED_KEY = "Fp6h8mS1p7wJd0dN2cQx9l3bYk5rT8uV0aZ4eG6iK1s="
+
+AMNEZIA_CONFIG = (
+    "[Interface]\n"
+    f"PrivateKey = {AWG_PRIVATE_KEY}\n"
+    "Address = 10.8.0.2/32, fd00::2/128\n"
+    "DNS = 1.1.1.1\n"
+    "Jc = 4\n"
+    "Jmin = 50\n"
+    "Jmax = 1000\n"
+    "S1 = 20\n"
+    "S2 = 20\n"
+    "H1 = 1234567\n"
+    "H2 = 2345678\n"
+    "H3 = 3456789\n"
+    "H4 = 4567890\n"
+    "\n"
+    "[Peer]\n"
+    f"PublicKey = {AWG_PEER_KEY}\n"
+    f"PresharedKey = {AWG_PRESHARED_KEY}\n"
+    "Endpoint = vpn.example.com:51820\n"
+    "AllowedIPs = 0.0.0.0/0, ::/0\n"
+    "PersistentKeepalive = 25\n"
+)
+
+SUBSCRIPTION_URL = "https://sub.example.com/awg/office"
+PUBLIC_ADDRESS = "93.184.216.34"
+PRIVATE_ADDRESSES = [
+    ["127.0.0.1"],
+    ["10.0.0.5"],
+    ["172.16.4.4"],
+    ["192.168.1.10"],
+    ["169.254.10.10"],
+    ["100.64.0.7"],
+    ["0.0.0.0"],
+    ["::1"],
+    ["fe80::1"],
+    ["fc00::1"],
+]
+
+
+def _amnezia_payload(**overrides: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"name": "office", "config": AMNEZIA_CONFIG}
+    payload.update(overrides)
+    return payload
+
+
+def _subscription_payload(**overrides: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"url": SUBSCRIPTION_URL, "name": "office"}
+    payload.update(overrides)
+    return payload
+
+
+def _base64_variants(text: str) -> List[Tuple[str, str]]:
+    """(label, encoded-body) pairs: base64/base64url with and without padding."""
+    raw = text.encode("utf-8")
+    standard = base64.b64encode(raw).decode("ascii")
+    urlsafe = base64.urlsafe_b64encode(raw).decode("ascii")
+    return [
+        ("base64-padded", standard),
+        ("base64-unpadded", standard.rstrip("=")),
+        ("base64url-padded", urlsafe),
+        ("base64url-unpadded", urlsafe.rstrip("=")),
+    ]
+
+
+@pytest.fixture()
+def amnezia_server(tmp_path: Path, monkeypatch):
+    """KioskServer with a fake awg-quick binary and a tmp AmneziaWG directory."""
+    config_dir = tmp_path / "amneziawg"
+    monkeypatch.setattr(kiosk, "AMNEZIA_CONFIG_DIR", config_dir)
+
+    fake_awg = tmp_path / "bin" / "awg-quick"
+    fake_awg.parent.mkdir(parents=True, exist_ok=True)
+    fake_awg.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    monkeypatch.setattr(
+        kiosk.shutil,
+        "which",
+        lambda name: str(fake_awg) if name == "awg-quick" else None,
+    )
+    # Tests may run as an unprivileged user; root is asserted separately.
+    monkeypatch.setattr(kiosk, "_is_root", lambda: True)
+
+    calls: List[List[str]] = []
+    state: Dict[str, Any] = {
+        "fail": None,
+        "fetch": None,
+        "fetches": [],
+        "show_out": "interface: awg0\n",
+        "leak": False,
+        "resolved": [PUBLIC_ADDRESS],
+    }
+
+    monkeypatch.setattr(
+        kiosk,
+        "_resolve_host_addresses",
+        lambda host, port: list(state["resolved"]),
+    )
+
+    def fake_fetch(url: str) -> bytes:
+        state["fetches"].append(url)
+        outcome = state["fetch"]
+        if isinstance(outcome, Exception):
+            raise outcome
+        if isinstance(outcome, (bytes, bytearray)):
+            return bytes(outcome)
+        return AMNEZIA_CONFIG.encode("utf-8")
+
+    monkeypatch.setattr(kiosk, "_fetch_subscription_bytes", fake_fetch)
+
+    def runner(cmd: List[str], timeout: float = 5.0) -> Tuple[int, str, str]:
+        calls.append(list(cmd))
+        if not cmd:
+            return 1, "", "empty"
+        if cmd[0] == str(fake_awg):
+            verb = cmd[1] if len(cmd) > 1 else ""
+            if state["fail"] == verb:
+                detail = f"Error: unable to {verb} the interface"
+                if state["leak"]:
+                    detail += f"\nPrivateKey = {AWG_PRIVATE_KEY}"
+                return 1, "", detail
+            return 0, f"awg-quick: {verb} ok\n", ""
+        if cmd[0] == "awg":
+            if state["fail"] == "show":
+                return 1, "", "Unable to access interface: Operation not permitted"
+            return 0, state["show_out"], ""
+        if cmd[0] == "qrencode":
+            if state["fail"] == "qrencode":
+                return 127, "", "command not found: qrencode"
+            return (
+                0,
+                '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
+                '<rect width="100" height="100"/></svg>',
+                "",
+            )
+        return 127, "", f"not mocked: {cmd[0]}"
+
+    server = kiosk.KioskServer(
+        ("127.0.0.1", 0),
+        static_dir=KIOSK_UI_DIR,
+        run_cmd=runner,
+    )
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield {
+            "base_url": f"http://127.0.0.1:{port}",
+            "config_dir": config_dir,
+            "fake_awg": fake_awg,
+            "calls": calls,
+            "state": state,
+            "tmp_path": tmp_path,
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def _awg_calls(amnezia_server, verb: str) -> List[List[str]]:
+    fake = str(amnezia_server["fake_awg"])
+    return [
+        cmd
+        for cmd in amnezia_server["calls"]
+        if cmd[:1] == [fake] and len(cmd) > 1 and cmd[1] == verb
+    ]
+
+
+def test_amnezia_get_empty_directory_and_status(amnezia_server):
+    status, headers, body = _http_request(
+        amnezia_server["base_url"], "/api/network/amnezia"
+    )
+    assert status == 200
+    data = json.loads(body.decode("utf-8"))
+    assert data["ok"] is True
+    assert data["awg_available"] is True
+    assert data["redacted"] is True
+    assert data["files"] == []
+    assert data["config_dir"] == str(amnezia_server["config_dir"])
+    assert data["status"]["available"] is True
+    assert data["status"]["ok"] is True
+    assert data["status"]["interfaces"] == ["awg0"]
+
+
+def test_amnezia_get_is_200_and_reports_missing_awg(amnezia_server, monkeypatch):
+    monkeypatch.setattr(kiosk.shutil, "which", lambda name: None)
+    status, _, body = _http_request(
+        amnezia_server["base_url"], "/api/network/amnezia"
+    )
+    assert status == 200
+    data = json.loads(body.decode("utf-8"))
+    assert data["awg_available"] is False
+    assert data["status"]["available"] is False
+    assert data["status"]["ok"] is False
+    assert data["status"]["message"]
+
+
+def test_amnezia_get_survives_awg_show_failure(amnezia_server):
+    amnezia_server["state"]["fail"] = "show"
+    status, _, body = _http_request(
+        amnezia_server["base_url"], "/api/network/amnezia"
+    )
+    assert status == 200
+    data = json.loads(body.decode("utf-8"))
+    assert data["awg_available"] is True
+    assert data["status"]["ok"] is False
+    assert "Operation not permitted" in data["status"]["message"]
+
+
+def test_amnezia_post_writes_0600_config_and_runs_awg_quick(amnezia_server, monkeypatch):
+    opened: List[Tuple[str, int]] = []
+    real_open = os.open
+
+    def spy_open(path, flags, mode=0o777, **kwargs):
+        opened.append((str(path), mode))
+        return real_open(path, flags, mode, **kwargs)
+
+    # Windows cannot express POSIX bits, so also record the requested mode.
+    monkeypatch.setattr(kiosk.os, "open", spy_open)
+
+    status, _, body = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/amnezia",
+        method="POST",
+        payload=_amnezia_payload(),
+    )
+    data = json.loads(body.decode("utf-8"))
+    assert status == 200, data
+    assert data["ok"] is True
+    assert data["name"] == "office"
+    assert data["redacted"] is True
+    assert data["output"]
+
+    config_path = amnezia_server["config_dir"] / "office.conf"
+    assert config_path.is_file()
+    assert config_path.read_text(encoding="utf-8") == AMNEZIA_CONFIG
+    content = config_path.read_text(encoding="utf-8")
+    for expected in ("Jc = 4", "H4 = 4567890", f"PrivateKey = {AWG_PRIVATE_KEY}"):
+        assert expected in content
+
+    assert any(
+        mode == 0o600 and name.endswith(".tmp")
+        for name, mode in opened
+    )
+    if os.name == "posix":
+        assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+
+    ups = _awg_calls(amnezia_server, "up")
+    assert ups == [[str(amnezia_server["fake_awg"]), "up", str(config_path)]]
+    assert not any(isinstance(cmd, str) for cmd in amnezia_server["calls"])
+
+    # No secret ever leaves the server: not the key value, not the field name.
+    raw = body.decode("utf-8")
+    assert AWG_PRIVATE_KEY not in raw
+    assert AWG_PRESHARED_KEY not in raw
+    assert "PrivateKey" not in raw
+    assert "PresharedKey" not in raw
+
+
+def test_amnezia_get_lists_the_written_config(amnezia_server):
+    post_status, _, _ = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/amnezia",
+        method="POST",
+        payload=_amnezia_payload(name="home"),
+    )
+    assert post_status == 200
+
+    status, _, body = _http_request(
+        amnezia_server["base_url"], "/api/network/amnezia"
+    )
+    assert status == 200
+    data = json.loads(body.decode("utf-8"))
+    assert len(data["files"]) == 1
+    entry = data["files"][0]
+    assert entry["name"] == "home"
+    assert entry["path"] == str(amnezia_server["config_dir"] / "home.conf")
+    assert entry["size"] == len(AMNEZIA_CONFIG.encode("utf-8"))
+    assert isinstance(entry["mtime"], int)
+    assert AWG_PRIVATE_KEY not in body.decode("utf-8")
+
+
+MISSING_PEER_CONFIG = (
+    "[Interface]\n"
+    f"PrivateKey = {AWG_PRIVATE_KEY}\n"
+    "Address = 10.8.0.2/32\n"
+)
+
+MISSING_INTERFACE_CONFIG = (
+    "[Peer]\n"
+    f"PublicKey = {AWG_PEER_KEY}\n"
+    "Endpoint = vpn.example.com:51820\n"
+)
+
+INVALID_AMNEZIA_CONFIGS = [
+    pytest.param("", id="empty"),
+    pytest.param(MISSING_PEER_CONFIG, id="missing-peer"),
+    pytest.param(MISSING_INTERFACE_CONFIG, id="missing-interface"),
+    pytest.param(
+        AMNEZIA_CONFIG.replace(f"PrivateKey = {AWG_PRIVATE_KEY}\n", ""),
+        id="missing-private-key",
+    ),
+    pytest.param(
+        AMNEZIA_CONFIG.replace("Address = 10.8.0.2/32, fd00::2/128\n", ""),
+        id="missing-address",
+    ),
+    pytest.param(
+        AMNEZIA_CONFIG.replace(f"PublicKey = {AWG_PEER_KEY}\n", ""),
+        id="missing-public-key",
+    ),
+    pytest.param(
+        AMNEZIA_CONFIG.replace("Endpoint = vpn.example.com:51820\n", ""),
+        id="missing-endpoint",
+    ),
+    pytest.param(
+        AMNEZIA_CONFIG.replace("Endpoint = vpn.example.com:51820", "Endpoint = vpn.example.com"),
+        id="endpoint-without-port",
+    ),
+    pytest.param(
+        AMNEZIA_CONFIG.replace("Address = 10.8.0.2/32, fd00::2/128", "Address = nope"),
+        id="bad-address",
+    ),
+    pytest.param(
+        AMNEZIA_CONFIG.replace("Jc = 4", "Jc = four"),
+        id="non-numeric-jc",
+    ),
+    pytest.param(
+        AMNEZIA_CONFIG.replace("AllowedIPs = 0.0.0.0/0, ::/0", "AllowedIPs = not-a-cidr"),
+        id="bad-allowed-ips",
+    ),
+    pytest.param(
+        AMNEZIA_CONFIG + "PostUp = touch /tmp/pwned\n",
+        id="root-hook",
+    ),
+    pytest.param(
+        AMNEZIA_CONFIG + "\x07",
+        id="control-character",
+    ),
+    pytest.param(
+        AMNEZIA_CONFIG + "#" + "x" * 5000 + "\n",
+        id="line-too-long",
+    ),
+    pytest.param(
+        AMNEZIA_CONFIG + "[Unknown]\nKey = value\n",
+        id="unknown-section",
+    ),
+]
+
+
+@pytest.mark.parametrize("config", INVALID_AMNEZIA_CONFIGS)
+def test_amnezia_post_rejects_invalid_config(amnezia_server, config):
+    status, _, body = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/amnezia",
+        method="POST",
+        payload=_amnezia_payload(config=config),
+    )
+    assert status == 400, body
+    data = json.loads(body.decode("utf-8"))
+    assert data["ok"] is False
+    assert data["message"]
+    assert _awg_calls(amnezia_server, "up") == []
+    assert not amnezia_server["config_dir"].exists()
+    # A rejected config never echoes its secrets either.
+    if AWG_PRIVATE_KEY in config:
+        assert AWG_PRIVATE_KEY not in body.decode("utf-8")
+
+
+@pytest.mark.parametrize("name", ["../evil", "office;reboot", "", "-dash", "a" * 40])
+def test_amnezia_post_rejects_unsafe_name(amnezia_server, name):
+    status, _, body = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/amnezia",
+        method="POST",
+        payload=_amnezia_payload(name=name),
+    )
+    assert status == 400, body
+    assert json.loads(body.decode("utf-8"))["ok"] is False
+    assert _awg_calls(amnezia_server, "up") == []
+
+
+def test_amnezia_post_redacts_secrets_from_failure_output(amnezia_server):
+    amnezia_server["state"]["fail"] = "up"
+    amnezia_server["state"]["leak"] = True
+
+    status, _, body = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/amnezia",
+        method="POST",
+        payload=_amnezia_payload(),
+    )
+    assert status == 503, body
+    data = json.loads(body.decode("utf-8"))
+    assert data["ok"] is False
+    raw = body.decode("utf-8")
+    assert AWG_PRIVATE_KEY not in raw
+    assert AWG_PRESHARED_KEY not in raw
+    assert "***" in data["message"]
+    # A failed activation never leaves a half-applied config behind.
+    assert not (amnezia_server["config_dir"] / "office.conf").exists()
+
+
+def test_amnezia_down_runs_awg_quick_down(amnezia_server):
+    up_status, _, _ = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/amnezia",
+        method="POST",
+        payload=_amnezia_payload(),
+    )
+    assert up_status == 200
+    amnezia_server["calls"].clear()
+
+    status, _, body = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/amnezia/down",
+        method="POST",
+        payload={"name": "office"},
+    )
+    data = json.loads(body.decode("utf-8"))
+    assert status == 200, data
+    assert data["ok"] is True
+    assert data["redacted"] is True
+    config_path = amnezia_server["config_dir"] / "office.conf"
+    assert _awg_calls(amnezia_server, "down") == [
+        [str(amnezia_server["fake_awg"]), "down", str(config_path)]
+    ]
+    # The config stays on disk so it can be brought up again.
+    assert config_path.is_file()
+    assert AWG_PRIVATE_KEY not in body.decode("utf-8")
+
+
+def test_amnezia_down_unknown_name_is_400(amnezia_server):
+    status, _, body = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/amnezia/down",
+        method="POST",
+        payload={"name": "ghost"},
+    )
+    assert status == 400
+    assert json.loads(body.decode("utf-8"))["ok"] is False
+    assert _awg_calls(amnezia_server, "down") == []
+
+
+def test_amnezia_down_failure_is_503(amnezia_server):
+    up_status, _, _ = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/amnezia",
+        method="POST",
+        payload=_amnezia_payload(),
+    )
+    assert up_status == 200
+    amnezia_server["state"]["fail"] = "down"
+    status, _, body = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/amnezia/down",
+        method="POST",
+        payload={"name": "office"},
+    )
+    assert status == 503
+    assert json.loads(body.decode("utf-8"))["ok"] is False
+
+
+def test_amnezia_returns_503_without_awg_quick(amnezia_server, monkeypatch):
+    monkeypatch.setattr(kiosk.shutil, "which", lambda name: None)
+
+    status, _, body = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/amnezia",
+        method="POST",
+        payload=_amnezia_payload(),
+    )
+    assert status == 503
+    data = json.loads(body.decode("utf-8"))
+    assert data["ok"] is False
+    assert "awg-quick" in data["message"]
+    assert not amnezia_server["config_dir"].exists()
+    assert amnezia_server["calls"] == []
+
+    down_status, _, _down_body = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/amnezia/down",
+        method="POST",
+        payload={"name": "office"},
+    )
+    assert down_status == 503
+
+
+def test_amnezia_returns_503_without_root(amnezia_server, monkeypatch):
+    monkeypatch.setattr(kiosk, "_is_root", lambda: False)
+    status, _, body = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/amnezia",
+        method="POST",
+        payload=_amnezia_payload(),
+    )
+    assert status == 503
+    data = json.loads(body.decode("utf-8"))
+    assert data["ok"] is False
+    assert "root" in data["message"]
+    assert not amnezia_server["config_dir"].exists()
+
+
+def test_subscription_plain_config_is_written_and_started(amnezia_server):
+    amnezia_server["state"]["fetch"] = AMNEZIA_CONFIG.encode("utf-8")
+    status, _, body = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/subscription",
+        method="POST",
+        payload=_subscription_payload(name="sub-office"),
+    )
+    data = json.loads(body.decode("utf-8"))
+    assert status == 200, data
+    assert data["ok"] is True
+    assert data["name"] == "sub-office"
+    assert data["source"] == "subscription"
+    assert data["format"] == "plain"
+    assert data["host"] == "sub.example.com"
+    assert data["redacted"] is True
+    assert amnezia_server["state"]["fetches"] == [SUBSCRIPTION_URL]
+
+    config_path = amnezia_server["config_dir"] / "sub-office.conf"
+    assert config_path.is_file()
+    assert _awg_calls(amnezia_server, "up") == [
+        [str(amnezia_server["fake_awg"]), "up", str(config_path)]
+    ]
+    raw = body.decode("utf-8")
+    assert AWG_PRIVATE_KEY not in raw
+    assert AWG_PRESHARED_KEY not in raw
+
+
+@pytest.mark.parametrize(
+    "label,encoded", _base64_variants(AMNEZIA_CONFIG), ids=[item[0] for item in _base64_variants(AMNEZIA_CONFIG)]
+)
+def test_subscription_accepts_base64_and_base64url(amnezia_server, label, encoded):
+    amnezia_server["state"]["fetch"] = encoded.encode("utf-8")
+    status, _, body = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/subscription",
+        method="POST",
+        payload=_subscription_payload(name="encoded"),
+    )
+    data = json.loads(body.decode("utf-8"))
+    assert status == 200, (label, data)
+    assert data["format"] == "base64"
+    config_path = amnezia_server["config_dir"] / "encoded.conf"
+    assert config_path.is_file()
+    assert "Jc = 4" in config_path.read_text(encoding="utf-8")
+    assert AWG_PRIVATE_KEY not in body.decode("utf-8")
+
+
+def test_subscription_derives_name_from_host_when_absent(amnezia_server):
+    status, _, body = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/subscription",
+        method="POST",
+        payload={"url": SUBSCRIPTION_URL},
+    )
+    data = json.loads(body.decode("utf-8"))
+    assert status == 200, data
+    assert data["name"] == "sub.example.com"
+    assert (amnezia_server["config_dir"] / "sub.example.com.conf").is_file()
+
+
+def test_subscription_rejects_http_and_unsafe_urls(amnezia_server):
+    for url in (
+        "http://sub.example.com/awg",
+        "ftp://sub.example.com/awg",
+        "sub.example.com/awg",
+        "https://user:pass@sub.example.com/awg",
+        "https:///awg",
+        "https://sub.example.com/" + "a" * 2100,
+        "https://sub.example.com/aw g",
+    ):
+        status, _, body = _http_request(
+            amnezia_server["base_url"],
+            "/api/network/subscription",
+            method="POST",
+            payload={"url": url, "name": "office"},
+        )
+        assert status == 400, (url, body)
+        assert json.loads(body.decode("utf-8"))["ok"] is False
+
+    # Nothing was fetched and nothing was written for any rejected URL.
+    assert amnezia_server["state"]["fetches"] == []
+    assert not amnezia_server["config_dir"].exists()
+    assert _awg_calls(amnezia_server, "up") == []
+
+
+@pytest.mark.parametrize("addresses", PRIVATE_ADDRESSES)
+def test_subscription_rejects_loopback_private_and_reserved_hosts(
+    amnezia_server, addresses
+):
+    amnezia_server["state"]["resolved"] = addresses
+    status, _, body = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/subscription",
+        method="POST",
+        payload=_subscription_payload(),
+    )
+    assert status == 400, body
+    data = json.loads(body.decode("utf-8"))
+    assert data["ok"] is False
+    assert data["message"]
+    assert amnezia_server["state"]["fetches"] == []
+    assert not amnezia_server["config_dir"].exists()
+
+
+def test_subscription_rejects_ip_literal_loopback_without_resolution(
+    amnezia_server, monkeypatch
+):
+    # The real resolver is used here: no fake address is injected for the guard.
+    monkeypatch.setattr(
+        kiosk,
+        "_resolve_host_addresses",
+        lambda host, port: ["127.0.0.1"] if host == "127.0.0.1" else [PUBLIC_ADDRESS],
+    )
+    status, _, body = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/subscription",
+        method="POST",
+        payload=_subscription_payload(url="https://127.0.0.1/awg"),
+    )
+    assert status == 400, body
+    assert amnezia_server["state"]["fetches"] == []
+
+
+def test_subscription_rejects_payload_over_one_mib(amnezia_server):
+    amnezia_server["state"]["fetch"] = b"x" * (kiosk.SUBSCRIPTION_MAX_BYTES + 1)
+    status, _, body = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/subscription",
+        method="POST",
+        payload=_subscription_payload(),
+    )
+    assert status == 503, body
+    data = json.loads(body.decode("utf-8"))
+    assert data["ok"] is False
+    assert "1 МБ" in data["message"]
+    assert not amnezia_server["config_dir"].exists()
+    assert _awg_calls(amnezia_server, "up") == []
+
+
+def test_fetch_subscription_bytes_enforces_one_mib_cap(monkeypatch):
+    monkeypatch.setattr(
+        kiosk, "_resolve_host_addresses", lambda host, port: [PUBLIC_ADDRESS]
+    )
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def read(self, size=-1):
+            return b"x" * (size if isinstance(size, int) and size > 0 else 16)
+
+    class FakeOpener:
+        def open(self, request, timeout=None):
+            assert timeout == kiosk.SUBSCRIPTION_TIMEOUT_SECONDS
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        kiosk.urllib.request, "build_opener", lambda *args, **kwargs: FakeOpener()
+    )
+    with pytest.raises(kiosk.NetworkUnavailableError) as excinfo:
+        kiosk._fetch_subscription_bytes(SUBSCRIPTION_URL)
+    assert "1 МБ" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"vless://example@host:443?type=tcp#node",
+        b"just some text that is not a config",
+        b"[Peer]\nPublicKey = abc\nEndpoint = vpn.example.com:51820\n",
+        b"\xff\xfe\x00\x00",
+        b"",
+    ],
+)
+def test_subscription_rejects_unsupported_body(amnezia_server, payload):
+    amnezia_server["state"]["fetch"] = payload
+    status, _, body = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/subscription",
+        method="POST",
+        payload=_subscription_payload(),
+    )
+    assert status == 400, body
+    assert json.loads(body.decode("utf-8"))["ok"] is False
+    assert not amnezia_server["config_dir"].exists()
+
+
+def test_subscription_fetch_failure_is_503(amnezia_server):
+    amnezia_server["state"]["fetch"] = kiosk.NetworkUnavailableError(
+        "Не удалось загрузить подписку: timed out"
+    )
+    status, _, body = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/subscription",
+        method="POST",
+        payload=_subscription_payload(),
+    )
+    assert status == 503, body
+    data = json.loads(body.decode("utf-8"))
+    assert data["ok"] is False
+    assert "подписку" in data["message"].lower()
+    assert not amnezia_server["config_dir"].exists()
+
+
+def test_subscription_returns_503_without_awg_quick_before_fetching(
+    amnezia_server, monkeypatch
+):
+    monkeypatch.setattr(kiosk.shutil, "which", lambda name: None)
+    status, _, body = _http_request(
+        amnezia_server["base_url"],
+        "/api/network/subscription",
+        method="POST",
+        payload=_subscription_payload(),
+    )
+    assert status == 503
+    assert json.loads(body.decode("utf-8"))["ok"] is False
+    assert amnezia_server["state"]["fetches"] == []
+
+
+def test_subscription_qr_returns_svg(amnezia_server):
+    path = "/api/network/subscription/qr?url=" + urllib.parse.quote(
+        SUBSCRIPTION_URL, safe=""
+    )
+    status, headers, body = _http_request(amnezia_server["base_url"], path)
+    assert status == 200
+    assert headers["Content-Type"].startswith("image/svg+xml")
+    svg = body.decode("utf-8")
+    assert svg.lstrip().startswith("<svg") or "<svg" in svg
+    assert "PrivateKey" not in svg
+
+    qr_calls = [cmd for cmd in amnezia_server["calls"] if cmd[:1] == ["qrencode"]]
+    assert qr_calls == [
+        ["qrencode", "-t", "SVG", "-m", "2", "-o", "-", "--", SUBSCRIPTION_URL]
+    ]
+
+
+def test_subscription_qr_rejects_http_private_and_long_urls(amnezia_server):
+    bad_urls = [
+        "http://sub.example.com/awg",
+        "https://" + "a" * 2100,
+        "",
+    ]
+    for url in bad_urls:
+        path = "/api/network/subscription/qr?url=" + urllib.parse.quote(url, safe="")
+        status, _, body = _http_request(amnezia_server["base_url"], path)
+        assert status == 400, (url, body)
+        assert json.loads(body.decode("utf-8"))["ok"] is False
+
+    amnezia_server["state"]["resolved"] = ["192.168.1.5"]
+    path = "/api/network/subscription/qr?url=" + urllib.parse.quote(
+        SUBSCRIPTION_URL, safe=""
+    )
+    status, _, body = _http_request(amnezia_server["base_url"], path)
+    assert status == 400, body
+    assert not [cmd for cmd in amnezia_server["calls"] if cmd[:1] == ["qrencode"]]
+
+
+def test_subscription_qr_returns_503_when_qrencode_fails(amnezia_server):
+    amnezia_server["state"]["fail"] = "qrencode"
+    path = "/api/network/subscription/qr?url=" + urllib.parse.quote(
+        SUBSCRIPTION_URL, safe=""
+    )
+    status, _, body = _http_request(amnezia_server["base_url"], path)
+    assert status == 503
+    assert json.loads(body.decode("utf-8"))["ok"] is False
+
+
+def test_amnezia_posts_require_the_json_csrf_gate(amnezia_server):
+    body = json.dumps(_amnezia_payload()).encode("utf-8")
+    for path in (
+        "/api/network/amnezia",
+        "/api/network/amnezia/down",
+        "/api/network/subscription",
+    ):
+        status, _, _ = _http_request(
+            amnezia_server["base_url"],
+            path,
+            method="POST",
+            raw_body=body,
+        )
+        assert status == 403, path
+    assert amnezia_server["calls"] == []
+    assert amnezia_server["state"]["fetches"] == []
 

@@ -5,7 +5,7 @@ Covers:
 2. `bash -n` syntax validation across all 5 shell/hook scripts.
 3. `ops/live-usb/build-iso.sh` contract assertions (no legacy entrypoint, runtime env,
    required packages, network-settings tooling, volatile journald cap, dual GRUB menu,
-   udev rules).
+   udev rules, AmneziaWG source-build hook coverage).
 4. `ops/live-usb/test-qemu.sh --dry-run` execution for both `--mode uefi` and `--mode bios`.
 5. Cross-component contract integration test:
    gateway.py (/v1/liveusb/register) -> core/liveusb_bootstrap.py (register_ephemeral_node)
@@ -343,6 +343,7 @@ def test_build_iso_ships_file_manager_and_editor_for_the_app_launcher() -> None:
 NETWORK_SETTINGS_PACKAGES = (
     "ppp",
     "wireguard-tools",
+    "openresolv",
     "openvpn",
     "network-manager-openvpn",
 )
@@ -394,6 +395,165 @@ def test_build_iso_ships_network_settings_tooling() -> None:
     assert "wireguard-tools" in packages, (
         "wireguard-tools (Network block) must keep backing the WireGuard tab"
     )
+
+
+AMNEZIAWG_HOOK_REL = "ops/live-usb/hooks/0100-build-apfs-and-drivers.hook.chroot"
+AMNEZIAWG_HOOK = REPO_ROOT / AMNEZIAWG_HOOK_REL
+AMNEZIAWG_TOOLS_REPO = "https://github.com/amnezia-vpn/amneziawg-tools.git"
+AMNEZIAWG_MODULE_REPO = "https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git"
+
+
+def _amneziawg_hook_text() -> str:
+    assert AMNEZIAWG_HOOK.is_file(), f"chroot hook missing: {AMNEZIAWG_HOOK_REL}"
+    return AMNEZIAWG_HOOK.read_text(encoding="utf-8")
+
+
+def test_build_hook_clones_and_installs_amneziawg_tools() -> None:
+    """Debian 13 has no amneziawg-tools package: the hook builds it from source.
+
+    The plan requires a shallow clone of amneziawg-tools plus an `awg`/`awg-quick`
+    install into /usr/local/bin, and it explicitly forbids an apt package named
+    `amneziawg-tools`. A failed build must warn and continue, never abort the ISO.
+    """
+    hook = _amneziawg_hook_text()
+
+    assert AMNEZIAWG_TOOLS_REPO in hook
+    # Shallow clone: the chroot has no use for the full history.
+    assert "git clone --depth 1" in hook
+    # Upstream has no top-level Makefile: the build happens in src/, and the
+    # install target only ships awg-quick when WITH_WGQUICK=yes (its own probe
+    # looks for $(BINDIR)/bash, which is too fragile to rely on).
+    assert 'make -C "${tmp_dir}/src"' in hook
+    assert "WITH_WGQUICK=yes" in hook
+
+    # Both binaries the kiosk drives must land in /usr/local/bin explicitly, so an
+    # upstream prefix change cannot leave them outside the kiosk's PATH.
+    assert "/usr/local/bin/awg" in hook
+    assert "/usr/local/bin/awg-quick" in hook
+    assert "install -m 0755" in hook
+    # ...via a staged `make install DESTDIR=...` (or the built binaries directly).
+    assert "DESTDIR=" in hook
+    # The tools build names its binary "wg" and generates awg-quick from a script;
+    # the direct-install fallback must follow that, not look for src/awg.
+    assert '"${tmp_dir}/src/wg"' in hook
+    assert "wg-quick/linux.bash" in hook
+    # The kiosk writes configs into /etc/amnezia/amneziawg, so the hook creates it.
+    assert "/etc/amnezia/amneziawg" in hook
+
+    # Non-fatal by construction: the only way out of a failed clone is a warning.
+    assert "warn" in hook
+    assert "exit 1" not in hook
+
+
+def test_build_hook_installs_the_amneziawg_kernel_module_through_dkms() -> None:
+    """The awg kernel module comes from the AmneziaWG tree via DKMS, unsigned."""
+    hook = _amneziawg_hook_text()
+
+    assert AMNEZIAWG_MODULE_REPO in hook
+    # The hook never trusts host uname -r; DKMS targets each chroot kernel.
+    for step in ("dkms add -m", "dkms build -m", "dkms install -m"):
+        assert step in hook, f"the hook must run {step!r} for the amneziawg module"
+    assert '-k "${kver}"' in hook
+    assert "/lib/modules/${kver}/build" in hook
+
+    # The module tree has no top-level Makefile/dkms.conf; src/ carries both, and
+    # upstream's own `make dkms-install` flattens them into /usr/src/<pkg>-<ver>.
+    assert "dkms-install" in hook
+    assert '"${tmp_dir}/src/dkms.conf"' in hook
+
+    # A tree without any dkms.conf still gets a minimal one from the hook.
+    assert "dkms.conf" in hook
+    assert "dkms_conf_field" in hook
+    assert 'BUILT_MODULE_NAME[0]="amneziawg"' in hook
+    assert 'AUTOINSTALL="yes"' in hook
+    assert 'BUILT_MODULE_LOCATION[0]=' in hook
+
+    # Secure Boot note: the module is unsigned and must be documented as such.
+    assert "UNSIGNED" in hook
+    assert "Secure Boot" in hook
+
+
+def test_package_list_adds_amneziawg_build_deps_without_a_bogus_package() -> None:
+    """libmnl-dev/libelf-dev/pkg-config are the build deps; no amneziawg apt name."""
+    packages = _generated_package_list()
+    required = _check_required_packages()
+
+    for package in ("libmnl-dev", "libelf-dev", "pkg-config"):
+        assert package in packages, (
+            f"the generated package list must install {package!r} to build AmneziaWG"
+        )
+        assert package in required, (
+            f"build-iso.sh --check must verify package: {package}"
+        )
+
+    # Debian 13 (trixie) ships no amneziawg-tools/amneziawg-dkms package: an apt
+    # entry would break `lb build` outright, so no such name may be declared.
+    bogus = sorted(pkg for pkg in packages if pkg.startswith("amneziawg"))
+    assert not bogus, f"no amneziawg apt package exists in trixie, found: {bogus}"
+
+
+def test_build_iso_check_covers_the_amneziawg_hook(tmp_path: Path) -> None:
+    """`--check` must pin both repos, the awg-quick install path and the DKMS calls."""
+    build_text = BUILD_ISO_SH.read_text(encoding="utf-8")
+
+    assert "local -a amneziawg_hook_tokens=(" in build_text
+    token_block = build_text.split("local -a amneziawg_hook_tokens=(", 1)[1].split(")", 1)[0]
+    for marker in (
+        "amneziawg-tools",
+        "amneziawg-linux-kernel-module",
+        "/usr/local/bin/awg",
+        "/usr/local/bin/awg-quick",
+        "dkms add",
+        "dkms build",
+        "dkms install",
+        "Secure Boot",
+    ):
+        assert marker in token_block, f"--check must pin {marker!r} in the 0100 hook"
+
+    # The tokens are read back out of the hook that live-build actually ships.
+    assert AMNEZIAWG_HOOK_REL in build_text
+
+    try:
+        bash_exe = _find_bash()
+    except AssertionError as exc:  # pragma: no cover - environments without bash
+        pytest.skip(str(exc))
+
+    work_dir = tmp_path / "rhm-live-build-amneziawg-should-not-exist"
+    proc = subprocess.run(
+        [
+            bash_exe,
+            str(BUILD_ISO_SH),
+            "--check",
+            "--work-dir",
+            str(work_dir),
+        ],
+        cwd=str(REPO_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=False,
+    )
+
+    assert proc.returncode == 0, (
+        f"build-iso.sh --check failed (rc={proc.returncode}):\n"
+        f"STDOUT: {proc.stdout}\nSTDERR: {proc.stderr}"
+    )
+    for token in (
+        "amneziawg-tools.git",
+        "amneziawg-linux-kernel-module.git",
+        "/usr/local/bin/awg",
+        "/usr/local/bin/awg-quick",
+        "dkms install",
+        "Secure Boot",
+    ):
+        assert f"[PASS] 0100 hook contains: {token}" in proc.stdout, (
+            f"--check did not report the AmneziaWG hook marker {token!r}"
+        )
+    assert "no amneziawg-tools apt package declared" in proc.stdout
+    assert not work_dir.exists(), "build-iso.sh --check must not touch --work-dir"
 
 
 def test_build_iso_installs_the_root_warning_wrapper() -> None:

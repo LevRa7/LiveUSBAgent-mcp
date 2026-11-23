@@ -7,6 +7,9 @@
     lastConnectUrl: "",
     oskShift: false,
     activeInput: null,
+    networkTab: "current",
+    networkLinkKey: "",
+    networkLinkKeyVisible: false,
   };
 
   const els = {
@@ -65,6 +68,60 @@
     appsFeedback: document.getElementById("apps-feedback"),
     btnAppsClose: document.getElementById("btn-apps-close"),
     btnAppsCancel: document.getElementById("btn-apps-cancel"),
+    btnNetworkSettings: document.getElementById("btn-network-settings"),
+    networkBackdrop: document.getElementById("network-settings-backdrop"),
+    btnNetworkSettingsClose: document.getElementById("btn-network-settings-close"),
+    networkTabButtons: Array.prototype.slice.call(
+      document.querySelectorAll("[data-network-tab]")
+    ),
+    networkPanels: {
+      current: document.getElementById("net-panel-current"),
+      ip: document.getElementById("net-panel-ip"),
+      pppoe: document.getElementById("net-panel-pppoe"),
+      wireguard: document.getElementById("net-panel-wireguard"),
+      openvpn: document.getElementById("net-panel-openvpn"),
+    },
+    netCurrentFeedback: document.getElementById("net-current-feedback"),
+    netCurrentHostname: document.getElementById("net-current-hostname"),
+    netCurrentNodeId: document.getElementById("net-current-node-id"),
+    netCurrentLinkKey: document.getElementById("net-current-link-key"),
+    btnToggleLinkKey: document.getElementById("btn-toggle-link-key"),
+    netCurrentInterfaces: document.getElementById("net-current-interfaces"),
+    netCurrentRoute: document.getElementById("net-current-route"),
+    netCurrentDns: document.getElementById("net-current-dns"),
+    netIpForm: document.getElementById("net-ip-form"),
+    netIpInterface: document.getElementById("net-ip-interface"),
+    netIpModeAuto: document.getElementById("net-ip-mode-auto"),
+    netIpModeManual: document.getElementById("net-ip-mode-manual"),
+    netIpStaticFields: document.getElementById("net-ip-static-fields"),
+    netIpAddress: document.getElementById("net-ip-address"),
+    netIpPrefix: document.getElementById("net-ip-prefix"),
+    netIpGateway: document.getElementById("net-ip-gateway"),
+    netIpDns: document.getElementById("net-ip-dns"),
+    netIpFeedback: document.getElementById("net-ip-feedback"),
+    btnNetIpSubmit: document.getElementById("btn-net-ip-submit"),
+    netPppoeForm: document.getElementById("net-pppoe-form"),
+    netPppoeUsername: document.getElementById("net-pppoe-username"),
+    netPppoePassword: document.getElementById("net-pppoe-password"),
+    netPppoeService: document.getElementById("net-pppoe-service"),
+    netPppoeFeedback: document.getElementById("net-pppoe-feedback"),
+    btnNetPppoeSubmit: document.getElementById("btn-net-pppoe-submit"),
+    netWgForm: document.getElementById("net-wg-form"),
+    netWgName: document.getElementById("net-wg-name"),
+    netWgPrivateKey: document.getElementById("net-wg-private-key"),
+    netWgAddress: document.getElementById("net-wg-address"),
+    netWgPrefix: document.getElementById("net-wg-prefix"),
+    netWgPeerPublicKey: document.getElementById("net-wg-peer-public-key"),
+    netWgEndpoint: document.getElementById("net-wg-endpoint"),
+    netWgAllowedIps: document.getElementById("net-wg-allowed-ips"),
+    netWgKeepalive: document.getElementById("net-wg-keepalive"),
+    netWgFeedback: document.getElementById("net-wg-feedback"),
+    btnNetWgSubmit: document.getElementById("btn-net-wg-submit"),
+    netOpenvpnForm: document.getElementById("net-openvpn-form"),
+    netOpenvpnName: document.getElementById("net-openvpn-name"),
+    netOpenvpnConfig: document.getElementById("net-openvpn-config"),
+    netOpenvpnFeedback: document.getElementById("net-openvpn-feedback"),
+    btnNetOpenvpnSubmit: document.getElementById("btn-net-openvpn-submit"),
   };
 
   const INTERNET_BANNER_NO_INTERNET =
@@ -553,6 +610,423 @@
     els.appsBackdrop.classList.add("is-hidden");
   }
 
+  // --- Network settings dialog --------------------------------------------
+  // Secrets rule: the link key lives in memory only, stays masked in the DOM
+  // until the operator clicks "Показать", and submitted passwords/private keys
+  // are wiped from the fields right away. Nothing is ever logged.
+
+  const MASKED_LINK_KEY = "••••••••";
+  const NETWORK_TABS = ["current", "ip", "pppoe", "wireguard", "openvpn"];
+  const DEFAULT_OPENVPN_NAME = "rhm-openvpn";
+  const DEFAULT_WIREGUARD_KEEPALIVE = 25;
+
+  function setNetworkFeedback(feedbackEl, text, kind) {
+    if (!feedbackEl) {
+      return;
+    }
+    feedbackEl.textContent = text || "";
+    feedbackEl.classList.remove("is-ok", "is-error");
+    if (text && kind) {
+      feedbackEl.classList.add(kind);
+    }
+    feedbackEl.classList.toggle("is-hidden", !text);
+  }
+
+  function clearNetworkFeedback() {
+    setNetworkFeedback(els.netCurrentFeedback, "", "");
+    setNetworkFeedback(els.netIpFeedback, "", "");
+    setNetworkFeedback(els.netPppoeFeedback, "", "");
+    setNetworkFeedback(els.netWgFeedback, "", "");
+    setNetworkFeedback(els.netOpenvpnFeedback, "", "");
+  }
+
+  function resetNetworkSecretFields() {
+    els.netPppoePassword.value = "";
+    els.netWgPrivateKey.value = "";
+    els.netOpenvpnConfig.value = "";
+  }
+
+  function setNetworkTab(tabName) {
+    const target = NETWORK_TABS.indexOf(tabName) === -1 ? "current" : tabName;
+    state.networkTab = target;
+    NETWORK_TABS.forEach(function (name) {
+      const panel = els.networkPanels[name];
+      if (panel) {
+        panel.classList.toggle("is-hidden", name !== target);
+      }
+    });
+    els.networkTabButtons.forEach(function (btn) {
+      const isActive = btn.dataset.networkTab === target;
+      btn.classList.toggle("is-active", isActive);
+      btn.setAttribute("aria-selected", isActive ? "true" : "false");
+    });
+  }
+
+  function renderNetworkLinkKey() {
+    const hasKey = Boolean(state.networkLinkKey);
+    const revealed = state.networkLinkKeyVisible && hasKey;
+    els.btnToggleLinkKey.disabled = !hasKey;
+    if (!hasKey) {
+      els.netCurrentLinkKey.textContent = "—";
+      els.netCurrentLinkKey.classList.remove("is-masked");
+      els.btnToggleLinkKey.textContent = "Показать";
+      return;
+    }
+    els.netCurrentLinkKey.textContent = revealed
+      ? state.networkLinkKey
+      : MASKED_LINK_KEY;
+    els.netCurrentLinkKey.classList.toggle("is-masked", !revealed);
+    els.btnToggleLinkKey.textContent = revealed ? "Скрыть" : "Показать";
+  }
+
+  function listText(value, fallback) {
+    const empty = fallback || "—";
+    if (Array.isArray(value)) {
+      const parts = value.filter(Boolean);
+      return parts.length > 0 ? parts.join(", ") : empty;
+    }
+    return value || empty;
+  }
+
+  function interfaceDnsText(iface) {
+    return listText(iface.dns);
+  }
+
+  function describeRoute(route) {
+    if (!route) {
+      return "—";
+    }
+    if (typeof route === "string") {
+      return route || "—";
+    }
+    const parts = [];
+    if (route.destination) {
+      parts.push(route.destination);
+    }
+    if (route.gateway) {
+      parts.push("via " + route.gateway);
+    }
+    const device = route.device || route.dev;
+    if (device) {
+      parts.push("dev " + device);
+    }
+    if (route.metric !== undefined && route.metric !== null && route.metric !== "") {
+      parts.push("metric " + route.metric);
+    }
+    return parts.join(" ") || "—";
+  }
+
+  function defaultRouteText(routes) {
+    const items = Array.isArray(routes) ? routes : [];
+    let preferred = null;
+    items.forEach(function (route) {
+      if (preferred || !route) {
+        return;
+      }
+      const destination = route.destination || "";
+      if (route.default === true || destination === "default" || destination === "0.0.0.0/0") {
+        preferred = route;
+      }
+    });
+    return describeRoute(preferred || items[0]);
+  }
+
+  function appendNetworkRow(parent, label, value) {
+    const row = document.createElement("div");
+    row.className = "net-kv";
+    const keyEl = document.createElement("span");
+    keyEl.className = "net-k";
+    keyEl.textContent = label;
+    const valueEl = document.createElement("span");
+    valueEl.className = "net-v mono";
+    valueEl.textContent = value || "—";
+    row.appendChild(keyEl);
+    row.appendChild(valueEl);
+    parent.appendChild(row);
+  }
+
+  function renderNetworkInterfaces(interfaces) {
+    const items = Array.isArray(interfaces) ? interfaces : [];
+    els.netCurrentInterfaces.innerHTML = "";
+    if (items.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "empty-row";
+      empty.textContent = "Интерфейсы не обнаружены";
+      els.netCurrentInterfaces.appendChild(empty);
+      return;
+    }
+
+    items.forEach(function (iface) {
+      const box = document.createElement("div");
+      box.className = "net-iface";
+      box.setAttribute("role", "listitem");
+
+      const head = document.createElement("div");
+      head.className = "net-iface-head";
+      const nameEl = document.createElement("span");
+      nameEl.className = "net-iface-name mono";
+      nameEl.textContent = iface.name || iface.interface || "—";
+      const stateEl = document.createElement("span");
+      stateEl.className = "net-iface-state";
+      const rawState = String(iface.state || (iface.connected ? "up" : "")).trim();
+      stateEl.textContent = rawState || "unknown";
+      if (rawState.toLowerCase() === "up" || iface.connected === true) {
+        stateEl.classList.add("is-ok");
+      }
+      head.appendChild(nameEl);
+      head.appendChild(stateEl);
+      box.appendChild(head);
+
+      appendNetworkRow(box, "MAC", iface.mac);
+      appendNetworkRow(box, "Соединение", iface.connection);
+      appendNetworkRow(box, "IPv4", iface.ipv4 || iface.ip);
+      appendNetworkRow(box, "Шлюз", iface.gateway);
+      appendNetworkRow(box, "DNS", interfaceDnsText(iface));
+
+      els.netCurrentInterfaces.appendChild(box);
+    });
+  }
+
+  function renderNetworkInterfaceOptions(interfaces) {
+    const items = Array.isArray(interfaces) ? interfaces : [];
+    els.netIpInterface.innerHTML = "";
+    if (items.length === 0) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "Интерфейсы не обнаружены";
+      els.netIpInterface.appendChild(opt);
+      return;
+    }
+    items.forEach(function (iface) {
+      const name = iface.name || iface.interface || "";
+      const opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name + (iface.state ? " (" + iface.state + ")" : "");
+      els.netIpInterface.appendChild(opt);
+    });
+  }
+
+  function renderNetworkInfo(data) {
+    els.netCurrentHostname.textContent = data.hostname || "—";
+    els.netCurrentNodeId.textContent = data.node_id || "—";
+    state.networkLinkKey = data.link_key || "";
+    renderNetworkLinkKey();
+    renderNetworkInterfaces(data.interfaces);
+    renderNetworkInterfaceOptions(data.interfaces);
+    els.netCurrentRoute.textContent = defaultRouteText(data.routes);
+    els.netCurrentDns.textContent = listText(data.dns);
+  }
+
+  async function loadNetworkInfo() {
+    setNetworkFeedback(els.netCurrentFeedback, "Загрузка текущих настроек…", "");
+    try {
+      const resp = await fetch("/api/network", { cache: "no-store" });
+      let data = {};
+      try {
+        data = await resp.json();
+      } catch (_parseErr) {
+        data = {};
+      }
+      if (!resp.ok || !data.ok) {
+        setNetworkFeedback(
+          els.netCurrentFeedback,
+          data.message || data.error || "Текущие настройки недоступны",
+          "is-error"
+        );
+        return;
+      }
+      renderNetworkInfo(data);
+      setNetworkFeedback(els.netCurrentFeedback, "", "");
+    } catch (_err) {
+      setNetworkFeedback(els.netCurrentFeedback, "Сервер недоступен", "is-error");
+    }
+  }
+
+  function syncNetworkIpMode() {
+    const manual = els.netIpModeManual.checked;
+    els.netIpStaticFields.classList.toggle("is-hidden", !manual);
+  }
+
+  function splitCommaList(text) {
+    return String(text || "")
+      .split(",")
+      .map(function (part) {
+        return part.trim();
+      })
+      .filter(Boolean);
+  }
+
+  async function postNetworkJson(path, payload, button, feedbackEl) {
+    if (button) {
+      button.disabled = true;
+    }
+    setNetworkFeedback(feedbackEl, "Отправка…", "");
+    try {
+      const resp = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      let data = {};
+      try {
+        data = await resp.json();
+      } catch (_parseErr) {
+        data = {};
+      }
+      const ok = resp.ok && data.ok !== false;
+      const message = data.message || data.error ||
+        (ok ? "Настройки применены" : "Не удалось применить настройки");
+      setNetworkFeedback(feedbackEl, message, ok ? "is-ok" : "is-error");
+      return ok;
+    } catch (_err) {
+      setNetworkFeedback(feedbackEl, "Ошибка связи с локальным сервером", "is-error");
+      return false;
+    } finally {
+      if (button) {
+        button.disabled = false;
+      }
+    }
+  }
+
+  function openNetworkSettings() {
+    els.networkBackdrop.classList.remove("is-hidden");
+    state.networkLinkKeyVisible = false;
+    state.networkLinkKey = "";
+    renderNetworkLinkKey();
+    clearNetworkFeedback();
+    resetNetworkSecretFields();
+    syncNetworkIpMode();
+    setNetworkTab("current");
+    loadNetworkInfo();
+  }
+
+  function closeNetworkSettings() {
+    els.networkBackdrop.classList.add("is-hidden");
+    state.networkLinkKey = "";
+    state.networkLinkKeyVisible = false;
+    renderNetworkLinkKey();
+    resetNetworkSecretFields();
+    clearNetworkFeedback();
+  }
+
+  async function submitNetworkIp(event) {
+    event.preventDefault();
+    const mode = els.netIpModeManual.checked ? "manual" : "auto";
+    const payload = {
+      interface: els.netIpInterface.value,
+      mode: mode,
+      address: els.netIpAddress.value.trim(),
+      prefix: els.netIpPrefix.value.trim(),
+      gateway: els.netIpGateway.value.trim(),
+      dns: splitCommaList(els.netIpDns.value),
+    };
+    if (!payload.interface) {
+      setNetworkFeedback(els.netIpFeedback, "Выберите интерфейс", "is-error");
+      return;
+    }
+    if (payload.mode === "manual" && !payload.address) {
+      setNetworkFeedback(els.netIpFeedback, "Введите IPv4-адрес", "is-error");
+      return;
+    }
+
+    const ok = await postNetworkJson(
+      "/api/network/ip",
+      payload,
+      els.btnNetIpSubmit,
+      els.netIpFeedback
+    );
+    if (ok) {
+      await loadNetworkInfo();
+    }
+  }
+
+  async function submitNetworkPppoe(event) {
+    event.preventDefault();
+    const payload = {
+      username: els.netPppoeUsername.value.trim(),
+      password: els.netPppoePassword.value,
+      service: els.netPppoeService.value.trim(),
+    };
+    if (!payload.username) {
+      setNetworkFeedback(els.netPppoeFeedback, "Введите имя пользователя PPPoE", "is-error");
+      return;
+    }
+    if (!payload.password) {
+      setNetworkFeedback(els.netPppoeFeedback, "Введите пароль PPPoE", "is-error");
+      return;
+    }
+
+    await postNetworkJson(
+      "/api/network/pppoe",
+      payload,
+      els.btnNetPppoeSubmit,
+      els.netPppoeFeedback
+    );
+    els.netPppoePassword.value = "";
+  }
+
+  async function submitNetworkWireguard(event) {
+    event.preventDefault();
+    const keepaliveRaw = els.netWgKeepalive.value.trim();
+    const payload = {
+      name: els.netWgName.value.trim(),
+      private_key: els.netWgPrivateKey.value,
+      address: els.netWgAddress.value.trim(),
+      prefix: els.netWgPrefix.value.trim(),
+      peer_public_key: els.netWgPeerPublicKey.value.trim(),
+      endpoint: els.netWgEndpoint.value.trim(),
+      allowed_ips: splitCommaList(els.netWgAllowedIps.value),
+      keepalive: keepaliveRaw === ""
+        ? DEFAULT_WIREGUARD_KEEPALIVE
+        : Number(keepaliveRaw),
+    };
+    if (!payload.name) {
+      setNetworkFeedback(els.netWgFeedback, "Введите имя подключения", "is-error");
+      return;
+    }
+    if (!payload.private_key) {
+      setNetworkFeedback(els.netWgFeedback, "Введите приватный ключ", "is-error");
+      return;
+    }
+    if (!payload.address) {
+      setNetworkFeedback(els.netWgFeedback, "Введите адрес интерфейса", "is-error");
+      return;
+    }
+    if (!payload.peer_public_key) {
+      setNetworkFeedback(els.netWgFeedback, "Введите публичный ключ пира", "is-error");
+      return;
+    }
+
+    await postNetworkJson(
+      "/api/network/wireguard",
+      payload,
+      els.btnNetWgSubmit,
+      els.netWgFeedback
+    );
+    els.netWgPrivateKey.value = "";
+  }
+
+  async function submitNetworkOpenvpn(event) {
+    event.preventDefault();
+    const config = els.netOpenvpnConfig.value.trim();
+    const payload = {
+      name: els.netOpenvpnName.value.trim() || DEFAULT_OPENVPN_NAME,
+      config: config,
+    };
+    if (!payload.config) {
+      setNetworkFeedback(els.netOpenvpnFeedback, "Вставьте конфигурацию .ovpn", "is-error");
+      return;
+    }
+
+    await postNetworkJson(
+      "/api/network/openvpn",
+      payload,
+      els.btnNetOpenvpnSubmit,
+      els.netOpenvpnFeedback
+    );
+    els.netOpenvpnConfig.value = "";
+  }
+
   const OSK_ROWS_LOWER = [
     ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "_"],
     ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
@@ -657,6 +1131,23 @@
   els.btnAppsNetwork.addEventListener("click", openAppsModal);
   els.btnAppsClose.addEventListener("click", closeAppsModal);
   els.btnAppsCancel.addEventListener("click", closeAppsModal);
+  els.btnNetworkSettings.addEventListener("click", openNetworkSettings);
+  els.btnNetworkSettingsClose.addEventListener("click", closeNetworkSettings);
+  els.networkTabButtons.forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      setNetworkTab(btn.dataset.networkTab);
+    });
+  });
+  els.btnToggleLinkKey.addEventListener("click", function () {
+    state.networkLinkKeyVisible = !state.networkLinkKeyVisible;
+    renderNetworkLinkKey();
+  });
+  els.netIpModeAuto.addEventListener("change", syncNetworkIpMode);
+  els.netIpModeManual.addEventListener("change", syncNetworkIpMode);
+  els.netIpForm.addEventListener("submit", submitNetworkIp);
+  els.netPppoeForm.addEventListener("submit", submitNetworkPppoe);
+  els.netWgForm.addEventListener("submit", submitNetworkWireguard);
+  els.netOpenvpnForm.addEventListener("submit", submitNetworkOpenvpn);
   els.btnModalClose.addEventListener("click", closeWifiModal);
   els.btnModalCancel.addEventListener("click", closeWifiModal);
   els.wifiForm.addEventListener("submit", submitWifiConnect);

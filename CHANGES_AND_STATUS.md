@@ -161,7 +161,7 @@
    - Файлы `core/mcp_tools.py` и `core/agent.py` содержат критические кроссплатформенные фиксы. Их нужно отправить в репозиторий.
 2. **Протестировать установщик `install.sh` на чистом macOS:**
    - Убедиться, что при отсутствии `python3` через brew корректно выдается подсказка или отрабатывает системный Python.
-3. **Синхронизировать код со шлюзом `smart-server.online`:**
+3. **Синхронизировать код со шлюзом `racknerd-5a24bf9.merino-carob.ts.net`:**
    - После пуша в git запустить `./deploy_gateway.sh`, чтобы обновить раздаваемые клиентам версии `core/mcp_tools.py` и `core/agent.py`.
 
 ---
@@ -186,8 +186,8 @@
 
 ### Диагностика, найденная при живой проверке (2026-10-08)
 
-`smart-server.online` резолвится **только на машине владельца** — записью
-`192.129.148.93 smart-server.online` в `C:\Windows\System32\drivers\etc\hosts`:
+`racknerd-5a24bf9.merino-carob.ts.net` резолвится **только на машине владельца** — записью
+`192.129.148.93 racknerd-5a24bf9.merino-carob.ts.net` в `C:\Windows\System32\drivers\etc\hosts`:
 
 * публичные резолверы (8.8.8.8, 1.1.1.1, 9.9.9.9) отвечают NXDOMAIN — записи в DNS нет;
 * Tailscale это имя не маршрутизирует: в `tailscale dns status` split-DNS есть только для `ts.net.`;
@@ -197,14 +197,14 @@
 
 | Адрес | Состояние |
 | :--- | :--- |
-| `https://smart-server.online/health` | 200, сертификат Let's Encrypt (до 2026-12-20) — но только там, где есть запись в `hosts` |
-| `https://smart-server.online/install.sh` | 200, но раздаёт **старую** копию (`PUBLISHED_DOMAIN="racknerd-5a24bf9.merino-carob.ts.net"`) |
+| `https://racknerd-5a24bf9.merino-carob.ts.net/health` | 200, сертификат Let's Encrypt (до 2026-12-20) — но только там, где есть запись в `hosts` |
+| `https://racknerd-5a24bf9.merino-carob.ts.net/install.sh` | 200, но раздаёт **старую** копию (`PUBLISHED_DOMAIN="racknerd-5a24bf9.merino-carob.ts.net"`) |
 | `https://racknerd-5a24bf9.merino-carob.ts.net/health` | 200 — шлюз отвечает, TLS валиден |
 | `https://racknerd-5a24bf9.merino-carob.ts.net/install.sh` и `/core/*.py` | **404** — этот vhost отдаёт только API, статики на нём нет |
 
 Отсюда два способа поставить узел на телефон:
 
-1. **Публичный DNS (рекомендуется).** Добавить A-запись `smart-server.online` →
+1. **Публичный DNS (рекомендуется).** Добавить A-запись `racknerd-5a24bf9.merino-carob.ts.net` →
    `192.129.148.93` у регистратора: сертификат уже покрывает это имя, и однострочная
    установка из README заработает с любого телефона в любой сети. Затем перевыпустить
    раздаваемую копию: `./deploy_gateway.sh`.

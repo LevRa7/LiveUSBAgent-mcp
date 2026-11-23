@@ -20,7 +20,7 @@ import gateway
 def _post_request(query: str, body: dict, headers: dict | None = None) -> Request:
     raw = json.dumps(body).encode()
     hdrs = [
-        (b"host", b"smart-server.online"),
+        (b"host", b"racknerd-5a24bf9.merino-carob.ts.net"),
         (b"content-type", b"application/json"),
         (b"accept", b"application/json, text/event-stream"),
     ]
@@ -34,7 +34,7 @@ def _post_request(query: str, body: dict, headers: dict | None = None) -> Reques
         "headers": hdrs,
         "query_string": query.lstrip("?").encode(),
         "scheme": "https",
-        "server": ("smart-server.online", 443),
+        "server": ("racknerd-5a24bf9.merino-carob.ts.net", 443),
         "client": ("127.0.0.1", 12345),
     }
 

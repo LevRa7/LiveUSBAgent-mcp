@@ -13,25 +13,25 @@ Google Cloud — только upstream-провайдер личности. Он
 
 ## 0. Для текущего Racknerd-хоста (192.129.148.93)
 
-Проверено по SSH: хост `racknerd-5a24bf9`, публичный домен **`smart-server.online`**
+Проверено по SSH: хост `racknerd-5a24bf9`, публичный домен **`racknerd-5a24bf9.merino-carob.ts.net`**
 (резолвится в `192.129.148.93`), TLS-сертификат действует, шлюз отвечает
-`https://smart-server.online/health` → `200`, `/sse` → `401` (значит, это шлюз).
+`https://racknerd-5a24bf9.merino-carob.ts.net/health` → `200`, `/sse` → `401` (значит, это шлюз).
 
 Поэтому для этого сервера:
 
 ```dotenv
-MESH_ACCOUNT_BASE_URL=https://smart-server.online
+MESH_ACCOUNT_BASE_URL=https://racknerd-5a24bf9.merino-carob.ts.net
 ```
 
 Redirect URI в Google Console:
 
 ```
-https://smart-server.online/account/auth/google/callback
+https://racknerd-5a24bf9.merino-carob.ts.net/account/auth/google/callback
 ```
 
-Не используйте `accounts.smart-server.online`: этот vhost намеренно отдаёт
+Не используйте `accounts.racknerd-5a24bf9.merino-carob.ts.net`: этот vhost намеренно отдаёт
 `410 Gone` после инцидента с фишинговым зеркалом (см. конфиг nginx
-`gemini-accounts-gone.smart-server.online`). `racknerd-5a24bf9.merino-carob.ts.net`
+`gemini-accounts-gone.racknerd-5a24bf9.merino-carob.ts.net`). `racknerd-5a24bf9.merino-carob.ts.net`
 — Tailscale-адрес `100.x`, серверы Google до него не достучатся, для OAuth он не
 подходит.
 

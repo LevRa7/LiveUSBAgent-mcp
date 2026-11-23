@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
+import stat
 import threading
 import urllib.error
 import urllib.request
@@ -489,7 +491,7 @@ def test_read_session_state_resolves_link_key_as_token(tmp_path: Path):
             {
                 "node_id": "live-abc123",
                 "link_key": "lk_live_key_42",
-                "connect_url": "https://smart-server.online/connect/ABCD-1234",
+                "connect_url": "https://racknerd-5a24bf9.merino-carob.ts.net/connect/ABCD-1234",
             }
         ),
         encoding="utf-8",
@@ -541,7 +543,7 @@ def test_trigger_session_regenerate_systemctl_and_agent_env_cleanup(tmp_path: Pa
 def test_trigger_session_regenerate_fallback_register_ephemeral_node(tmp_path: Path, monkeypatch):
     state_dir = tmp_path / "rhm-live"
     state_dir.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("MESH_GATEWAY", "https://smart-server.online")
+    monkeypatch.setenv("MESH_GATEWAY", "https://racknerd-5a24bf9.merino-carob.ts.net")
 
     reg_calls: List[Tuple[str, str]] = []
 
@@ -563,7 +565,7 @@ def test_trigger_session_regenerate_fallback_register_ephemeral_node(tmp_path: P
     res = kiosk.trigger_session_regenerate(state_dir=state_dir, run_cmd=no_systemd)
     assert res["ok"] is True
     assert res["method"] == "register_ephemeral_node"
-    assert reg_calls == [("https://smart-server.online", str(state_dir))]
+    assert reg_calls == [("https://racknerd-5a24bf9.merino-carob.ts.net", str(state_dir))]
 
 
 # --- 3b. Kiosk «Открыть терминал» local shell escape ---
@@ -917,7 +919,7 @@ def test_firstboot_tui_renders_session_json(tmp_path: Path):
         json.dumps(
             {
                 "node_id": "live-tui-99",
-                "connect_url": "https://smart-server.online/connect/TUI-99",
+                "connect_url": "https://racknerd-5a24bf9.merino-carob.ts.net/connect/TUI-99",
                 "link_key": "lk_tui_secret_99",
             }
         ),
@@ -925,7 +927,7 @@ def test_firstboot_tui_renders_session_json(tmp_path: Path):
     )
     banner = tui.render_banner(state_dir=state_dir)
     assert "live-tui-99" in banner
-    assert "https://smart-server.online/connect/TUI-99" in banner
+    assert "https://racknerd-5a24bf9.merino-carob.ts.net/connect/TUI-99" in banner
     assert "lk_tui_secret_99" in banner
     assert "FULL ACCESS" in banner
     assert callable(tui.run_loop)
@@ -1120,4 +1122,812 @@ def test_default_run_cmd_timeout_redacts_password_args(monkeypatch):
     assert out == ""
     assert err == "command timed out: nmcli"
     assert "SuperSecretPass99" not in err
+
+
+# --- 5. «Настройки сети»: GET /api/network snapshot ------------------------
+
+NETWORK_IP_ADDR_JSON = json.dumps(
+    [
+        {
+            "ifindex": 1,
+            "ifname": "lo",
+            "operstate": "UNKNOWN",
+            "address": "00:00:00:00:00:00",
+            "addr_info": [
+                {"family": "inet", "local": "127.0.0.1", "prefixlen": 8},
+            ],
+        },
+        {
+            "ifindex": 2,
+            "ifname": "eth0",
+            "operstate": "UP",
+            "address": "52:54:00:12:34:56",
+            "addr_info": [
+                {"family": "inet", "local": "192.168.1.50", "prefixlen": 24},
+                {"family": "inet6", "local": "fe80::5054:ff:fe12:3456", "prefixlen": 64},
+            ],
+        },
+        {
+            "ifindex": 3,
+            "ifname": "wlan0",
+            "operstate": "DOWN",
+            "address": "aa:bb:cc:dd:ee:ff",
+            "addr_info": [],
+        },
+    ]
+)
+
+NETWORK_ROUTE_JSON = json.dumps(
+    [
+        {
+            "dst": "default",
+            "gateway": "192.168.1.1",
+            "dev": "eth0",
+            "protocol": "dhcp",
+            "metric": 100,
+            "pref": "medium",
+        }
+    ]
+)
+
+WG_PRIVATE_KEY = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk="
+WG_PEER_KEY = "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg="
+
+OPENVPN_CONFIG = (
+    "client\n"
+    "dev tun\n"
+    "proto udp\n"
+    "remote vpn.example.com 1194\n"
+    "resolv-retry infinite\n"
+    "nobind\n"
+    "<ca>\n"
+    "-----BEGIN CERTIFICATE-----\n"
+    "MIIB\n"
+    "-----END CERTIFICATE-----\n"
+    "</ca>\n"
+)
+
+
+def _wireguard_payload(**overrides: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "name": "office",
+        "private_key": WG_PRIVATE_KEY,
+        "address": "10.7.0.2",
+        "prefix": 24,
+        "peer_public_key": WG_PEER_KEY,
+        "endpoint": "vpn.example.com:51820",
+        "allowed_ips": "0.0.0.0/0, ::/0",
+        "keepalive": 25,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _network_run_cmd(calls: List[List[str]], state: Dict[str, Any]):
+    """Deterministic ip/nmcli stand-in for the network-settings endpoints."""
+
+    def runner(cmd: List[str], timeout: float = 5.0) -> Tuple[int, str, str]:
+        calls.append(list(cmd))
+        if not cmd:
+            return 1, "", "empty"
+        exe = cmd[0]
+        if exe == "ip":
+            if "-j" in cmd and "addr" in cmd:
+                return 0, NETWORK_IP_ADDR_JSON, ""
+            if "-j" in cmd and "route" in cmd:
+                return 0, NETWORK_ROUTE_JSON, ""
+            if "route" in cmd:
+                return 0, "default via 192.168.1.1 dev eth0 metric 100\n", ""
+            return 0, "", ""
+        if exe == "nmcli":
+            failure = state.get("fail") or ""
+            if "connection" in cmd and "show" in cmd and "import" not in cmd:
+                if failure == "show":
+                    return 1, "", "Error: NetworkManager is not running"
+                return 0, (state["active"] if "--active" in cmd else state["names"]), ""
+            action = cmd[2] if len(cmd) > 2 else ""
+            if action == "import":
+                config_path = Path(cmd[-1])
+                existed = config_path.is_file()
+                state["openvpn_temp"] = {
+                    "path": config_path,
+                    "existed": existed,
+                    "mode": (
+                        stat.S_IMODE(config_path.stat().st_mode) if existed else None
+                    ),
+                }
+            if failure and failure == action:
+                detail = f"Error: nmcli could not {action} the connection"
+                if action == "add":
+                    detail += f" password={state.get('password', '')}"
+                return 1, "", detail
+            return 0, "Connection successfully activated\n", ""
+        return 127, "", f"not mocked: {exe}"
+
+    return runner
+
+
+@pytest.fixture()
+def network_server(tmp_path: Path, monkeypatch):
+    """KioskServer with a mocked ip/nmcli and a real tmp resolv.conf/session."""
+    state_dir = tmp_path / "live-state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "ready": True,
+                "connect_url": "https://racknerd-5a24bf9.merino-carob.ts.net/connect/NET-1",
+                "node_id": "live-net-01",
+                "link_key": "lk_net_secret_01",
+                # Must never be published by GET /api/network.
+                "device_token": "dev_tok_must_not_leak_01",
+                "tunnel_status": "connected",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resolv = tmp_path / "resolv.conf"
+    resolv.write_text(
+        "# Generated by NetworkManager\n"
+        "nameserver 1.1.1.1\n"
+        "nameserver 8.8.8.8\n"
+        "search lan\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(kiosk, "RESOLV_CONF_PATH", resolv)
+    monkeypatch.setattr(kiosk, "NM_CONNECTIONS_DIR", tmp_path / "system-connections")
+
+    calls: List[List[str]] = []
+    state: Dict[str, Any] = {
+        "active": "Wired connection 1:eth0:activated\n",
+        "names": "rhm-pppoe\nWired connection 1\n",
+        "fail": None,
+        "password": "",
+    }
+    monkeypatch.setattr(
+        kiosk.shutil,
+        "which",
+        lambda name: "/usr/bin/nmcli" if name == "nmcli" else None,
+    )
+
+    server = kiosk.KioskServer(
+        ("127.0.0.1", 0),
+        static_dir=KIOSK_UI_DIR,
+        state_dir=state_dir,
+        run_cmd=_network_run_cmd(calls, state),
+        internet_checker=lambda: {
+            "reachable": True,
+            "ip": "192.168.1.50",
+            "target": "1.1.1.1",
+        },
+    )
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield {
+            "base_url": f"http://127.0.0.1:{port}",
+            "calls": calls,
+            "state": state,
+            "tmp_path": tmp_path,
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_http_api_network_snapshot_parses_ip_nmcli_and_resolv(
+    network_server, monkeypatch
+):
+    base = network_server["base_url"]
+    status, _, body = _http_request(base, "/api/network")
+    assert status == 200
+    data = json.loads(body.decode("utf-8"))
+
+    assert data["ok"] is True
+    assert data["hostname"] == kiosk.socket.gethostname()
+    assert data["node_id"] == "live-net-01"
+    assert data["link_key"] == "lk_net_secret_01"
+    assert data["dns"] == ["1.1.1.1", "8.8.8.8"]
+    assert data["nmcli_available"] is True
+    assert data["routes"] == [
+        {
+            "destination": "default",
+            "gateway": "192.168.1.1",
+            "device": "eth0",
+            "metric": 100,
+        }
+    ]
+
+    interfaces = {item["name"]: item for item in data["interfaces"]}
+    assert set(interfaces) == {"eth0", "wlan0"}  # loopback is never listed
+
+    eth0 = interfaces["eth0"]
+    assert eth0["mac"] == "52:54:00:12:34:56"
+    assert eth0["state"] == "up"
+    assert eth0["connection"] == "Wired connection 1"
+    assert eth0["connection_state"] == "activated"
+    assert eth0["ipv4"] == "192.168.1.50"
+    assert eth0["prefix"] == 24
+    assert eth0["gateway"] == "192.168.1.1"
+    assert eth0["dns"] == ["1.1.1.1", "8.8.8.8"]
+
+    wlan0 = interfaces["wlan0"]
+    assert wlan0["state"] == "down"
+    assert wlan0["connection"] == ""
+    assert wlan0["ipv4"] is None
+    assert wlan0["dns"] == []
+    assert wlan0["gateway"] == ""
+
+    # The device token from session.json must never reach the browser.
+    raw = body.decode("utf-8")
+    assert "dev_tok_must_not_leak_01" not in raw
+    assert "device_token" not in raw
+    assert "token" not in data
+
+    # The snapshot sits behind the existing Host/Origin/Sec-Fetch gate.
+    st_evil, _, _ = _http_request(
+        base, "/api/network", extra_headers={"Origin": "https://evil.example.com"}
+    )
+    assert st_evil == 403
+
+
+def test_network_snapshot_never_raises_without_tools(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(kiosk, "RESOLV_CONF_PATH", tmp_path / "missing-resolv.conf")
+    monkeypatch.setattr(kiosk.shutil, "which", lambda name: None)
+
+    def missing(cmd: List[str], timeout: float = 5.0) -> Tuple[int, str, str]:
+        return 127, "", f"command not found: {cmd[0]}"
+
+    snapshot = kiosk._network_snapshot(
+        run_cmd=missing, state_dir=tmp_path / "no-session"
+    )
+    assert snapshot["ok"] is True
+    assert snapshot["interfaces"] == []
+    assert snapshot["dns"] == []
+    assert snapshot["routes"] == []
+    assert snapshot["node_id"] == ""
+    assert snapshot["link_key"] == ""
+    assert snapshot["nmcli_available"] is False
+
+
+def test_read_resolv_conf_size_cap_and_dedup(tmp_path: Path):
+    # Comments larger than the cap must hide anything after them.
+    junk = "#" + ("x" * 4000) + "\n"
+    capped = tmp_path / "capped.conf"
+    capped.write_text(
+        (junk * 3) + "nameserver 9.9.9.9\n", encoding="utf-8"
+    )
+    assert kiosk._read_resolv_conf(capped) == []
+
+    parsed = tmp_path / "parsed.conf"
+    parsed.write_text(
+        "nameserver 9.9.9.9\n"
+        "nameserver 9.9.9.9\n"
+        "options edns0\n"
+        "nameserver bad-value\n"
+        "nameserver 1.1.1.1\n",
+        encoding="utf-8",
+    )
+    assert kiosk._read_resolv_conf(parsed) == ["9.9.9.9", "1.1.1.1"]
+    assert kiosk._read_resolv_conf(tmp_path / "absent.conf") == []
+
+
+# --- 5b. POST /api/network/ip ----------------------------------------------
+
+
+def test_network_ip_manual_and_auto_apply_through_nmcli(network_server):
+    base = network_server["base_url"]
+    calls = network_server["calls"]
+
+    status, _, body = _http_request(
+        base,
+        "/api/network/ip",
+        method="POST",
+        payload={
+            "interface": "eth0",
+            "mode": "manual",
+            "address": "192.168.1.77",
+            "prefix": 24,
+            "gateway": "192.168.1.1",
+            "dns": "1.1.1.1, 8.8.8.8",
+        },
+    )
+    data = json.loads(body.decode("utf-8"))
+    assert status == 200, data
+    assert data["ok"] is True
+    assert data["mode"] == "manual"
+    assert data["interface"] == "eth0"
+    assert data["connection"] == "Wired connection 1"
+    assert [
+        "nmcli",
+        "con",
+        "mod",
+        "Wired connection 1",
+        "ipv4.method",
+        "manual",
+        "ipv4.addresses",
+        "192.168.1.77/24",
+        "ipv4.gateway",
+        "192.168.1.1",
+        "ipv4.dns",
+        "1.1.1.1,8.8.8.8",
+    ] in calls
+    assert ["nmcli", "con", "up", "Wired connection 1"] in calls
+
+    status_auto, _, body_auto = _http_request(
+        base,
+        "/api/network/ip",
+        method="POST",
+        payload={"interface": "eth0", "mode": "auto", "dns": ""},
+    )
+    auto_data = json.loads(body_auto.decode("utf-8"))
+    assert status_auto == 200, auto_data
+    assert auto_data["mode"] == "auto"
+    assert [
+        "nmcli",
+        "con",
+        "mod",
+        "Wired connection 1",
+        "ipv4.method",
+        "auto",
+        "ipv4.addresses",
+        "",
+        "ipv4.gateway",
+        "",
+        "ipv4.dns",
+        "",
+        "ipv4.ignore-auto-dns",
+        "no",
+    ] in calls
+    assert calls.count(["nmcli", "con", "up", "Wired connection 1"]) == 2
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"interface": "eth0", "mode": "manual", "address": "999.1.1.1", "prefix": 24},
+        {"interface": "eth0", "mode": "manual", "address": "192.168.1.10", "prefix": 33},
+        {"interface": "eth0", "mode": "manual", "address": "", "prefix": 24},
+        {"interface": "eth0; reboot", "mode": "auto"},
+        {"interface": "eth 0", "mode": "auto"},
+        {"interface": "", "mode": "auto"},
+        {"interface": "eth0", "mode": "static"},
+        {
+            "interface": "eth0",
+            "mode": "manual",
+            "address": "192.168.1.10",
+            "prefix": 24,
+            "gateway": "ne-shlyuz",
+        },
+        {
+            "interface": "eth0",
+            "mode": "manual",
+            "address": "192.168.1.10",
+            "prefix": "24\nreboot",
+        },
+        {"interface": "eth0", "mode": "auto", "dns": "1.1.1.1; reboot"},
+        {"interface": "eth0", "mode": "auto", "dns": "1.1.1.1 8.8.8.8"},
+        {"interface": "eth0", "mode": "auto", "dns": "1.1.1.1,999.9.9.9"},
+    ],
+)
+def test_network_ip_rejects_invalid_input(network_server, payload):
+    base = network_server["base_url"]
+    calls = network_server["calls"]
+
+    status, _, body = _http_request(
+        base, "/api/network/ip", method="POST", payload=payload
+    )
+    assert status == 400, body
+    data = json.loads(body.decode("utf-8"))
+    assert data["ok"] is False
+    assert data["message"]
+    # Validation happens before anything reaches NetworkManager.
+    assert not [cmd for cmd in calls if cmd[:3] == ["nmcli", "con", "mod"]]
+
+
+# --- 5c. POST /api/network/pppoe -------------------------------------------
+
+
+def test_network_pppoe_argv_and_password_redaction(network_server):
+    base = network_server["base_url"]
+    calls = network_server["calls"]
+
+    status, _, body = _http_request(
+        base,
+        "/api/network/pppoe",
+        method="POST",
+        payload={
+            "username": "user@isp.example",
+            "password": "s3cr3t-Pass",
+            "service": "internet",
+        },
+    )
+    data = json.loads(body.decode("utf-8"))
+    assert status == 200, data
+    assert data["ok"] is True
+    assert data["redacted"] is True
+    assert data["connection"] == "rhm-pppoe"
+
+    assert ["nmcli", "con", "delete", "rhm-pppoe"] in calls
+    assert [
+        "nmcli",
+        "con",
+        "add",
+        "type",
+        "pppoe",
+        "con-name",
+        "rhm-pppoe",
+        "ifname",
+        "*",
+        "username",
+        "user@isp.example",
+        "password",
+        "s3cr3t-Pass",
+        # The PPPoE service is the pppoe.service property, in the
+        # `<setting>.<property>` form `nmcli con add` documents.
+        "pppoe.service",
+        "internet",
+    ] in calls
+    assert ["nmcli", "con", "up", "rhm-pppoe"] in calls
+
+    assert "s3cr3t-Pass" not in body.decode("utf-8")
+
+
+def test_network_pppoe_without_service_skips_service_arg(network_server):
+    calls = network_server["calls"]
+    status, _, body = _http_request(
+        network_server["base_url"],
+        "/api/network/pppoe",
+        method="POST",
+        payload={"username": "user@isp", "password": "pw"},
+    )
+    assert status == 200, body
+    add_calls = [cmd for cmd in calls if cmd[:5] == ["nmcli", "con", "add", "type", "pppoe"]]
+    assert len(add_calls) == 1
+    assert "service" not in add_calls[0]
+
+
+def test_network_pppoe_failure_redacts_password(network_server):
+    state = network_server["state"]
+    state["fail"] = "add"
+    state["password"] = "s3cr3t-Pass"
+
+    status, _, body = _http_request(
+        network_server["base_url"],
+        "/api/network/pppoe",
+        method="POST",
+        payload={"username": "user@isp", "password": "s3cr3t-Pass"},
+    )
+    assert status == 503
+    data = json.loads(body.decode("utf-8"))
+    assert data["ok"] is False
+    assert "s3cr3t-Pass" not in body.decode("utf-8")
+    assert "***" in data["message"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"username": "", "password": "pw"},
+        {"username": "user name", "password": "pw"},
+        {"username": "user@isp", "password": ""},
+        {"username": "user@isp", "password": "pass\nword"},
+        {"username": "user@isp", "password": "pw", "service": "bad service"},
+        {"username": "user@isp", "password": "pw", "service": "svc;reboot"},
+    ],
+)
+def test_network_pppoe_rejects_invalid_input(network_server, payload):
+    status, _, body = _http_request(
+        network_server["base_url"], "/api/network/pppoe", method="POST", payload=payload
+    )
+    assert status == 400, body
+    assert json.loads(body.decode("utf-8"))["ok"] is False
+    assert not [
+        cmd
+        for cmd in network_server["calls"]
+        if cmd[:5] == ["nmcli", "con", "add", "type", "pppoe"]
+    ]
+
+
+# --- 5d. POST /api/network/wireguard ---------------------------------------
+
+
+def test_network_wireguard_writes_0600_keyfile_without_echoing_key(
+    network_server, monkeypatch
+):
+    connections_dir = network_server["tmp_path"] / "system-connections"
+    monkeypatch.setattr(kiosk, "NM_CONNECTIONS_DIR", connections_dir)
+
+    opened: List[Tuple[str, int]] = []
+    real_open = os.open
+
+    def spy_open(path, flags, mode=0o777, **kwargs):
+        opened.append((str(path), mode))
+        return real_open(path, flags, mode, **kwargs)
+
+    # Windows cannot express POSIX bits, so also record the requested mode.
+    monkeypatch.setattr(kiosk.os, "open", spy_open)
+
+    status, _, body = _http_request(
+        network_server["base_url"],
+        "/api/network/wireguard",
+        method="POST",
+        payload=_wireguard_payload(),
+    )
+    data = json.loads(body.decode("utf-8"))
+    assert status == 200, data
+    assert data["ok"] is True
+    assert data["redacted"] is True
+    assert data["connection"] == "rhm-wg-office"
+
+    raw = body.decode("utf-8")
+    assert WG_PRIVATE_KEY not in raw
+    assert "private_key" not in raw
+
+    keyfile = connections_dir / "rhm-wg-office.nmconnection"
+    assert keyfile.is_file()
+    content = keyfile.read_text(encoding="utf-8")
+    for expected in (
+        "[connection]",
+        "id=rhm-wg-office",
+        "type=wireguard",
+        "autoconnect=true",
+        "[wireguard]",
+        f"private-key={WG_PRIVATE_KEY}",
+        f"[wireguard-peer.{WG_PEER_KEY}]",
+        "endpoint=vpn.example.com:51820",
+        "allowed-ips=0.0.0.0/0;::/0;",
+        "persistent-keepalive=25",
+        "[ipv4]",
+        "method=manual",
+        "address1=10.7.0.2/24",
+        "[ipv6]",
+    ):
+        assert expected in content, expected
+
+    assert (str(keyfile), 0o600) in opened
+    if os.name == "posix":
+        assert stat.S_IMODE(keyfile.stat().st_mode) == 0o600
+
+    calls = network_server["calls"]
+    assert ["nmcli", "con", "reload"] in calls
+    assert ["nmcli", "con", "up", "rhm-wg-office"] in calls
+    # The keyfile never travels through a shell or a formatted command line.
+    assert not any(isinstance(cmd, str) for cmd in calls)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _wireguard_payload(private_key="not-a-key"),
+        _wireguard_payload(peer_public_key="short"),
+        _wireguard_payload(private_key=WG_PEER_KEY, peer_public_key=WG_PEER_KEY),
+        _wireguard_payload(name="../etc/passwd"),
+        _wireguard_payload(name="office;reboot"),
+        _wireguard_payload(address="10.7.0.999"),
+        _wireguard_payload(prefix=33),
+        _wireguard_payload(endpoint="vpn.example.com"),
+        _wireguard_payload(endpoint="vpn.example.com:0"),
+        _wireguard_payload(endpoint="vpn.example.com:70000"),
+        _wireguard_payload(allowed_ips="not-a-cidr"),
+        _wireguard_payload(allowed_ips=""),
+        _wireguard_payload(keepalive=70000),
+        _wireguard_payload(keepalive="25;reboot"),
+    ],
+)
+def test_network_wireguard_rejects_invalid_input(
+    network_server, monkeypatch, payload
+):
+    connections_dir = network_server["tmp_path"] / "wg-invalid"
+    monkeypatch.setattr(kiosk, "NM_CONNECTIONS_DIR", connections_dir)
+
+    status, _, body = _http_request(
+        network_server["base_url"],
+        "/api/network/wireguard",
+        method="POST",
+        payload=payload,
+    )
+    assert status == 400, body
+    assert json.loads(body.decode("utf-8"))["ok"] is False
+    assert not connections_dir.exists()
+    assert not [cmd for cmd in network_server["calls"] if cmd[:2] == ["nmcli", "con"]]
+
+
+def test_network_wireguard_removes_keyfile_when_activation_fails(
+    network_server, monkeypatch
+):
+    connections_dir = network_server["tmp_path"] / "wg-failing"
+    monkeypatch.setattr(kiosk, "NM_CONNECTIONS_DIR", connections_dir)
+    network_server["state"]["fail"] = "up"
+
+    status, _, body = _http_request(
+        network_server["base_url"],
+        "/api/network/wireguard",
+        method="POST",
+        payload=_wireguard_payload(),
+    )
+    assert status == 503
+    assert json.loads(body.decode("utf-8"))["ok"] is False
+    assert not (connections_dir / "rhm-wg-office.nmconnection").exists()
+    assert WG_PRIVATE_KEY not in body.decode("utf-8")
+
+
+# --- 5e. POST /api/network/openvpn -----------------------------------------
+
+
+def test_network_openvpn_imports_temp_file_and_cleans_up(network_server):
+    calls = network_server["calls"]
+    status, _, body = _http_request(
+        network_server["base_url"],
+        "/api/network/openvpn",
+        method="POST",
+        payload={"name": "corp", "config": OPENVPN_CONFIG},
+    )
+    data = json.loads(body.decode("utf-8"))
+    assert status == 200, data
+    assert data["ok"] is True
+    assert data["redacted"] is True
+    assert data["connection"] == "corp"
+
+    imports = [
+        cmd
+        for cmd in calls
+        if cmd[:5] == ["nmcli", "connection", "import", "type", "openvpn"]
+    ]
+    assert len(imports) == 1
+    argv = imports[0]
+    assert argv[5] == "file"
+    config_path = Path(argv[6])
+    assert config_path.name == "corp.ovpn"
+    assert config_path.parent.name.startswith("rhm-ovpn-")
+    assert ["nmcli", "con", "up", "corp"] in calls
+
+    recorded = network_server["state"]["openvpn_temp"]
+    assert recorded["existed"] is True
+    if os.name == "posix":
+        assert recorded["mode"] == 0o600
+    # The temp config is deleted after the import, even on success.
+    assert not config_path.exists()
+    assert not config_path.parent.exists()
+    # Its contents (certificates/keys) are never echoed back.
+    raw = body.decode("utf-8")
+    assert "BEGIN CERTIFICATE" not in raw
+    assert "<ca>" not in raw
+
+
+def test_network_openvpn_cleans_temp_file_when_import_fails(network_server):
+    network_server["state"]["fail"] = "import"
+    status, _, body = _http_request(
+        network_server["base_url"],
+        "/api/network/openvpn",
+        method="POST",
+        payload={"name": "corp", "config": OPENVPN_CONFIG},
+    )
+    assert status == 503
+    assert json.loads(body.decode("utf-8"))["ok"] is False
+
+    recorded = network_server["state"]["openvpn_temp"]
+    config_path = Path(recorded["path"])
+    assert not config_path.exists()
+    assert not config_path.parent.exists()
+    assert "BEGIN CERTIFICATE" not in body.decode("utf-8")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"name": "corp", "config": "dev tun\nremote vpn.example.com 1194\n"},
+        {"name": "corp", "config": "client\ndev tun\n"},
+        {"name": "corp", "config": "client\nremote\n"},
+        {"name": "corp", "config": ""},
+        {"name": "corp", "config": "client\nremote vpn.example.com 1194\n\x00"},
+        {"name": "../evil", "config": OPENVPN_CONFIG},
+        {"name": "corp;reboot", "config": OPENVPN_CONFIG},
+    ],
+)
+def test_network_openvpn_rejects_invalid_config(network_server, payload):
+    status, _, body = _http_request(
+        network_server["base_url"], "/api/network/openvpn", method="POST", payload=payload
+    )
+    assert status == 400, body
+    assert json.loads(body.decode("utf-8"))["ok"] is False
+    assert "openvpn_temp" not in network_server["state"]
+    assert not [
+        cmd
+        for cmd in network_server["calls"]
+        if cmd[:5] == ["nmcli", "connection", "import", "type", "openvpn"]
+    ]
+
+
+# --- 5f. 503 paths ----------------------------------------------------------
+
+
+def test_network_actions_return_503_when_nmcli_is_missing(network_server, monkeypatch):
+    monkeypatch.setattr(kiosk.shutil, "which", lambda name: None)
+    base = network_server["base_url"]
+    calls = network_server["calls"]
+
+    payloads = [
+        ("/api/network/ip", {"interface": "eth0", "mode": "auto"}),
+        ("/api/network/pppoe", {"username": "user@isp", "password": "pw"}),
+        ("/api/network/wireguard", _wireguard_payload()),
+        ("/api/network/openvpn", {"name": "corp", "config": OPENVPN_CONFIG}),
+    ]
+    for path, payload in payloads:
+        status, _, body = _http_request(base, path, method="POST", payload=payload)
+        assert status == 503, (path, body)
+        data = json.loads(body.decode("utf-8"))
+        assert data["ok"] is False
+        assert "NetworkManager" in data["message"]
+
+    # Nothing was executed and no keyfile was written without nmcli.
+    assert calls == []
+    assert not (network_server["tmp_path"] / "system-connections").exists()
+
+
+@pytest.mark.parametrize("failure", ["show", "mod", "up"])
+def test_network_ip_returns_503_when_nmcli_fails(network_server, failure):
+    network_server["state"]["fail"] = failure
+    status, _, body = _http_request(
+        network_server["base_url"],
+        "/api/network/ip",
+        method="POST",
+        payload={"interface": "eth0", "mode": "auto"},
+    )
+    assert status == 503, body
+    data = json.loads(body.decode("utf-8"))
+    assert data["ok"] is False
+    assert data["message"]
+
+
+def test_network_openvpn_returns_503_when_nmcli_fails(network_server):
+    network_server["state"]["fail"] = "import"
+    status, _, body = _http_request(
+        network_server["base_url"],
+        "/api/network/openvpn",
+        method="POST",
+        payload={"name": "corp", "config": OPENVPN_CONFIG},
+    )
+    assert status == 503
+    data = json.loads(body.decode("utf-8"))
+    assert data["ok"] is False
+    # The temp path is scrubbed from the diagnostic message.
+    assert "rhm-ovpn-" not in data["message"]
+    assert "corp.ovpn" not in data["message"]
+
+
+def test_network_ip_returns_503_without_an_active_connection(network_server):
+    network_server["state"]["active"] = ""
+    status, _, body = _http_request(
+        network_server["base_url"],
+        "/api/network/ip",
+        method="POST",
+        payload={"interface": "eth0", "mode": "auto"},
+    )
+    assert status == 503
+    data = json.loads(body.decode("utf-8"))
+    assert data["ok"] is False
+    assert "eth0" in data["message"]
+    assert not [cmd for cmd in network_server["calls"] if cmd[:3] == ["nmcli", "con", "mod"]]
+
+
+@pytest.mark.parametrize("raw_body", [b"{not json", b"[1, 2, 3]"])
+def test_network_actions_reject_malformed_json_without_touching_nmcli(
+    network_server, raw_body
+):
+    status, _, body = _http_request(
+        network_server["base_url"],
+        "/api/network/ip",
+        method="POST",
+        extra_headers={"Content-Type": "application/json"},
+        raw_body=raw_body,
+    )
+    assert status == 400
+    data = json.loads(body.decode("utf-8"))
+    assert data["ok"] is False
+    assert data["message"]
+    assert network_server["calls"] == []
 

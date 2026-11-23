@@ -104,7 +104,7 @@ sudo ./ops/live-usb/build-iso.sh --with-external-skills --build
 
 Useful `build-iso.sh` options:
 - `--work-dir PATH` — Custom `live-build` workspace (default: `/tmp/rhm-live-build`; use e.g. `/var/tmp/rhm-live-build` if `/tmp` is small).
-- `--gateway HOST` — Mesh gateway hostname (default: `smart-server.online`).
+- `--gateway HOST` — Mesh gateway hostname (default: `racknerd-5a24bf9.merino-carob.ts.net`).
 - `--distro NAME` / `--arch ARCH` — Debian suite and architecture (defaults: `trixie`, `amd64`).
 - Omit `--build` if you want to inspect the generated `live-build` config before running `sudo lb build` manually.
 

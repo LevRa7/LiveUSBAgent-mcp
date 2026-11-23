@@ -23,6 +23,7 @@
           <div class="head-actions">
             <button type="button" class="btn btn-secondary" id="btn-hidden-wifi">Скрытая сеть</button>
             <button type="button" class="btn btn-primary" id="btn-refresh-wifi">Обновить список</button>
+            <button type="button" class="btn btn-secondary" id="btn-network-settings">Настройки сети</button>
             <button type="button" class="btn btn-secondary" id="btn-apps-network">Приложения</button>
             <button type="button" class="btn btn-secondary" id="btn-terminal-network">Открыть терминал</button>
           </div>
@@ -189,6 +190,207 @@
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" id="btn-apps-cancel">Отмена</button>
       </div>
+    </div>
+  </div>
+
+  <div id="network-settings-backdrop" class="modal-backdrop is-hidden" role="dialog" aria-modal="true" aria-labelledby="network-settings-title">
+    <div class="card modal-card modal-card-wide">
+      <div class="card-head">
+        <h2 id="network-settings-title" class="card-title">Настройки сети</h2>
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-network-settings-close">Закрыть</button>
+      </div>
+
+      <div class="network-tabs" role="tablist" aria-label="Разделы настроек сети">
+        <button type="button" class="tab-btn is-active" id="net-tab-current" data-network-tab="current" role="tab" aria-selected="true" aria-controls="net-panel-current">Текущие</button>
+        <button type="button" class="tab-btn" id="net-tab-ip" data-network-tab="ip" role="tab" aria-selected="false" aria-controls="net-panel-ip">IP и DNS</button>
+        <button type="button" class="tab-btn" id="net-tab-pppoe" data-network-tab="pppoe" role="tab" aria-selected="false" aria-controls="net-panel-pppoe">PPPoE</button>
+        <button type="button" class="tab-btn" id="net-tab-wireguard" data-network-tab="wireguard" role="tab" aria-selected="false" aria-controls="net-panel-wireguard">WireGuard</button>
+        <button type="button" class="tab-btn" id="net-tab-openvpn" data-network-tab="openvpn" role="tab" aria-selected="false" aria-controls="net-panel-openvpn">OpenVPN</button>
+      </div>
+
+      <section id="net-panel-current" class="network-panel" role="tabpanel" aria-labelledby="net-tab-current">
+        <div id="net-current-feedback" class="feedback-line is-hidden" role="status"></div>
+
+        <div class="detail-card net-detail">
+          <div class="detail-row">
+            <div class="detail-label">Имя узла (hostname)</div>
+            <div class="detail-value mono" id="net-current-hostname">—</div>
+          </div>
+          <div class="detail-row">
+            <div class="detail-label">Node ID</div>
+            <div class="detail-value mono" id="net-current-node-id">—</div>
+          </div>
+          <div class="detail-row">
+            <div class="field-label-row">
+              <div class="detail-label">Link key</div>
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-toggle-link-key">Показать</button>
+            </div>
+            <div class="detail-value mono is-masked" id="net-current-link-key">••••••••</div>
+          </div>
+          <div class="detail-row">
+            <div class="detail-label">Маршрут по умолчанию</div>
+            <div class="detail-value mono" id="net-current-route">—</div>
+          </div>
+          <div class="detail-row">
+            <div class="detail-label">DNS (/etc/resolv.conf)</div>
+            <div class="detail-value mono" id="net-current-dns">—</div>
+          </div>
+        </div>
+
+        <h3 class="net-subheading">Интерфейсы</h3>
+        <div id="net-current-interfaces" class="net-interfaces" role="list">
+          <div class="empty-row">Загрузка интерфейсов…</div>
+        </div>
+      </section>
+
+      <section id="net-panel-ip" class="network-panel is-hidden" role="tabpanel" aria-labelledby="net-tab-ip">
+        <form id="net-ip-form" class="modal-form" autocomplete="off">
+          <div class="field-group">
+            <label class="field-label" for="net-ip-interface">Интерфейс</label>
+            <select id="net-ip-interface" name="interface" class="text-input">
+              <option value="">—</option>
+            </select>
+          </div>
+
+          <div class="field-group">
+            <span class="field-label">Режим адресации</span>
+            <div class="radio-row">
+              <label class="radio-item">
+                <input id="net-ip-mode-auto" name="net-ip-mode" type="radio" value="auto" checked>
+                <span>DHCP (auto)</span>
+              </label>
+              <label class="radio-item">
+                <input id="net-ip-mode-manual" name="net-ip-mode" type="radio" value="manual">
+                <span>Статический (manual)</span>
+              </label>
+            </div>
+          </div>
+
+          <div id="net-ip-static-fields" class="net-grid-2 is-hidden">
+            <div class="field-group">
+              <label class="field-label" for="net-ip-address">IPv4-адрес</label>
+              <input id="net-ip-address" name="address" type="text" class="text-input mono" placeholder="192.168.1.50" inputmode="decimal">
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="net-ip-prefix">Префикс</label>
+              <input id="net-ip-prefix" name="prefix" type="number" min="0" max="32" class="text-input mono" placeholder="24">
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="net-ip-gateway">Шлюз</label>
+              <input id="net-ip-gateway" name="gateway" type="text" class="text-input mono" placeholder="192.168.1.1" inputmode="decimal">
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="net-ip-dns">DNS (через запятую)</label>
+            <input id="net-ip-dns" name="dns" type="text" class="text-input mono" placeholder="1.1.1.1, 8.8.8.8">
+            <span class="field-hint">Пустое поле — оставить DNS без изменений.</span>
+          </div>
+
+          <div id="net-ip-feedback" class="feedback-line is-hidden" role="status"></div>
+
+          <div class="modal-actions">
+            <button type="submit" class="btn btn-primary" id="btn-net-ip-submit">Применить</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="net-panel-pppoe" class="network-panel is-hidden" role="tabpanel" aria-labelledby="net-tab-pppoe">
+        <form id="net-pppoe-form" class="modal-form" autocomplete="off">
+          <div class="field-group">
+            <label class="field-label" for="net-pppoe-username">Имя пользователя</label>
+            <input id="net-pppoe-username" name="username" type="text" class="text-input" autocomplete="off">
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="net-pppoe-password">Пароль</label>
+            <input id="net-pppoe-password" name="password" type="password" class="text-input" autocomplete="new-password">
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="net-pppoe-service">Сервис (необязательно)</label>
+            <input id="net-pppoe-service" name="service" type="text" class="text-input" autocomplete="off">
+            <span class="field-hint">Пароль уходит только локальному серверу, не сохраняется в браузере и не пишется в журналы.</span>
+          </div>
+
+          <div id="net-pppoe-feedback" class="feedback-line is-hidden" role="status"></div>
+
+          <div class="modal-actions">
+            <button type="submit" class="btn btn-primary" id="btn-net-pppoe-submit">Подключить PPPoE</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="net-panel-wireguard" class="network-panel is-hidden" role="tabpanel" aria-labelledby="net-tab-wireguard">
+        <form id="net-wg-form" class="modal-form" autocomplete="off">
+          <div class="net-grid-2">
+            <div class="field-group">
+              <label class="field-label" for="net-wg-name">Имя подключения</label>
+              <input id="net-wg-name" name="name" type="text" class="text-input mono" placeholder="rhm-wg">
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="net-wg-private-key">Приватный ключ</label>
+              <input id="net-wg-private-key" name="private_key" type="password" class="text-input mono" autocomplete="new-password">
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="net-wg-address">Адрес</label>
+              <input id="net-wg-address" name="address" type="text" class="text-input mono" placeholder="10.8.0.2" inputmode="decimal">
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="net-wg-prefix">Префикс</label>
+              <input id="net-wg-prefix" name="prefix" type="number" min="0" max="32" class="text-input mono" placeholder="32">
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="net-wg-peer-public-key">Публичный ключ пира</label>
+              <input id="net-wg-peer-public-key" name="peer_public_key" type="text" class="text-input mono">
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="net-wg-endpoint">Endpoint</label>
+              <input id="net-wg-endpoint" name="endpoint" type="text" class="text-input mono" placeholder="vpn.example.org:51820">
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="net-wg-allowed-ips">Allowed IPs (через запятую)</label>
+              <input id="net-wg-allowed-ips" name="allowed_ips" type="text" class="text-input mono" placeholder="0.0.0.0/0">
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="net-wg-keepalive">Keepalive (сек)</label>
+              <input id="net-wg-keepalive" name="keepalive" type="number" min="0" max="65535" class="text-input mono" placeholder="25">
+            </div>
+          </div>
+
+          <span class="field-hint">Приватный ключ пишется сервером в keyfile 0600 и не возвращается в ответе.</span>
+
+          <div id="net-wg-feedback" class="feedback-line is-hidden" role="status"></div>
+
+          <div class="modal-actions">
+            <button type="submit" class="btn btn-primary" id="btn-net-wg-submit">Поднять WireGuard</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="net-panel-openvpn" class="network-panel is-hidden" role="tabpanel" aria-labelledby="net-tab-openvpn">
+        <form id="net-openvpn-form" class="modal-form" autocomplete="off">
+          <div class="field-group">
+            <label class="field-label" for="net-openvpn-name">Имя подключения (необязательно)</label>
+            <input id="net-openvpn-name" name="name" type="text" class="text-input mono" placeholder="rhm-openvpn">
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="net-openvpn-config">Конфигурация .ovpn</label>
+            <textarea id="net-openvpn-config" name="config" class="text-input text-area mono" rows="10" spellcheck="false"
+              placeholder="client&#10;dev tun&#10;remote vpn.example.org 1194&#10;..."></textarea>
+          </div>
+
+          <span class="field-hint is-warn">Конфигурация может содержать секреты (закрытые ключи и пароли). Она отправляется только локальному серверу, не попадает в журналы и очищается из формы после отправки.</span>
+
+          <div id="net-openvpn-feedback" class="feedback-line is-hidden" role="status"></div>
+
+          <div class="modal-actions">
+            <button type="submit" class="btn btn-primary" id="btn-net-openvpn-submit">Импортировать OpenVPN</button>
+          </div>
+        </form>
+      </section>
+      <!-- /network-settings -->
     </div>
   </div>
 

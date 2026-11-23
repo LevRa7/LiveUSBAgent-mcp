@@ -75,10 +75,10 @@ def _share_request(user=NODE, rest=f"{SLUG}/report.txt", method="GET", query="")
         "raw_path": f"/{user}/{rest}".encode(),
         "root_path": "",
         "path_params": {"user": user, "rest": rest},
-        "headers": [(b"host", b"smart-server.online")],
+        "headers": [(b"host", b"racknerd-5a24bf9.merino-carob.ts.net")],
         "query_string": query.encode(),
         "scheme": "https",
-        "server": ("smart-server.online", 443),
+        "server": ("racknerd-5a24bf9.merino-carob.ts.net", 443),
         "client": ("127.0.0.1", 12345),
     }
 
@@ -95,7 +95,7 @@ def _call(request):
 def _post_request(path, body, headers=None):
     raw = json.dumps(body).encode()
     hdrs = [
-        (b"host", b"smart-server.online"),
+        (b"host", b"racknerd-5a24bf9.merino-carob.ts.net"),
         (b"content-type", b"application/json"),
         (b"accept", b"application/json, text/event-stream"),
     ]
@@ -111,7 +111,7 @@ def _post_request(path, body, headers=None):
         "headers": hdrs,
         "query_string": urlparse(path).query.encode(),
         "scheme": "https",
-        "server": ("smart-server.online", 443),
+        "server": ("racknerd-5a24bf9.merino-carob.ts.net", 443),
         "client": ("127.0.0.1", 12345),
     }
 
@@ -123,7 +123,7 @@ def _post_request(path, body, headers=None):
 
 def _asgi(method, path, query=b""):
     """Drive the real app (router + middleware) without opening a socket."""
-    headers = [(b"host", b"smart-server.online")]
+    headers = [(b"host", b"racknerd-5a24bf9.merino-carob.ts.net")]
     scope = {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": "2.3"},
@@ -135,7 +135,7 @@ def _asgi(method, path, query=b""):
         "root_path": "",
         "query_string": query,
         "headers": headers,
-        "server": ("smart-server.online", 443),
+        "server": ("racknerd-5a24bf9.merino-carob.ts.net", 443),
         "client": ("127.0.0.1", 12345),
     }
     sent = []

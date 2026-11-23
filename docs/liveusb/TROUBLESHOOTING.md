@@ -216,7 +216,7 @@ journalctl -u rhm-live-agent -b --no-pager | grep -iE 'gateway|scheme|resolve'
 
 Rules the node enforces (`core/liveusb_bootstrap.py`, `core/agent.py`):
 
-- a **bare host** (`smart-server.online`) means `https://` for HTTP calls and
+- a **bare host** (`racknerd-5a24bf9.merino-carob.ts.net`) means `https://` for HTTP calls and
   `wss://` for the tunnel — the normal case;
 - `https://host` is used as-is, `wss://host` is mapped to `https://host`;
 - **`http://host` is refused for any non-loopback host**, and `ws://host` is

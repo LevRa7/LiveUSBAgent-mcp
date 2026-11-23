@@ -12,7 +12,10 @@ import sys
 import tempfile
 import urllib.request
 
-DOMAIN = "https://racknerd-5a24bf9.merino-carob.ts.net"
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.domain import public_base_url  # noqa: E402
+
+DOMAIN = public_base_url().rstrip("/")
 
 
 def fetch(url: str) -> bytes:

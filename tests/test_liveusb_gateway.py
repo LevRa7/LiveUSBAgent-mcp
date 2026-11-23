@@ -242,7 +242,7 @@ def test_liveusb_connect_page_zero_unslop_ui_surface_tells():
         session_code="abc123def456",
         node_id="live-1a2b3c4d",
         link_key="lk_sampleTokenValue123456",
-        host="smart-server.online",
+        host="racknerd-5a24bf9.merino-carob.ts.net",
         expires_at="2026-11-23T12:00:00+00:00",
         online=False,
     )
@@ -486,7 +486,7 @@ def test_render_connect_page_escaping_and_quoting():
         session_code="sess-123",
         node_id="live node&1",
         link_key="lk_a+b/c=d",
-        host="smart-server.online",
+        host="racknerd-5a24bf9.merino-carob.ts.net",
         expires_at="2026-11-23T12:00:00\u2028\u2029",
         online=True,
         csp_nonce="nonceXYZ",

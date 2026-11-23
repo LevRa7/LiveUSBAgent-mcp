@@ -4,7 +4,8 @@ Covers:
 1. Pure LF line endings for all LiveUSB shell scripts, chroot hooks, and udev rules.
 2. `bash -n` syntax validation across all 5 shell/hook scripts.
 3. `ops/live-usb/build-iso.sh` contract assertions (no legacy entrypoint, runtime env,
-   required packages, volatile journald cap, dual GRUB menu, udev rules).
+   required packages, network-settings tooling, volatile journald cap, dual GRUB menu,
+   udev rules).
 4. `ops/live-usb/test-qemu.sh --dry-run` execution for both `--mode uefi` and `--mode bios`.
 5. Cross-component contract integration test:
    gateway.py (/v1/liveusb/register) -> core/liveusb_bootstrap.py (register_ephemeral_node)
@@ -282,15 +283,27 @@ def test_build_iso_ships_xterm_and_kiosk_server_inherits_display() -> None:
     assert "kiosk X session is :0" in start_text
 
 
+PACKAGE_LIST_HEREDOC_START = "\ncat <<EOF > config/package-lists/rhm-rescue.list.chroot\n"
+
+
+def _package_list_heredoc() -> str:
+    """Body of the live-build package-list heredoc in build-iso.sh.
+
+    Anchored on the leading newline: `check_assets` also mentions the same path
+    inside an awk pattern, so an unanchored split would start mid-script.
+    """
+    build_text = BUILD_ISO_SH.read_text(encoding="utf-8")
+    assert PACKAGE_LIST_HEREDOC_START in build_text, (
+        "package list heredoc not found in build-iso.sh"
+    )
+    return build_text.split(PACKAGE_LIST_HEREDOC_START, 1)[1].split("\nEOF\n", 1)[0]
+
+
 def _generated_package_list() -> set:
     """Parse the live-build package list heredoc out of build-iso.sh."""
-    build_text = BUILD_ISO_SH.read_text(encoding="utf-8")
-    heredoc = build_text.split(
-        "cat <<EOF > config/package-lists/rhm-rescue.list.chroot", 1
-    )[1].split("\nEOF\n", 1)[0]
     return {
         line.strip()
-        for line in heredoc.splitlines()
+        for line in _package_list_heredoc().splitlines()
         if line.strip() and not line.strip().startswith("#")
     }
 
@@ -325,6 +338,62 @@ def test_build_iso_ships_file_manager_and_editor_for_the_app_launcher() -> None:
         assert package in packages, (
             f"the kiosk GUI package block must keep {package!r}"
         )
+
+
+NETWORK_SETTINGS_PACKAGES = (
+    "ppp",
+    "wireguard-tools",
+    "openvpn",
+    "network-manager-openvpn",
+)
+
+
+def _kiosk_gui_package_block() -> set:
+    """Packages declared after the `# Kiosk GUI + Runtime` heading (last block)."""
+    heredoc = _package_list_heredoc()
+    assert "# Kiosk GUI + Runtime" in heredoc
+    tail = heredoc.split("# Kiosk GUI + Runtime", 1)[1]
+    return {
+        line.strip()
+        for line in tail.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
+
+
+def test_build_iso_ships_network_settings_tooling() -> None:
+    """«Настройки сети» needs PPPoE, WireGuard and OpenVPN backends in the image.
+
+    The dialog only drives NetworkManager (`nmcli con mod`, `nmcli connection
+    import type openvpn`), so every backend it offers must be installed by
+    live-build *and* pinned by `--check`; otherwise the modal advertises actions
+    that exit 503 on a real ISO. All four names are Debian 13 (trixie) `main`
+    packages, verified with `apt-cache policy` (no backports pins needed).
+
+    The plan allowed `network-manager-openvpn` *or* `network-manager-openvpn-gnome`;
+    this pins the former, because the kiosk imports .ovpn files with nmcli and
+    never opens nm-connection-editor (its GTK stack would be dead weight).
+    """
+    packages = _generated_package_list()
+    required = _check_required_packages()
+
+    for package in NETWORK_SETTINGS_PACKAGES:
+        assert package in packages, (
+            f"the generated package list must install {package!r} for «Настройки сети»"
+        )
+        assert package in required, (
+            f"build-iso.sh --check must verify package: {package}"
+        )
+
+    # ppp / openvpn / network-manager-openvpn are declared in the Kiosk GUI block
+    # (the dialog is a kiosk feature); wireguard-tools stays in the Network block.
+    kiosk_block = _kiosk_gui_package_block()
+    for package in ("ppp", "openvpn", "network-manager-openvpn"):
+        assert package in kiosk_block, (
+            f"{package!r} must be declared in the Kiosk GUI package block"
+        )
+    assert "wireguard-tools" in packages, (
+        "wireguard-tools (Network block) must keep backing the WireGuard tab"
+    )
 
 
 def test_build_iso_installs_the_root_warning_wrapper() -> None:

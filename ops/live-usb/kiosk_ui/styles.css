@@ -435,6 +435,141 @@ body {
   max-width: 720px;
 }
 
+.modal-card-wide {
+  max-width: 880px;
+  max-height: 88vh;
+  overflow-y: auto;
+}
+
+.network-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.network-panel {
+  padding: 20px;
+}
+
+.network-panel .modal-form {
+  padding: 0;
+}
+
+.net-detail {
+  margin-bottom: 20px;
+}
+
+.net-subheading {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.net-interfaces {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+}
+
+.net-iface {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.net-iface-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.net-iface-name {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.net-iface-state {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.net-iface-state.is-ok {
+  color: var(--ok-text);
+}
+
+.net-kv {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  gap: 12px;
+  font-size: 14px;
+}
+
+.net-k {
+  color: var(--text-secondary);
+}
+
+.net-v {
+  word-break: break-all;
+}
+
+.detail-value.is-masked {
+  color: var(--text-secondary);
+  letter-spacing: 2px;
+}
+
+.net-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.radio-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.radio-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.field-hint {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.field-hint.is-warn {
+  color: var(--warn-text);
+}
+
+.text-area {
+  min-height: 180px;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.feedback-line.is-ok {
+  color: var(--ok-text);
+}
+
+.feedback-line.is-error {
+  color: var(--warn-text);
+}
+
 .modal-form {
   padding: 20px;
   display: flex;
@@ -643,6 +778,14 @@ body {
   .interface-grid,
   .ready-grid {
     grid-template-columns: 1fr;
+  }
+
+  .net-grid-2 {
+    grid-template-columns: 1fr;
+  }
+
+  .net-kv {
+    grid-template-columns: 110px minmax(0, 1fr);
   }
 
   .wifi-row {

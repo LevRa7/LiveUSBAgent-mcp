@@ -21,10 +21,10 @@
 | Область | Было | Стало |
 | :--- | :--- | :--- |
 | Rescue-API | 5 секций и 4 действия не реализованы | все 12 секций и 11 действий |
-| Тесты | 5 failed / 1756 passed | **0 failed / 1881 passed / 8 skipped** |
+| Тесты | 5 failed / 1756 passed | **0 failed / 1952 passed / 8 skipped** |
 | Версия | 0.6.0 | **0.1.0** |
 | ISO | не собран | **1.5 ГБ, собран и загружен в QEMU** |
-| `--check` | отсутствовал | **42/42 PASS** |
+| `--check` | отсутствовал | **54/54 PASS** |
 | Kiosk terminal | не было | кнопка + `xterm` + `DISPLAY` |
 | CI/docs | неполные | LiveUSB CI, `docs/liveusb/*`, release notes |
 
@@ -101,14 +101,29 @@ APFS: `apfs-fuse` собран и установлен; DKMS-модуль `linux
 
 ---
 
+### 4.2. Домен и настройки сети
+
+- Дефолтный публичный домен заменён на
+  `racknerd-5a24bf9.merino-carob.ts.net` в `core/domain.py`, ISO,
+  README, docs и тестах; `smart-server.online` в активном дереве больше нет.
+- «Настройки сети»: текущие идентификаторы (hostname, node ID, link key с
+  маскировкой), интерфейсы с MAC/IP/шлюзом/DNS; редактирование DHCP/static
+  IPv4 и DNS; PPPoE; WireGuard (keyfile 0600); OpenVPN (импорт .ovpn).
+  Пароли и приватные ключи не возвращаются и не логируются.
+- Скриншоты: [текущие](docs/liveusb/images/network-settings-current.png),
+  [IP и DNS](docs/liveusb/images/network-settings-ip.png),
+  [PPPoE](docs/liveusb/images/network-settings-pppoe.png),
+  [WireGuard](docs/liveusb/images/network-settings-wireguard.png),
+  [OpenVPN](docs/liveusb/images/network-settings-openvpn.png).
+
 ## 5. Тесты
 
 | Проверка | Результат |
 | :--- | :--- |
-| `py -m pytest tests -q` | **1881 passed, 8 skipped, 0 failed** |
+| `py -m pytest tests -q` | **1952 passed, 8 skipped, 0 failed** |
 | `tests/test_rescue.py` | 155 passed |
 | `tests/test_liveusb_iso_pipeline.py` | 24 passed |
-| `build-iso.sh --check` | **42/42 PASS**, exit 0 |
+| `build-iso.sh --check` | **54/54 PASS**, exit 0 |
 | `bash -n` build-iso / start-kiosk / hook | exit 0 |
 | `compileall`, `node --check app.js` | exit 0 |
 

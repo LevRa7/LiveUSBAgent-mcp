@@ -22,7 +22,7 @@
  📱 Gemini App / Web (Spark)
               │  MCP (SSE / Streamable HTTP)
               ▼
-      ☁️ Gateway (smart-server.online)   ← TLS-реле
+      ☁️ Gateway (racknerd-5a24bf9.merino-carob.ts.net)   ← TLS-реле
               │  Исходящий WebSocket-туннель (без открытых портов)
               ▼
     💻 Ваш ПК · Ноутбук · VPS · Android (Termux)

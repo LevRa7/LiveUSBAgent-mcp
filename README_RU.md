@@ -123,7 +123,7 @@ sudo ./ops/live-usb/build-iso.sh --with-external-skills --build
 
 Полезные опции `build-iso.sh`:
 - `--work-dir PATH` (или переменная `WORK_DIR`) — рабочий каталог сборки (по умолчанию `/tmp/rhm-live-build`; если в `/tmp` мало места, укажите, например, `--work-dir /var/tmp/rhm-live-build`).
-- `--gateway HOST` (или `MESH_GATEWAY`) — адрес вашего шлюза MCP (по умолчанию `smart-server.online`).
+- `--gateway HOST` (или `MESH_GATEWAY`) — адрес вашего шлюза MCP (по умолчанию `racknerd-5a24bf9.merino-carob.ts.net`).
 - `--distro NAME` / `--arch ARCH` — выпуск и архитектура Debian (по умолчанию `trixie` / `amd64`).
 - Без флага `--build` скрипт только подготовит конфигурацию `live-build`, после чего сборку можно запустить вручную: `cd /tmp/rhm-live-build && sudo lb build`.
 

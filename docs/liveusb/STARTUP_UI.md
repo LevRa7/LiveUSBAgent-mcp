@@ -73,7 +73,39 @@ screenshots are Xvfb captures of the actual launched windows. `/root` appears
 because the UI harness does not create `/mnt/rescue`; the ISO's
 `start-kiosk.sh` creates that directory before the server starts.
 
-## 5. The same UI on the built ISO
+## 6. Network settings
+
+![Network settings — current identifiers](images/network-settings-current.png)
+
+The network view has **«Настройки сети»** with five tabs:
+
+- **Текущие** — hostname, node ID, link key (masked, «Показать/Скрыть»),
+  default route, `/etc/resolv.conf` DNS and every interface (name, MAC, state,
+  NetworkManager connection, IPv4, gateway, DNS).
+- **IP и DNS** — DHCP or static IPv4/prefix/gateway/DNS for the selected
+  interface, applied through `nmcli con mod` + `nmcli con up`.
+- **PPPoE** — username, password, optional service; creates and activates the
+  `rhm-pppoe` NetworkManager connection.
+- **WireGuard** — name, private key, address/prefix, peer key, endpoint,
+  allowed IPs and keepalive; writes a `0600` NetworkManager keyfile.
+- **OpenVPN** — paste a `.ovpn`; imports it through NetworkManager.
+
+![IP and DNS](images/network-settings-ip.png)
+
+![PPPoE](images/network-settings-pppoe.png)
+
+![WireGuard](images/network-settings-wireguard.png)
+
+Passwords/private keys are never rendered after submit, never written to
+`console`, and the backend returns `redacted: true` instead of echoing them.
+The ISO ships `ppp`, `wireguard-tools`, `openvpn` and
+`network-manager-openvpn`, and `build-iso.sh --check` pins all four.
+
+The default public domain is now
+`racknerd-5a24bf9.merino-carob.ts.net` — `smart-server.online` is gone from the
+active code, docs and tests.
+
+## 7. The same UI on the built ISO
 
 ![Kiosk running from the built ISO](images/kiosk-image-pending.png)
 

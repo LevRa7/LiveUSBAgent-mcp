@@ -153,6 +153,11 @@ check_assets() {
         os-prober
         rsync
         wireless-regdb
+        # Kiosk GUI «Настройки сети»: PPPoE, WireGuard and OpenVPN tooling
+        ppp
+        wireguard-tools
+        openvpn
+        network-manager-openvpn
     )
     local -a unit_tokens=(
         "core.agent --ephemeral-liveusb"
@@ -485,6 +490,15 @@ python3-venv
 python3-websockets
 tmux
 jq
+# Network settings dialog: PPPoE, WireGuard and OpenVPN are driven through
+# NetworkManager (nmcli con mod / nmcli connection import), never a shell.
+# wireguard-tools is already listed in the Network block above; ppp provides
+# the PPPoE plugin and openvpn + network-manager-openvpn the OpenVPN one.
+# network-manager-openvpn-gnome is deliberately skipped: the kiosk imports .ovpn
+# files with nmcli and never opens nm-connection-editor.
+ppp
+openvpn
+network-manager-openvpn
 EOF
 
 if [[ "${WITH_EXTERNAL_SKILLS}" == "1" ]]; then

@@ -4,15 +4,19 @@
 
 Stdlib-only (Python 3.8+) ThreadingHTTPServer bound strictly to 127.0.0.1:8787.
 Serves the Russian kiosk UI from ops/live-usb/kiosk_ui/ and exposes JSON/SVG
-endpoints for network status, Wi-Fi management, LiveUSB session state, QR, and
-the allowlisted local application launcher.
+endpoints for network status, Wi-Fi management, LiveUSB session state, QR, the
+allowlisted local application launcher, and the «Настройки сети» dialog
+(read-only snapshot plus IPv4/DNS, PPPoE, WireGuard and OpenVPN through
+NetworkManager).
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import html
 import importlib
+import ipaddress
 import json
 import mimetypes
 import os
@@ -21,7 +25,9 @@ import shlex
 import shutil
 import socket
 import subprocess
+import tempfile
 import time
+import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -31,6 +37,17 @@ from urllib.parse import urlparse
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 MAX_POST_BYTES = 16384
+
+# --- «Настройки сети» integration points -----------------------------------
+#
+# Module-level so the unit tests can point them at tmp_path and a live ISO can
+# override them with MESH_* environment variables if that is ever needed.
+NM_CONNECTIONS_DIR = Path("/etc/NetworkManager/system-connections")
+RESOLV_CONF_PATH = Path("/etc/resolv.conf")
+MAX_RESOLV_CONF_BYTES = 8192
+# Every credential-bearing file (WireGuard keyfile, OpenVPN temp config) is
+# created with this mode; the response never echoes the secret itself.
+PRIVATE_FILE_MODE = 0o600
 
 _STATIC_DIR = Path(__file__).resolve().parent / "kiosk_ui"
 
@@ -859,6 +876,1161 @@ def scan_wifi(run_cmd: CommandRunner = default_run_cmd) -> Dict[str, Any]:
     }
 
 
+# --- «Настройки сети»: NetworkManager-backed network configuration ---------
+#
+# The dialog edits IPv4/DNS, PPPoE, WireGuard and OpenVPN through NetworkManager
+# only. Every command is an explicit argv list (never shell=True), every value
+# from the request is validated before it reaches argv, and every credential
+# (PPPoE password, WireGuard private key, .ovpn body) is written to a 0600 file
+# and never echoed back. Failures are 400 (bad input) or 503 (tool/root/NM
+# unavailable); helpers never raise to the HTTP layer.
+
+PPPOE_CONNECTION_NAME = "rhm-pppoe"
+WIREGUARD_CONNECTION_PREFIX = "rhm-wg-"
+OPENVPN_TEMP_PREFIX = "rhm-ovpn-"
+OPENVPN_CONNECTION_MAX_LEN = 32
+MAX_OPENVPN_CONFIG_BYTES = 12 * 1024
+MAX_DNS_SERVERS = 8
+MAX_ALLOWED_IPS = 16
+WIREGUARD_KEY_BYTES = 32
+DEFAULT_WIREGUARD_KEEPALIVE = 0
+
+# Interface names: Linux limits IFNAMSIZ to 16 bytes, and the kiosk has no
+# reason to accept anything but the conservative character set.
+_IFACE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,14}$")
+_CONNECTION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_CONNECTION_NAME_SPACES_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$")
+_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*$"
+)
+_PPPOE_USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@+-]{0,127}$")
+_PPPOE_SERVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+# A WireGuard key is the base64 of exactly 32 bytes: 43 data chars + one "=".
+_WIREGUARD_KEY_RE = re.compile(r"^[A-Za-z0-9+/]{43}=$")
+
+
+class NetworkValidationError(ValueError):
+    """A network-settings request carried invalid or unsafe input (HTTP 400)."""
+
+
+class NetworkUnavailableError(RuntimeError):
+    """NetworkManager (or a required tool) is missing, failing or denied (503)."""
+
+
+def _nmcli_path() -> str:
+    """Return the resolved nmcli path, or "" when it is not installed."""
+    try:
+        return str(shutil.which("nmcli") or "")
+    except Exception:
+        return ""
+
+
+def _require_nmcli() -> str:
+    """Raise NetworkUnavailableError unless nmcli is installed."""
+    path = _nmcli_path()
+    if not path:
+        raise NetworkUnavailableError(
+            "NetworkManager (nmcli) не установлен или недоступен в этой системе"
+        )
+    return path
+
+
+def _sanitize_detail(
+    text: Any,
+    secrets: Tuple[str, ...] = (),
+    replacements: Tuple[Tuple[str, str], ...] = (),
+    limit: int = 300,
+) -> str:
+    """One-line, length-capped diagnostic text with every secret redacted."""
+    value = str(text or "")
+    for secret in secrets:
+        if secret:
+            value = value.replace(str(secret), "***")
+    for original, replacement in replacements:
+        if original:
+            value = value.replace(str(original), str(replacement))
+    value = " ".join(value.split())
+    if len(value) > limit:
+        value = value[:limit].rstrip() + "…"
+    return value
+
+
+def _run_nmcli(
+    args: List[str],
+    timeout: float,
+    run_cmd: CommandRunner,
+    action: str,
+    *,
+    secrets: Tuple[str, ...] = (),
+    replacements: Tuple[Tuple[str, str], ...] = (),
+) -> str:
+    """Run one nmcli invocation; raise NetworkUnavailableError on any failure."""
+    argv = ["nmcli", *[str(part) for part in args]]
+    try:
+        rc, out, err = run_cmd(argv, timeout)
+    except Exception as exc:
+        detail = _sanitize_detail(str(exc), secrets, replacements)
+        raise NetworkUnavailableError(
+            f"Не удалось выполнить NetworkManager ({action}): {detail}"
+        )
+    if rc == 0:
+        return out or ""
+    if rc == 127:
+        raise NetworkUnavailableError("NetworkManager (nmcli) не найден в системе")
+    if rc == 124:
+        raise NetworkUnavailableError(f"NetworkManager не ответил вовремя: {action}")
+    detail = _sanitize_detail(err or out, secrets, replacements)
+    message = f"NetworkManager не смог выполнить: {action}"
+    if detail:
+        message = f"{message} — {detail}"
+    raise NetworkUnavailableError(message)
+
+
+def _parse_ip_addr_details(raw_json: str) -> List[Dict[str, Any]]:
+    """Parse `ip -j addr show` into name/mac/state/ipv4/prefix dicts."""
+    try:
+        data = json.loads(raw_json)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+
+    details: List[Dict[str, Any]] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        ifname = str(entry.get("ifname") or "")
+        if not ifname or ifname == "lo":
+            continue
+        ipv4: Optional[str] = None
+        prefix: Optional[int] = None
+        for addr_info in entry.get("addr_info") or []:
+            if not isinstance(addr_info, dict) or addr_info.get("family") != "inet":
+                continue
+            local = addr_info.get("local")
+            if not local:
+                continue
+            ipv4 = str(local)
+            try:
+                raw_prefix = addr_info.get("prefixlen")
+                prefix = int(raw_prefix) if raw_prefix is not None else None
+            except (TypeError, ValueError):
+                prefix = None
+            break
+
+        mac = str(entry.get("address") or "").strip()
+        if not mac:
+            mac = _read_sysfs_text(Path("/sys/class/net") / ifname / "address")
+
+        details.append(
+            {
+                "name": ifname,
+                "mac": mac,
+                "state": str(entry.get("operstate") or "unknown").lower(),
+                "ipv4": ipv4,
+                "prefix": prefix,
+            }
+        )
+    return details
+
+
+def _read_sysfs_text(path: Path) -> str:
+    """Read one small sysfs value, returning "" on any error."""
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def _parse_ip_route_json(raw_json: str) -> List[Dict[str, Any]]:
+    """Parse `ip -j route show default` output into simple route dicts."""
+    try:
+        data = json.loads(raw_json)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+
+    routes: List[Dict[str, Any]] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        device = str(entry.get("dev") or "")
+        gateway = str(entry.get("gateway") or "")
+        if not device and not gateway:
+            continue
+        metric: Optional[int]
+        try:
+            raw_metric = entry.get("metric")
+            metric = int(raw_metric) if raw_metric is not None else None
+        except (TypeError, ValueError):
+            metric = None
+        routes.append(
+            {
+                "destination": str(entry.get("dst") or "default"),
+                "gateway": gateway,
+                "device": device,
+                "metric": metric,
+            }
+        )
+    return routes
+
+
+def _parse_ip_route_text(output: str) -> List[Dict[str, Any]]:
+    """Fallback parser for hosts whose `ip` has no JSON support."""
+    routes: List[Dict[str, Any]] = []
+    for line in (output or "").splitlines():
+        tokens = line.split()
+        if not tokens or tokens[0] != "default":
+            continue
+        gateway = ""
+        device = ""
+        metric: Optional[int] = None
+        index = 1
+        while index < len(tokens) - 1:
+            key = tokens[index]
+            value = tokens[index + 1]
+            if key == "via":
+                gateway = value
+            elif key == "dev":
+                device = value
+            elif key == "metric":
+                try:
+                    metric = int(value)
+                except ValueError:
+                    metric = None
+            index += 2
+        if gateway or device:
+            routes.append(
+                {
+                    "destination": "default",
+                    "gateway": gateway,
+                    "device": device,
+                    "metric": metric,
+                }
+            )
+    return routes
+
+
+def _collect_default_routes(run_cmd: CommandRunner) -> List[Dict[str, Any]]:
+    """Return the current default routes. Never raises."""
+    try:
+        rc, out, _ = run_cmd(["ip", "-j", "route", "show", "default"], 3.0)
+    except Exception:
+        return []
+    if rc == 0:
+        return _parse_ip_route_json(out)
+    try:
+        rc_text, out_text, _ = run_cmd(["ip", "route", "show", "default"], 3.0)
+    except Exception:
+        return []
+    if rc_text == 0:
+        return _parse_ip_route_text(out_text)
+    return []
+
+
+def _read_resolv_conf(path: Optional[Path] = None) -> List[str]:
+    """Read nameservers from /etc/resolv.conf with a hard size cap. Never raises."""
+    target = Path(path) if path is not None else RESOLV_CONF_PATH
+    try:
+        with open(target, "rb") as handle:
+            raw = handle.read(MAX_RESOLV_CONF_BYTES)
+        text = raw.decode("utf-8", "replace")
+    except Exception:
+        return []
+
+    servers: List[str] = []
+    for line in text.splitlines():
+        stripped = line.split("#", 1)[0].strip()
+        if not stripped:
+            continue
+        parts = stripped.split()
+        if len(parts) < 2 or parts[0].lower() != "nameserver":
+            continue
+        candidate = parts[1]
+        try:
+            ipaddress.ip_address(candidate)
+        except ValueError:
+            continue
+        if candidate not in servers:
+            servers.append(candidate)
+        if len(servers) >= MAX_DNS_SERVERS:
+            break
+    return servers
+
+
+def _nmcli_active_connections(run_cmd: CommandRunner) -> Dict[str, Dict[str, str]]:
+    """Map device name -> {"connection", "state"} from nmcli's active list."""
+    try:
+        rc, out, _ = run_cmd(
+            ["nmcli", "-t", "-f", "NAME,DEVICE,STATE", "connection", "show", "--active"],
+            5.0,
+        )
+    except Exception:
+        return {}
+    if rc != 0:
+        return {}
+
+    mapping: Dict[str, Dict[str, str]] = {}
+    for line in (out or "").splitlines():
+        parts = split_nmcli_terse_line(line)
+        if len(parts) < 3:
+            continue
+        name = parts[0].strip()
+        device = parts[1].strip()
+        state = parts[2].strip()
+        if not name or not device or device == "--":
+            continue
+        if device not in mapping:
+            mapping[device] = {"connection": name, "state": state}
+    return mapping
+
+
+def _nmcli_connection_names(run_cmd: CommandRunner) -> List[str]:
+    """Return every configured NetworkManager connection name. Never raises."""
+    try:
+        rc, out, _ = run_cmd(["nmcli", "-t", "-f", "NAME", "connection", "show"], 5.0)
+    except Exception:
+        return []
+    if rc != 0:
+        return []
+
+    names: List[str] = []
+    for line in (out or "").splitlines():
+        parts = split_nmcli_terse_line(line)
+        if not parts:
+            continue
+        name = parts[0].strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _network_snapshot(
+    run_cmd: CommandRunner = default_run_cmd,
+    state_dir: Optional[Path] = None,
+    hostname: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Collect the read-only «Текущие» network picture for GET /api/network.
+
+    Only ``node_id`` and ``link_key`` leave the session state: the device token
+    from session.json/agent.env must never reach the browser. Every probe is
+    guarded and degrades to an empty value, so this never raises.
+    """
+    snapshot: Dict[str, Any] = {
+        "ok": True,
+        "hostname": "",
+        "node_id": "",
+        "link_key": "",
+        "interfaces": [],
+        "dns": [],
+        "routes": [],
+        "nmcli_available": bool(_nmcli_path()),
+        "timestamp": int(time.time()),
+    }
+
+    try:
+        snapshot["hostname"] = str(hostname or socket.gethostname() or "")
+    except Exception:
+        snapshot["hostname"] = ""
+
+    try:
+        session = read_session_state(state_dir)
+        snapshot["node_id"] = str(session.get("node_id") or "")
+        snapshot["link_key"] = str(session.get("link_key") or session.get("token") or "")
+    except Exception:
+        pass
+
+    try:
+        snapshot["dns"] = _read_resolv_conf()
+    except Exception:
+        snapshot["dns"] = []
+
+    routes = _collect_default_routes(run_cmd)
+    snapshot["routes"] = routes
+
+    details: List[Dict[str, Any]] = []
+    try:
+        rc, out, _ = run_cmd(["ip", "-j", "addr", "show"], 3.0)
+        if rc == 0:
+            details = _parse_ip_addr_details(out)
+    except Exception:
+        details = []
+
+    active = _nmcli_active_connections(run_cmd)
+
+    primary = str(routes[0].get("device") or "") if routes else ""
+    if not primary:
+        primary = next((item["name"] for item in details if item.get("ipv4")), "")
+
+    interfaces: List[Dict[str, Any]] = []
+    for item in details:
+        name = item["name"]
+        gateway = next(
+            (
+                str(route.get("gateway") or "")
+                for route in routes
+                if route.get("device") == name and route.get("gateway")
+            ),
+            "",
+        )
+        connection = active.get(name, {})
+        interfaces.append(
+            {
+                "name": name,
+                "mac": item.get("mac") or "",
+                "state": item.get("state") or "unknown",
+                "connection": str(connection.get("connection") or ""),
+                "connection_state": str(connection.get("state") or ""),
+                "ipv4": item.get("ipv4"),
+                "prefix": item.get("prefix"),
+                "gateway": gateway,
+                # resolv.conf is global, so only the interface carrying the
+                # default route is reported as the DNS owner.
+                "dns": list(snapshot["dns"]) if name == primary else [],
+            }
+        )
+
+    snapshot["interfaces"] = sorted(interfaces, key=lambda iface: iface["name"])
+    return snapshot
+
+
+# --- Validation helpers (raise NetworkValidationError -> HTTP 400) ----------
+
+
+def validate_interface_name(raw: Any) -> str:
+    """Validate a Linux interface name before it is used as a selector."""
+    name = raw.strip() if isinstance(raw, str) else ""
+    if not name:
+        raise NetworkValidationError("Не указан сетевой интерфейс")
+    if not _IFACE_RE.match(name):
+        raise NetworkValidationError(
+            "Недопустимое имя интерфейса: разрешены латиница, цифры, «.», «-», «_» "
+            "и не длиннее 15 символов"
+        )
+    return name
+
+
+def _validate_ipv4_text(
+    raw: Any,
+    field: str,
+    *,
+    optional: bool = False,
+    allow_loopback: bool = True,
+) -> str:
+    text = raw.strip() if isinstance(raw, str) else ""
+    if not text:
+        if optional:
+            return ""
+        raise NetworkValidationError(f"{field}: значение не указано")
+    if len(text) > 15:
+        raise NetworkValidationError(f"{field}: слишком длинное значение")
+    try:
+        address = ipaddress.IPv4Address(text)
+    except ValueError:
+        raise NetworkValidationError(
+            f"{field}: «{_sanitize_detail(text, limit=32)}» не является IPv4-адресом"
+        )
+    if address.is_unspecified or address.is_multicast or str(address) == "255.255.255.255":
+        raise NetworkValidationError(f"{field}: недопустимый адрес {address}")
+    if not allow_loopback and address.is_loopback:
+        raise NetworkValidationError(f"{field}: петлевой адрес недопустим")
+    return str(address)
+
+
+def validate_ipv4(raw: Any, field: str = "IPv4-адрес") -> str:
+    """Validate one required IPv4 address (address of a static config)."""
+    return _validate_ipv4_text(raw, field, allow_loopback=False)
+
+
+def validate_gateway(raw: Any) -> str:
+    """Validate an optional default gateway ("" means "no gateway")."""
+    return _validate_ipv4_text(raw, "Шлюз", optional=True, allow_loopback=False)
+
+
+def validate_prefix(raw: Any, field: str = "Префикс") -> int:
+    """Validate an IPv4 prefix length (1..32)."""
+    text = str(raw).strip() if raw is not None else ""
+    if not text:
+        raise NetworkValidationError(f"{field}: значение не указано")
+    if not re.match(r"^\d{1,2}$", text):
+        raise NetworkValidationError(f"{field}: ожидается число от 1 до 32")
+    value = int(text)
+    if value < 1 or value > 32:
+        raise NetworkValidationError(f"{field}: должен быть от 1 до 32")
+    return value
+
+
+def validate_dns_list(raw: Any) -> List[str]:
+    """Validate a comma-separated DNS server list; "" clears the setting."""
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        parts = [str(item) for item in raw]
+    else:
+        text = str(raw).strip()
+        if not text:
+            return []
+        parts = text.split(",")
+
+    servers: List[str] = []
+    for part in parts:
+        candidate = part.strip()
+        if not candidate:
+            continue
+        server = _validate_ipv4_text(candidate, "DNS-сервер", allow_loopback=True)
+        if server not in servers:
+            servers.append(server)
+    if len(servers) > MAX_DNS_SERVERS:
+        raise NetworkValidationError(
+            f"DNS: не более {MAX_DNS_SERVERS} серверов"
+        )
+    return servers
+
+
+def validate_connection_name(
+    raw: Any,
+    field: str = "Имя подключения",
+    *,
+    max_len: int = 48,
+    allow_spaces: bool = False,
+) -> str:
+    """Validate a NetworkManager connection name (also used as a file stem)."""
+    text = raw.strip() if isinstance(raw, str) else ""
+    if not text:
+        raise NetworkValidationError(f"{field}: не указано")
+    if len(text) > max_len:
+        raise NetworkValidationError(f"{field}: не длиннее {max_len} символов")
+    pattern = _CONNECTION_NAME_SPACES_RE if allow_spaces else _CONNECTION_NAME_RE
+    if not pattern.match(text):
+        allowed = "латиница, цифры, «.», «-», «_»"
+        if allow_spaces:
+            allowed += " и пробел"
+        raise NetworkValidationError(f"{field}: допустимы только {allowed}")
+    return text
+
+
+def validate_wireguard_key(raw: Any, field: str = "Ключ WireGuard") -> str:
+    """Validate the shape of a WireGuard base64 key (32 bytes, 44 chars)."""
+    text = raw.strip() if isinstance(raw, str) else ""
+    if not text:
+        raise NetworkValidationError(f"{field}: значение не указано")
+    if not _WIREGUARD_KEY_RE.match(text):
+        raise NetworkValidationError(
+            f"{field}: ключ WireGuard должен быть base64-строкой из 44 символов"
+        )
+    try:
+        decoded = base64.b64decode(text, validate=True)
+    except (ValueError, TypeError):
+        raise NetworkValidationError(
+            f"{field}: ключ WireGuard содержит недопустимые символы base64"
+        )
+    if len(decoded) != WIREGUARD_KEY_BYTES:
+        raise NetworkValidationError(
+            f"{field}: ключ WireGuard должен содержать 32 байта"
+        )
+    return text
+
+
+def _validate_host(raw: str, field: str = "Хост") -> str:
+    host = raw.strip()
+    if not host:
+        raise NetworkValidationError(f"{field}: не указан")
+    try:
+        return str(ipaddress.IPv4Address(host))
+    except ValueError:
+        pass
+    if not _HOSTNAME_RE.match(host):
+        raise NetworkValidationError(
+            f"{field}: «{_sanitize_detail(host, limit=48)}» не является доменным именем"
+        )
+    return host
+
+
+def _validate_port(raw: str, field: str = "Порт") -> int:
+    text = raw.strip()
+    if not re.match(r"^\d{1,5}$", text):
+        raise NetworkValidationError(f"{field}: ожидается число от 1 до 65535")
+    value = int(text)
+    if value < 1 or value > 65535:
+        raise NetworkValidationError(f"{field}: ожидается число от 1 до 65535")
+    return value
+
+
+def validate_endpoint(raw: Any) -> str:
+    """Validate a WireGuard endpoint in host:port (or [ipv6]:port) form."""
+    text = raw.strip() if isinstance(raw, str) else ""
+    if not text:
+        raise NetworkValidationError("Endpoint: адрес сервера не указан")
+    if len(text) > 300:
+        raise NetworkValidationError("Endpoint: слишком длинное значение")
+
+    if text.startswith("["):
+        closing = text.find("]")
+        if closing < 0 or not text[closing + 1 :].startswith(":"):
+            raise NetworkValidationError("Endpoint: ожидается «[IPv6]:порт»")
+        host_part = text[1:closing]
+        port_part = text[closing + 2 :]
+        try:
+            host = str(ipaddress.IPv6Address(host_part))
+        except ValueError:
+            raise NetworkValidationError("Endpoint: некорректный IPv6-адрес")
+        port = _validate_port(port_part, "Endpoint: порт")
+        return f"[{host}]:{port}"
+
+    if text.count(":") != 1:
+        raise NetworkValidationError("Endpoint: ожидается «хост:порт»")
+    host_part, port_part = text.split(":", 1)
+    host = _validate_host(host_part, "Endpoint: хост")
+    port = _validate_port(port_part, "Endpoint: порт")
+    return f"{host}:{port}"
+
+
+def validate_allowed_ips(raw: Any) -> List[str]:
+    """Validate the WireGuard AllowedIPs list of IPv4/IPv6 CIDR networks."""
+    if isinstance(raw, (list, tuple)):
+        parts = [str(item) for item in raw]
+    else:
+        text = str(raw or "").strip()
+        parts = re.split(r"[,\s]+", text) if text else []
+
+    networks: List[str] = []
+    for part in parts:
+        candidate = part.strip()
+        if not candidate:
+            continue
+        if "/" not in candidate:
+            try:
+                candidate = f"{ipaddress.IPv4Address(candidate)}/32"
+            except ValueError:
+                try:
+                    candidate = f"{ipaddress.IPv6Address(candidate)}/128"
+                except ValueError:
+                    raise NetworkValidationError(
+                        "Allowed IPs: ожидается список подсетей в формате CIDR"
+                    )
+        try:
+            network = ipaddress.ip_network(candidate, strict=False)
+        except ValueError:
+            raise NetworkValidationError(
+                "Allowed IPs: ожидается список подсетей в формате CIDR"
+            )
+        rendered = str(network)
+        if rendered not in networks:
+            networks.append(rendered)
+
+    if not networks:
+        raise NetworkValidationError("Allowed IPs: укажите хотя бы одну подсеть")
+    if len(networks) > MAX_ALLOWED_IPS:
+        raise NetworkValidationError(f"Allowed IPs: не более {MAX_ALLOWED_IPS} подсетей")
+    return networks
+
+
+def validate_keepalive(raw: Any) -> int:
+    """Validate persistent-keepalive seconds (0/blank means "not set")."""
+    if raw is None:
+        return DEFAULT_WIREGUARD_KEEPALIVE
+    text = str(raw).strip()
+    if not text:
+        return DEFAULT_WIREGUARD_KEEPALIVE
+    if not re.match(r"^\d{1,5}$", text):
+        raise NetworkValidationError(
+            "Постоянный keepalive: ожидается число от 0 до 65535"
+        )
+    value = int(text)
+    if value > 65535:
+        raise NetworkValidationError(
+            "Постоянный keepalive: ожидается число от 0 до 65535"
+        )
+    return value
+
+
+def validate_pppoe_username(raw: Any) -> str:
+    """Validate a PPPoE login (user@provider is fine, whitespace/quotes are not)."""
+    text = raw.strip() if isinstance(raw, str) else ""
+    if not text:
+        raise NetworkValidationError("PPPoE: имя пользователя не указано")
+    if not _PPPOE_USERNAME_RE.match(text):
+        raise NetworkValidationError(
+            "PPPoE: имя пользователя содержит недопустимые символы"
+        )
+    return text
+
+
+def validate_pppoe_service(raw: Any) -> str:
+    """Validate an optional PPPoE service name ("" means "not set")."""
+    text = raw.strip() if isinstance(raw, str) else ""
+    if not text:
+        return ""
+    if not _PPPOE_SERVICE_RE.match(text):
+        raise NetworkValidationError("PPPoE: недопустимое имя сервиса")
+    return text
+
+
+def validate_secret(raw: Any, field: str, *, max_len: int = 128) -> str:
+    """Validate a credential that is never echoed: length + no control chars."""
+    text = raw if isinstance(raw, str) else ""
+    if not text:
+        raise NetworkValidationError(f"{field}: значение не указано")
+    if len(text) > max_len:
+        raise NetworkValidationError(f"{field}: не длиннее {max_len} символов")
+    if any(ord(char) < 32 or ord(char) == 127 for char in text):
+        raise NetworkValidationError(f"{field}: содержит недопустимые управляющие символы")
+    return text
+
+
+def validate_openvpn_config(raw: Any) -> str:
+    """Validate a pasted .ovpn body: minimal client/remote directives required."""
+    text = raw if isinstance(raw, str) else ""
+    text = text.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+    if not text.strip():
+        raise NetworkValidationError("OpenVPN: конфигурация не указана")
+    if len(text.encode("utf-8")) > MAX_OPENVPN_CONFIG_BYTES:
+        raise NetworkValidationError(
+            "OpenVPN: конфигурация слишком большая (не более "
+            f"{MAX_OPENVPN_CONFIG_BYTES // 1024} КБ)"
+        )
+    if "\x00" in text:
+        raise NetworkValidationError("OpenVPN: конфигурация содержит недопустимые символы")
+
+    directives: List[List[str]] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith(";"):
+            continue
+        directives.append(stripped.split())
+
+    names = [tokens[0].lower() for tokens in directives]
+    if "client" not in names:
+        raise NetworkValidationError(
+            "OpenVPN: конфигурация должна содержать директиву «client»"
+        )
+    remote = next((tokens for tokens in directives if tokens[0].lower() == "remote"), None)
+    if remote is None:
+        raise NetworkValidationError(
+            "OpenVPN: конфигурация должна содержать директиву «remote хост [порт]»"
+        )
+    if len(remote) < 2:
+        raise NetworkValidationError("OpenVPN: директива «remote» должна указывать хост")
+    _validate_host(remote[1], "OpenVPN: remote-хост")
+    if len(remote) > 2:
+        _validate_port(remote[2], "OpenVPN: remote-порт")
+
+    return text + "\n"
+
+
+# --- Credential-bearing file writers ---------------------------------------
+
+
+def _write_private_file(path: Path, text: str) -> None:
+    """Create/replace ``path`` with PRIVATE_FILE_MODE (0600) and UTF-8 content."""
+    data = text.encode("utf-8")
+    descriptor = os.open(
+        str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, PRIVATE_FILE_MODE
+    )
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError(f"не удалось записать {path.name}")
+            view = view[written:]
+    finally:
+        os.close(descriptor)
+    try:
+        os.chmod(str(path), PRIVATE_FILE_MODE)
+    except OSError:
+        # Windows has no POSIX bits; the os.open mode above is authoritative.
+        pass
+
+
+def _wireguard_keyfile_text(
+    connection_id: str,
+    private_key: str,
+    address: str,
+    prefix: int,
+    peer_public_key: str,
+    endpoint: str,
+    allowed_ips: List[str],
+    keepalive: int,
+) -> str:
+    """Render a NetworkManager WireGuard keyfile (written with mode 0600)."""
+    peer: List[str] = [
+        f"[wireguard-peer.{peer_public_key}]",
+        f"endpoint={endpoint}",
+        f"allowed-ips={';'.join(allowed_ips)};",
+    ]
+    if keepalive:
+        peer.append(f"persistent-keepalive={keepalive}")
+
+    lines = [
+        "[connection]",
+        f"id={connection_id}",
+        f"uuid={uuid.uuid4()}",
+        "type=wireguard",
+        "autoconnect=true",
+        "",
+        "[wireguard]",
+        f"private-key={private_key}",
+        "fwmark=0",
+        "",
+        *peer,
+        "",
+        "[ipv4]",
+        "method=manual",
+        f"address1={address}/{prefix}",
+        "",
+        "[ipv6]",
+        "method=disabled",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+# --- POST /api/network/* actions (return (status, payload), never raise) ----
+
+
+def _network_error(status: int, message: str) -> Tuple[int, Dict[str, Any]]:
+    return int(status), {"ok": False, "message": message}
+
+
+def _network_action(action: Callable[[], Tuple[int, Dict[str, Any]]]) -> Tuple[int, Dict[str, Any]]:
+    """Run one network action, converting every failure into a JSON response."""
+    try:
+        return action()
+    except NetworkValidationError as exc:
+        return _network_error(HTTPStatus.BAD_REQUEST, str(exc))
+    except NetworkUnavailableError as exc:
+        return _network_error(HTTPStatus.SERVICE_UNAVAILABLE, str(exc))
+    except Exception:
+        # Never leak a traceback or a secret from an unexpected failure.
+        return _network_error(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            "Не удалось применить настройки сети: непредвиденная ошибка",
+        )
+
+
+def apply_network_ip(
+    body: Any,
+    run_cmd: CommandRunner = default_run_cmd,
+) -> Tuple[int, Dict[str, Any]]:
+    """Apply IPv4/DNS settings to the interface's active NM connection.
+
+    Returns ``(status, payload)``: 200 on success, 400 on invalid input, 503 when
+    NetworkManager is unavailable or fails.
+    """
+
+    def action() -> Tuple[int, Dict[str, Any]]:
+        if not isinstance(body, dict):
+            raise NetworkValidationError("Некорректное тело запроса")
+
+        interface = validate_interface_name(body.get("interface"))
+        mode = str(body.get("mode") or "auto").strip().lower()
+        if mode not in ("auto", "manual"):
+            raise NetworkValidationError("Режим должен быть «auto» или «manual»")
+
+        address = ""
+        prefix = 0
+        gateway = ""
+        dns = validate_dns_list(body.get("dns"))
+        if mode == "manual":
+            address = validate_ipv4(body.get("address"), "IPv4-адрес")
+            prefix = validate_prefix(body.get("prefix"), "Префикс")
+            gateway = validate_gateway(body.get("gateway"))
+
+        _require_nmcli()
+        active = _nmcli_active_connections(run_cmd)
+        connection = str(active.get(interface, {}).get("connection") or "")
+        if not connection:
+            raise NetworkUnavailableError(
+                f"Для интерфейса {interface} нет активного подключения NetworkManager"
+            )
+
+        dns_value = ",".join(dns)
+        if mode == "manual":
+            mod_args = [
+                "con",
+                "mod",
+                connection,
+                "ipv4.method",
+                "manual",
+                "ipv4.addresses",
+                f"{address}/{prefix}",
+                "ipv4.gateway",
+                gateway,
+                "ipv4.dns",
+                dns_value,
+            ]
+        else:
+            mod_args = [
+                "con",
+                "mod",
+                connection,
+                "ipv4.method",
+                "auto",
+                "ipv4.addresses",
+                "",
+                "ipv4.gateway",
+                "",
+                "ipv4.dns",
+                dns_value,
+                "ipv4.ignore-auto-dns",
+                "yes" if dns else "no",
+            ]
+
+        _run_nmcli(mod_args, 20.0, run_cmd, "изменить настройки IPv4")
+        _run_nmcli(["con", "up", connection], 45.0, run_cmd, "применить настройки IPv4")
+
+        summary = (
+            f"{address}/{prefix}" if mode == "manual" else "автоматически (DHCP)"
+        )
+        return int(HTTPStatus.OK), {
+            "ok": True,
+            "message": f"Настройки IPv4 для {interface} применены: {summary}",
+            "interface": interface,
+            "mode": mode,
+            "connection": connection,
+        }
+
+    return _network_action(action)
+
+
+def apply_network_pppoe(
+    body: Any,
+    run_cmd: CommandRunner = default_run_cmd,
+) -> Tuple[int, Dict[str, Any]]:
+    """Create/replace the rhm-pppoe NetworkManager connection and bring it up."""
+
+    def action() -> Tuple[int, Dict[str, Any]]:
+        if not isinstance(body, dict):
+            raise NetworkValidationError("Некорректное тело запроса")
+
+        username = validate_pppoe_username(body.get("username"))
+        password = validate_secret(body.get("password"), "Пароль PPPoE")
+        service = validate_pppoe_service(body.get("service"))
+
+        _require_nmcli()
+        if PPPOE_CONNECTION_NAME in _nmcli_connection_names(run_cmd):
+            _run_nmcli(
+                ["con", "delete", PPPOE_CONNECTION_NAME],
+                20.0,
+                run_cmd,
+                "удалить старое PPPoE-подключение",
+                secrets=(password,),
+            )
+
+        add_args = [
+            "con",
+            "add",
+            "type",
+            "pppoe",
+            "con-name",
+            PPPOE_CONNECTION_NAME,
+            "ifname",
+            "*",
+            "username",
+            username,
+            "password",
+            password,
+        ]
+        if service:
+            # `con add` takes `<setting>.<property> value` pairs; the PPPoE
+            # service lives in the pppoe setting (bare "service" is not an
+            # nmcli alias and would be rejected on a real ISO).
+            add_args.extend(["pppoe.service", service])
+        _run_nmcli(
+            add_args,
+            30.0,
+            run_cmd,
+            "создать PPPoE-подключение",
+            secrets=(password,),
+        )
+        _run_nmcli(
+            ["con", "up", PPPOE_CONNECTION_NAME],
+            60.0,
+            run_cmd,
+            "включить PPPoE-подключение",
+            secrets=(password,),
+        )
+
+        return int(HTTPStatus.OK), {
+            "ok": True,
+            "message": "PPPoE-подключение rhm-pppoe создано и включено",
+            "connection": PPPOE_CONNECTION_NAME,
+            "redacted": True,
+        }
+
+    return _network_action(action)
+
+
+def apply_network_wireguard(
+    body: Any,
+    run_cmd: CommandRunner = default_run_cmd,
+    connections_dir: Optional[Path] = None,
+) -> Tuple[int, Dict[str, Any]]:
+    """Write a 0600 NM WireGuard keyfile, reload NetworkManager and bring it up."""
+
+    def action() -> Tuple[int, Dict[str, Any]]:
+        if not isinstance(body, dict):
+            raise NetworkValidationError("Некорректное тело запроса")
+
+        name = validate_connection_name(
+            body.get("name"), "Имя WireGuard-подключения", max_len=32
+        )
+        private_key = validate_wireguard_key(
+            body.get("private_key"), "Приватный ключ WireGuard"
+        )
+        peer_public_key = validate_wireguard_key(
+            body.get("peer_public_key"), "Публичный ключ пира"
+        )
+        if private_key == peer_public_key:
+            raise NetworkValidationError(
+                "Публичный ключ пира не должен совпадать с приватным ключом"
+            )
+        address = validate_ipv4(body.get("address"), "Адрес WireGuard")
+        prefix = validate_prefix(body.get("prefix"), "Префикс")
+        endpoint = validate_endpoint(body.get("endpoint"))
+        allowed_ips = validate_allowed_ips(body.get("allowed_ips"))
+        keepalive = validate_keepalive(body.get("keepalive"))
+
+        _require_nmcli()
+
+        target_dir = Path(connections_dir) if connections_dir is not None else NM_CONNECTIONS_DIR
+        connection = f"{WIREGUARD_CONNECTION_PREFIX}{name}"
+        keyfile = target_dir / f"{connection}.nmconnection"
+        keyfile_text = _wireguard_keyfile_text(
+            connection,
+            private_key,
+            address,
+            prefix,
+            peer_public_key,
+            endpoint,
+            allowed_ips,
+            keepalive,
+        )
+
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            raise NetworkUnavailableError(
+                f"Не удалось создать каталог NetworkManager: {_sanitize_detail(str(exc))}"
+            )
+        try:
+            _write_private_file(keyfile, keyfile_text)
+        except Exception as exc:
+            raise NetworkUnavailableError(
+                "Не удалось записать ключевой файл WireGuard: "
+                f"{_sanitize_detail(str(exc))}"
+            )
+
+        try:
+            _run_nmcli(
+                ["con", "reload"],
+                20.0,
+                run_cmd,
+                "перечитать настройки NetworkManager",
+                secrets=(private_key,),
+            )
+            _run_nmcli(
+                ["con", "up", connection],
+                45.0,
+                run_cmd,
+                "включить WireGuard-подключение",
+                secrets=(private_key,),
+            )
+        except NetworkUnavailableError:
+            # Do not leave a half-applied auto-connect profile behind.
+            try:
+                keyfile.unlink()
+            except OSError:
+                pass
+            raise
+
+        return int(HTTPStatus.OK), {
+            "ok": True,
+            "message": f"WireGuard-подключение {connection} создано и включено",
+            "connection": connection,
+            "redacted": True,
+        }
+
+    return _network_action(action)
+
+
+def apply_network_openvpn(
+    body: Any,
+    run_cmd: CommandRunner = default_run_cmd,
+    temp_root: Optional[Path] = None,
+) -> Tuple[int, Dict[str, Any]]:
+    """Import a pasted .ovpn via nmcli and bring the connection up.
+
+    The config is written to a 0600 temporary file that is always removed in a
+    ``finally`` block; its contents are never echoed or logged.
+    """
+
+    def action() -> Tuple[int, Dict[str, Any]]:
+        if not isinstance(body, dict):
+            raise NetworkValidationError("Некорректное тело запроса")
+
+        name = validate_connection_name(
+            body.get("name"), "Имя OpenVPN-подключения", max_len=OPENVPN_CONNECTION_MAX_LEN
+        )
+        config = validate_openvpn_config(body.get("config"))
+
+        _require_nmcli()
+
+        try:
+            temp_dir = Path(
+                tempfile.mkdtemp(
+                    prefix=OPENVPN_TEMP_PREFIX,
+                    dir=str(temp_root) if temp_root is not None else None,
+                )
+            )
+        except Exception as exc:
+            raise NetworkUnavailableError(
+                f"Не удалось создать временный файл OpenVPN: {_sanitize_detail(str(exc))}"
+            )
+
+        try:
+            try:
+                os.chmod(str(temp_dir), 0o700)
+            except OSError:
+                pass
+            config_path = temp_dir / f"{name}.ovpn"
+            try:
+                _write_private_file(config_path, config)
+            except Exception as exc:
+                raise NetworkUnavailableError(
+                    "Не удалось записать временный файл OpenVPN: "
+                    f"{_sanitize_detail(str(exc))}"
+                )
+            _run_nmcli(
+                ["connection", "import", "type", "openvpn", "file", str(config_path)],
+                60.0,
+                run_cmd,
+                "импортировать конфигурацию OpenVPN",
+                replacements=((str(config_path), "<config>"), (str(temp_dir), "<tmp>")),
+            )
+            _run_nmcli(
+                ["con", "up", name],
+                60.0,
+                run_cmd,
+                "включить OpenVPN-подключение",
+                replacements=((str(config_path), "<config>"), (str(temp_dir), "<tmp>")),
+            )
+        finally:
+            shutil.rmtree(str(temp_dir), ignore_errors=True)
+
+        return int(HTTPStatus.OK), {
+            "ok": True,
+            "message": f"OpenVPN-подключение {name} импортировано и включено",
+            "connection": name,
+            "redacted": True,
+        }
+
+    return _network_action(action)
+
+
 class KioskServer(ThreadingHTTPServer):
     """ThreadingHTTPServer carrying injectable runtime dependencies for tests."""
 
@@ -1031,6 +2203,9 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/apps":
                 self._handle_apps()
                 return
+            if path == "/api/network":
+                self._handle_network()
+                return
             self._serve_static(path)
         except Exception:
             self._send_json(
@@ -1056,6 +2231,18 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/apps/launch":
                 self._handle_app_launch()
+                return
+            if path == "/api/network/ip":
+                self._handle_network_ip()
+                return
+            if path == "/api/network/pppoe":
+                self._handle_network_pppoe()
+                return
+            if path == "/api/network/wireguard":
+                self._handle_network_wireguard()
+                return
+            if path == "/api/network/openvpn":
+                self._handle_network_openvpn()
                 return
             self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Not found"})
         except Exception:
@@ -1213,6 +2400,69 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
                 "message": result.get("message") or "Приложение недоступно",
             },
         )
+
+    def _handle_network(self) -> None:
+        """Read-only network picture for the «Текущие» tab (GET /api/network).
+
+        Only ``node_id``/``link_key`` are published from the session state; the
+        device token never reaches the browser. The helper degrades instead of
+        raising, but the outer guard keeps a broken host from 500-ing the poll.
+        """
+        try:
+            snapshot = _network_snapshot(
+                run_cmd=self.server.run_cmd,
+                state_dir=self.server.state_dir,
+            )
+        except Exception:
+            snapshot = {
+                "ok": True,
+                "hostname": "",
+                "node_id": "",
+                "link_key": "",
+                "interfaces": [],
+                "dns": [],
+                "routes": [],
+                "nmcli_available": False,
+            }
+        self._send_json(HTTPStatus.OK, snapshot)
+
+    def _handle_network_action(
+        self,
+        action: Callable[[Dict[str, Any], CommandRunner], Tuple[int, Dict[str, Any]]],
+    ) -> None:
+        """Shared JSON-body plumbing for the four POST /api/network/* actions."""
+        body, err = self._read_json_body()
+        if err is not None or body is None:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"ok": False, "message": err or "Некорректный JSON"},
+            )
+            return
+        try:
+            status, payload = action(body, self.server.run_cmd)
+        except Exception:
+            status = HTTPStatus.SERVICE_UNAVAILABLE
+            payload = {
+                "ok": False,
+                "message": "Не удалось применить настройки сети",
+            }
+        self._send_json(int(status), payload)
+
+    def _handle_network_ip(self) -> None:
+        """POST /api/network/ip — DHCP/static IPv4 + DNS through nmcli."""
+        self._handle_network_action(apply_network_ip)
+
+    def _handle_network_pppoe(self) -> None:
+        """POST /api/network/pppoe — create/replace the rhm-pppoe connection."""
+        self._handle_network_action(apply_network_pppoe)
+
+    def _handle_network_wireguard(self) -> None:
+        """POST /api/network/wireguard — write a 0600 keyfile and bring it up."""
+        self._handle_network_action(apply_network_wireguard)
+
+    def _handle_network_openvpn(self) -> None:
+        """POST /api/network/openvpn — import a pasted .ovpn and bring it up."""
+        self._handle_network_action(apply_network_openvpn)
 
     def _handle_qr_svg(self) -> None:
         session = read_session_state(self.server.state_dir)

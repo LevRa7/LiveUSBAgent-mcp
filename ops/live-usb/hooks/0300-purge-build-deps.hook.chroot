@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# ops/live-usb/hooks/0300-purge-build-deps.hook.chroot
+# Remote-Harness LiveUSB (Debian 13 "Trixie") post-build cleanup hook.
+#
+# 0100-... builds apfs-fuse from source, which needs a full compiler toolchain,
+# kernel headers and dev libraries inside the chroot. None of that is useful at
+# runtime, and keeping it would add hundreds of MB to the squashfs - critical
+# for the "toram" boot mode that copies the whole image into RAM.
+#
+# Runs last (lexical hook order: 0100 -> 0200 -> 0300). Every step is
+# non-fatal: a failure here leaves the image bigger but still bootable.
+
+set -uo pipefail
+
+log() {
+    echo "[rhm-purge] $*"
+}
+
+warn() {
+    echo "[rhm-purge] WARNING: $*" >&2
+}
+
+# 1. Pin the runtime libraries used by /usr/local/bin/apfs-fuse as manually
+#    installed, so apt autoremove cannot take them away with the -dev packages.
+runtime_libs=(libfuse3-3 libbz2-1.0 zlib1g libattr1 libicu72 libicu76)
+for lib in "${runtime_libs[@]}"; do
+    if dpkg-query -W -f='${Status}' "${lib}" 2>/dev/null | grep -q "install ok installed"; then
+        apt-mark manual "${lib}" >/dev/null 2>&1 || warn "could not mark ${lib} manual"
+    fi
+done
+
+# 2. Remove the build-only toolchain, headers and dev libraries.
+build_only=(
+    build-essential
+    gcc
+    g++
+    make
+    cmake
+    git
+    linux-headers-amd64
+    libfuse3-dev
+    libbz2-dev
+    libattr1-dev
+    zlib1g-dev
+)
+log "Purging build-only packages: ${build_only[*]}"
+if ! DEBIAN_FRONTEND=noninteractive apt-get purge -y --auto-remove "${build_only[@]}"; then
+    warn "apt-get purge returned non-zero; image may still contain build dependencies."
+fi
+
+# 3. Drop kernel header trees that apt left behind because of a metapackage pin.
+for hdr in /usr/src/linux-headers-*; do
+    [[ -d "${hdr}" ]] || continue
+    log "Removing leftover kernel headers: ${hdr}"
+    rm -rf "${hdr}" || warn "could not remove ${hdr}"
+done
+
+# 4. Sanity check: the shipped apfs-fuse must still resolve its libraries.
+if [[ -x /usr/local/bin/apfs-fuse ]] && command -v ldd >/dev/null 2>&1; then
+    missing="$(ldd /usr/local/bin/apfs-fuse 2>/dev/null | grep 'not found' || true)"
+    if [[ -n "${missing}" ]]; then
+        warn "apfs-fuse has unresolved libraries after purge: ${missing}"
+    else
+        log "apfs-fuse runtime libraries verified."
+    fi
+fi
+
+# 5. Trim package caches and finish.
+apt-get clean || true
+log "Build-dependency purge complete."

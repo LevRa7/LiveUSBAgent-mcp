@@ -40,6 +40,7 @@ KIOSK_UI_DIR = LIVEUSB_DIR / "kiosk_ui"
 LF_REQUIRED_FILES = [
     "ops/live-usb/build-iso.sh",
     "ops/live-usb/hooks/0100-build-apfs-and-drivers.hook.chroot",
+    "ops/live-usb/hooks/0300-purge-build-deps.hook.chroot",
     "ops/live-usb/test-qemu.sh",
     "ops/live-usb/start-kiosk.sh",
     "ops/live-usb/fetch-skills.sh",
@@ -50,6 +51,7 @@ LF_REQUIRED_FILES = [
 BASH_SCRIPTS = [
     "ops/live-usb/build-iso.sh",
     "ops/live-usb/hooks/0100-build-apfs-and-drivers.hook.chroot",
+    "ops/live-usb/hooks/0300-purge-build-deps.hook.chroot",
     "ops/live-usb/test-qemu.sh",
     "ops/live-usb/start-kiosk.sh",
     "ops/live-usb/fetch-skills.sh",
@@ -196,6 +198,13 @@ def test_build_iso_contract_required_packages() -> None:
         "lvm2",
         "mdadm",
         "cryptsetup",
+        # Recovery / boot-repair additions (package audit 2026-11)
+        "wimtools",
+        "libbde-utils",
+        "hfsprogs",
+        "os-prober",
+        "rsync",
+        "wireless-regdb",
         # Hardware diagnostics & Kiosk runtime
         "memtester",
         "dmidecode",
@@ -232,6 +241,9 @@ def test_build_iso_contract_journald_grub_and_udev_rules() -> None:
     assert "0200-rhm-kernel-symlinks.hook.binary" in text
     assert "/live/vmlinuz" in text
     assert "/live/initrd.img" in text
+
+    # Post-build cleanup hook that strips the compiler toolchain from the image
+    assert "0300-purge-build-deps.hook.chroot" in text
 
 
 def test_builder_creates_the_live_kernel_symlinks_the_grub_menu_needs() -> None:
@@ -523,14 +535,14 @@ def test_cross_component_gateway_bootstrap_kiosk_contract(tmp_path: Path, monkey
         with monkeypatch.context() as mp:
             mp.setattr(liveusb_bootstrap.urllib.request, "urlopen", fake_urlopen)
             boot_res = liveusb_bootstrap.register_ephemeral_node(
-                "https://smart-server.online",
+                "https://racknerd-5a24bf9.merino-carob.ts.net",
                 hostname="liveusb-qa-box",
                 state_dir=str(state_dir),
                 timeout_sec=10,
             )
 
         assert boot_res["ok"] is True
-        assert captured_req["url"] == "https://smart-server.online/v1/liveusb/register"
+        assert captured_req["url"] == "https://racknerd-5a24bf9.merino-carob.ts.net/v1/liveusb/register"
         assert captured_req["method"] == "POST"
         assert captured_req["body"]["hostname"] == "liveusb-qa-box"
         assert captured_req["body"]["os"] == "linux"

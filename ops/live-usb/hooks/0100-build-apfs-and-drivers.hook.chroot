@@ -2,7 +2,7 @@
 # ops/live-usb/hooks/0100-build-apfs-and-drivers.hook.chroot
 # Live-build chroot hook for Remote-Harness LiveUSB (Debian 13 "Trixie"):
 #   - Detects chroot kernel version(s) under /lib/modules/ (never uses host uname -r)
-#   - Builds & installs linux-apfs-rw via DKMS against chroot kernel headers
+#   - Builds installed DKMS modules (apfs-dkms, zfs-dkms) against chroot kernel headers
 #   - Builds & installs apfs-fuse into /usr/local/bin/apfs-fuse
 #   - Optionally installs broadcom-sta-dkms while preserving brcmfmac for modern chips
 #   - Configures /etc/modules-load.d/rhm-liveusb.conf (graceful non-fatal loading)
@@ -34,59 +34,27 @@ else
     log "Detected chroot kernel version(s): ${KVERSIONS[*]}"
 fi
 
-# 2. Build & install linux-apfs-rw via DKMS against chroot kernel headers
-build_linux_apfs_rw() {
+# 2. Build every installed DKMS module (apfs-dkms, zfs-dkms) for each chroot kernel.
+#    The Debian apfs-dkms package (source linux-apfs-rw) is authoritative; the
+#    former manual clone of linux-apfs-rw is gone, so there is exactly one DKMS
+#    package owning the "apfs" module.
+build_dkms_modules() {
     if [[ ${#KVERSIONS[@]} -eq 0 ]]; then
         return 0
     fi
-    if ! command -v git >/dev/null 2>&1 || ! command -v dkms >/dev/null 2>&1; then
-        warn "git or dkms missing; skipping linux-apfs-rw build."
-        return 0
-    fi
-
-    local pkg_name="linux-apfs-rw"
-    local pkg_ver="0.3"
-    local src_dir="/usr/src/${pkg_name}-${pkg_ver}"
-
-    log "Cloning ${pkg_name} into ${src_dir}..."
-    rm -rf "${src_dir}"
-    if ! git clone --depth 1 https://github.com/linux-apfs/linux-apfs-rw.git "${src_dir}"; then
-        warn "Failed to clone linux-apfs-rw; continuing without kernel APFS driver."
-        return 0
-    fi
-    rm -rf "${src_dir}/.git"
-
-    if [[ ! -f "${src_dir}/dkms.conf" ]]; then
-        cat <<'EOF' > "${src_dir}/dkms.conf"
-PACKAGE_NAME="linux-apfs-rw"
-PACKAGE_VERSION="0.3"
-BUILT_MODULE_NAME[0]="apfs"
-DEST_MODULE_LOCATION[0]="/updates/dkms"
-AUTOINSTALL="yes"
-MAKE[0]="make -C ${kernel_source_dir} M=${dkms_tree}/${PACKAGE_NAME}/${PACKAGE_VERSION}/build modules"
-CLEAN="make -C ${kernel_source_dir} M=${dkms_tree}/${PACKAGE_NAME}/${PACKAGE_VERSION}/build clean"
-EOF
-    fi
-
-    dkms remove -m "${pkg_name}" -v "${pkg_ver}" --all >/dev/null 2>&1 || true
-    if ! dkms add -m "${pkg_name}" -v "${pkg_ver}"; then
-        warn "dkms add failed for ${pkg_name}/${pkg_ver}"
+    if ! command -v dkms >/dev/null 2>&1; then
+        warn "dkms missing; skipping DKMS autoinstall."
         return 0
     fi
 
     local kver
     for kver in "${KVERSIONS[@]}"; do
         if [[ ! -d "/lib/modules/${kver}/build" ]]; then
-            warn "Kernel headers missing at /lib/modules/${kver}/build; skipping ${pkg_name} for ${kver}."
+            warn "Kernel headers missing at /lib/modules/${kver}/build; skipping DKMS autoinstall for ${kver}."
             continue
         fi
-        log "Building & installing ${pkg_name} via DKMS for kernel ${kver}..."
-        if dkms build -m "${pkg_name}" -v "${pkg_ver}" -k "${kver}" && \
-           dkms install -m "${pkg_name}" -v "${pkg_ver}" -k "${kver}"; then
-            log "Installed ${pkg_name} for ${kver}."
-        else
-            warn "${pkg_name} DKMS build failed for ${kver}; falling back to apfs-fuse / libfsapfs-utils."
-        fi
+        log "Running dkms autoinstall for kernel ${kver}..."
+        dkms autoinstall -k "${kver}" || warn "dkms autoinstall returned non-zero for ${kver}"
     done
 }
 
@@ -154,9 +122,9 @@ install_broadcom_sta() {
     fi
 }
 
-build_linux_apfs_rw
 build_apfs_fuse
 install_broadcom_sta
+build_dkms_modules
 
 # Rebuild module dependencies for every chroot kernel
 for kver in "${KVERSIONS[@]}"; do

@@ -9,7 +9,7 @@
 #   --work-dir PATH          live-build working directory (default: ${WORK_DIR:-/tmp/rhm-live-build})
 #   --distro NAME            Debian suite (default: ${DISTRO:-trixie})
 #   --arch ARCH              Target architecture (default: ${ARCH:-amd64})
-#   --gateway HOST           Mesh gateway domain (default: ${MESH_GATEWAY:-smart-server.online})
+#   --gateway HOST           Mesh gateway domain (default: ${MESH_GATEWAY:-racknerd-5a24bf9.merino-carob.ts.net})
 #   --with-external-skills   Run ops/live-usb/fetch-skills.sh before copying skills/
 #   --build                  Immediately run 'lb build' after configuring (requires root)
 #   --check                  Validate repository assets and exit; needs neither root nor live-build
@@ -23,7 +23,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 WORK_DIR="${WORK_DIR:-/tmp/rhm-live-build}"
 DISTRO="${DISTRO:-trixie}"
 ARCH="${ARCH:-amd64}"
-MESH_GATEWAY="${MESH_GATEWAY:-smart-server.online}"
+MESH_GATEWAY="${MESH_GATEWAY:-racknerd-5a24bf9.merino-carob.ts.net}"
 WITH_EXTERNAL_SKILLS="0"
 RUN_BUILD="0"
 RUN_CHECK="0"
@@ -117,6 +117,7 @@ check_assets() {
         "ops/live-usb/udev/99-rhm-no-automount.rules"
         "ops/live-usb/hooks/0100-build-apfs-and-drivers.hook.chroot"
         "ops/live-usb/hooks/0200-rhm-kernel-symlinks.hook.binary"
+        "ops/live-usb/hooks/0300-purge-build-deps.hook.chroot"
     )
     local -a shell_scripts=(
         "ops/live-usb/build-iso.sh"
@@ -126,6 +127,7 @@ check_assets() {
         "ops/live-usb/test-qemu.sh"
         "ops/live-usb/hooks/0100-build-apfs-and-drivers.hook.chroot"
         "ops/live-usb/hooks/0200-rhm-kernel-symlinks.hook.binary"
+        "ops/live-usb/hooks/0300-purge-build-deps.hook.chroot"
         "install.sh"
     )
     local -a python_sources=(
@@ -145,6 +147,12 @@ check_assets() {
         pcmanfm
         mousepad
         memtest86+
+        wimtools
+        libbde-utils
+        hfsprogs
+        os-prober
+        rsync
+        wireless-regdb
     )
     local -a unit_tokens=(
         "core.agent --ephemeral-liveusb"
@@ -361,6 +369,7 @@ exfat-fuse
 dosfstools
 ntfs-3g
 dislocker
+libbde-utils
 e2fsprogs
 btrfs-progs
 xfsprogs
@@ -368,6 +377,7 @@ f2fs-tools
 zfsutils-linux
 zfs-dkms
 hfsplus
+hfsprogs
 libfshfs-utils
 apfs-dkms
 apfsprogs
@@ -379,6 +389,16 @@ kpartx
 squashfs-tools
 fuse3
 udftools
+thin-provisioning-tools
+keyutils
+dmg2img
+libvhdi-utils
+libvmdk-utils
+libqcow-utils
+ewf-tools
+fsarchiver
+ext4magic
+extundelete
 
 # OS/Data Recovery & RAM/Hardware Diagnostics
 smartmontools
@@ -390,10 +410,14 @@ testdisk
 sleuthkit
 chntpw
 libhivex-bin
+wimtools
 efibootmgr
+efivar
 grub-efi-${ARCH}-bin
 grub-pc-bin
 shim-signed
+os-prober
+systemd-boot-efi
 memtester
 memtest86+
 dmidecode
@@ -403,6 +427,43 @@ pciutils
 usbutils
 lm-sensors
 sysstat
+rasdaemon
+hdparm
+sdparm
+sg3-utils
+lsscsi
+i2c-tools
+acpica-tools
+cpuid
+msr-tools
+f3
+tpm2-tools
+
+# CLI, archives, transfer & console tooling
+rsync
+pv
+wget
+unzip
+zip
+7zip
+zstd
+cabextract
+nano
+file
+less
+htop
+lsof
+strace
+ncdu
+dnsutils
+traceroute
+cifs-utils
+nfs-common
+wireless-regdb
+
+# CPU microcode (early-loaded from initramfs; needed for stable RAM/CPU testing)
+intel-microcode
+amd64-microcode
 
 # Kiosk GUI + Runtime
 xserver-xorg-core
@@ -463,8 +524,11 @@ cp "${REPO_ROOT}/ops/live-usb/hooks/0100-build-apfs-and-drivers.hook.chroot" \
     config/hooks/live/0100-build-apfs-and-drivers.hook.chroot
 cp "${REPO_ROOT}/ops/live-usb/hooks/0200-rhm-kernel-symlinks.hook.binary" \
     config/hooks/live/0200-rhm-kernel-symlinks.hook.binary
+cp "${REPO_ROOT}/ops/live-usb/hooks/0300-purge-build-deps.hook.chroot" \
+    config/hooks/live/0300-purge-build-deps.hook.chroot
 chmod 0755 config/hooks/live/0100-build-apfs-and-drivers.hook.chroot \
-    config/hooks/live/0200-rhm-kernel-symlinks.hook.binary
+    config/hooks/live/0200-rhm-kernel-symlinks.hook.binary \
+    config/hooks/live/0300-purge-build-deps.hook.chroot
 
 echo "[5/7] Configuring systemd services, tty1 kiosk / tty2 TUI autologin, LVM/RAID guards, and journald..."
 mkdir -p config/includes.chroot/etc/systemd/system

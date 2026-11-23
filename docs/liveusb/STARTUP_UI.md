@@ -47,6 +47,10 @@ suppressed; polling still refreshes the data.
 
 ![Kiosk apps modal](images/kiosk-apps.png)
 
+- **Рабочий стол (LXDE)** — starts a full LXDE session on `:1`/`vt2` via
+  `rhm-open-desktop`; it has the LXDE Start menu, PCManFM, terminal, display
+  (`lxrandr`), keyboard/mouse (`lxinput`) and appearance (`lxappearance`)
+  settings. The kiosk stays on `vt1`; `Ctrl+Alt+F1` returns to it.
 - **Терминал** — `xterm -e bash` (or the configured terminal emulator).
 - **Файловый менеджер** — `rhm-open-files`, a wrapper around `xfe` that opens
   `/mnt/rescue` (fallback `/root`) and dismisses Xfe's root warning

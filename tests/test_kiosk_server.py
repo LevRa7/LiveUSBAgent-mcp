@@ -673,31 +673,31 @@ def _fake_popen(captured: Dict[str, Any], pid: int = 2468):
     return fake_popen
 
 
-APP_LABELS = ["Терминал", "Файловый менеджер", "Текстовый редактор"]
+APP_LABELS = ["Рабочий стол (LXDE)", "Терминал", "Файловый менеджер", "Текстовый редактор"]
 
 
 def test_list_local_apps_allowlist_and_availability(monkeypatch):
-    _which_map(monkeypatch, {"xterm": "/usr/bin/xterm", "pcmanfm": "/usr/bin/pcmanfm"})
+    _which_map(monkeypatch, {"rhm-open-desktop": "/usr/local/bin/rhm-open-desktop", "xterm": "/usr/bin/xterm", "pcmanfm": "/usr/bin/pcmanfm"})
 
     apps = kiosk.list_local_apps()
-    assert [a["id"] for a in apps] == ["terminal", "files", "editor"]
+    assert [a["id"] for a in apps] == ["desktop", "terminal", "files", "editor"]
     assert [a["label"] for a in apps] == APP_LABELS
-    assert [a["available"] for a in apps] == [True, True, False]
-    assert apps[0]["reason"] == ""
+    assert [a["available"] for a in apps] == [True, True, True, False]
     assert apps[1]["reason"] == ""
-    assert "mousepad" in apps[2]["reason"]
+    assert apps[2]["reason"] == ""
+    assert "mousepad" in apps[3]["reason"]
     # Stable shape: exactly the four contract keys.
     assert all(set(a) == {"id", "label", "available", "reason"} for a in apps)
 
     # Nothing installed -> all unavailable, each with a non-empty Russian reason.
     _which_map(monkeypatch, {})
     missing = kiosk.list_local_apps()
-    assert [a["available"] for a in missing] == [False, False, False]
+    assert [a["available"] for a in missing] == [False, False, False, False]
     assert all(a["reason"] for a in missing)
 
 
 def test_http_api_apps_returns_three_ids_and_availability(running_server, monkeypatch):
-    _which_map(monkeypatch, {"xterm": "/usr/bin/xterm", "mousepad": "/usr/bin/mousepad"})
+    _which_map(monkeypatch, {"rhm-open-desktop": "/usr/local/bin/rhm-open-desktop", "xterm": "/usr/bin/xterm", "mousepad": "/usr/bin/mousepad"})
     base = running_server["base_url"]
 
     status, _, body = _http_request(base, "/api/apps")
@@ -705,10 +705,10 @@ def test_http_api_apps_returns_three_ids_and_availability(running_server, monkey
     data = json.loads(body.decode("utf-8"))
     assert data["ok"] is True
     apps = data["apps"]
-    assert [a["id"] for a in apps] == ["terminal", "files", "editor"]
+    assert [a["id"] for a in apps] == ["desktop", "terminal", "files", "editor"]
     assert [a["label"] for a in apps] == APP_LABELS
-    assert [a["available"] for a in apps] == [True, False, True]
-    assert "pcmanfm" in apps[1]["reason"]
+    assert [a["available"] for a in apps] == [True, True, False, True]
+    assert "pcmanfm" in apps[2]["reason"]
 
     # The catalogue stays behind the existing Host/Origin/Sec-Fetch gate.
     st_evil, _, _ = _http_request(

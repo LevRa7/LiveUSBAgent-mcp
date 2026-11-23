@@ -44,6 +44,7 @@ LF_REQUIRED_FILES = [
     "ops/live-usb/hooks/0300-purge-build-deps.hook.chroot",
     "ops/live-usb/test-qemu.sh",
     "ops/live-usb/start-kiosk.sh",
+    "ops/live-usb/start-lxde.sh",
     "ops/live-usb/fetch-skills.sh",
     "ops/live-usb/udev/99-rhm-no-automount.rules",
     "ops/live-usb/udev/99-rhm-network-tethering.rules",
@@ -55,6 +56,7 @@ BASH_SCRIPTS = [
     "ops/live-usb/hooks/0300-purge-build-deps.hook.chroot",
     "ops/live-usb/test-qemu.sh",
     "ops/live-usb/start-kiosk.sh",
+    "ops/live-usb/start-lxde.sh",
     "ops/live-usb/fetch-skills.sh",
 ]
 
@@ -568,6 +570,25 @@ def test_build_iso_installs_the_root_warning_wrapper() -> None:
     wrapper_text = wrapper.read_text(encoding="utf-8")
     assert "xfe" in wrapper_text
     assert "Warning" in wrapper_text
+
+
+def test_build_iso_installs_lxde_desktop_launcher() -> None:
+    """The app launcher must ship a full LXDE desktop (Start menu/settings)."""
+    text = BUILD_ISO_SH.read_text(encoding="utf-8")
+    packages = _generated_package_list()
+    required = _check_required_packages()
+    wrapper = LIVEUSB_DIR / "start-lxde.sh"
+
+    assert wrapper.is_file()
+    assert "start-lxde.sh" in text
+    assert "/usr/local/bin/rhm-open-desktop" in text
+    for package in ("lxde", "kbd"):
+        assert package in packages
+        assert package in required
+    wrapper_text = wrapper.read_text(encoding="utf-8")
+    assert "startlxde" in wrapper_text
+    assert "chvt 2" in wrapper_text
+    assert ":1 vt2" in wrapper_text
 
 
 def test_build_iso_installs_kiosk_service_and_masks_getty() -> None:

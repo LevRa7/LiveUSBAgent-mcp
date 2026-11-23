@@ -74,6 +74,7 @@ Instead of flooding the AI's context window with dozens of long manuals, LiveUSB
   2. `linux-chroot-grub-luks-rescue` — Safe `mdadm` -> `cryptsetup` -> `lvm2` assembly, `chroot`, GRUB/systemd-boot, and `initramfs` rebuilds.
   3. `macos-apfs-hfs-recovery` — Safe data extraction from APFS (`apfs-dkms` / `apfs-fuse` for FileVault / `libfsapfs-utils`) and HFS+.
   4. `ram-hardware-live-diagnostics` — Hardware inventory (`dmidecode`, `lshw`, `lspci`, `lsusb`, `lm-sensors`), live RAM stress testing (`memtester`), and memory capture (`/proc/kcore` works out of the box; `avml` is not preinstalled in the ISO and is optional if installed separately).
+- **LXDE desktop** — the kiosk app launcher opens a full lightweight LXDE session on t2 (Start menu, PCManFM, display/keyboard/appearance settings); Ctrl+Alt+F1 returns to the kiosk.
 - **Curated external skills (`ops/live-usb/fetch-skills.sh`):** Downloads vetted GitHub sysadmin, DevOps, storage, and recovery skills listed in `ops/live-usb/skills-manifest.json`, records exact commit SHAs in `ops/live-usb/skills-lock.json`, and scans them offline with [NVIDIA/SkillSpector](https://github.com/NVIDIA/SkillSpector) (`--recursive --no-llm`) when installed.
 
 ---

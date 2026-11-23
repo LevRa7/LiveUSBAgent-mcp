@@ -91,6 +91,8 @@
 3. `macos-apfs-hfs-recovery` — аккуратное чтение и выгрузка данных с APFS (`apfs-dkms`, `apfs-fuse` для FileVault, `libfsapfs-utils`) и HFS+.
 4. `ram-hardware-live-diagnostics` — инвентаризация железа (`dmidecode`, `lshw`, `lspci`, `lsusb`, `sensors`), проверка ECC (`edac-utils`), тест ОЗУ (`memtester`), live-дамп памяти (`/proc/kcore` работает из коробки; `avml` не предустановлен в ISO и используется опционально при отдельной установке).
 
+- **Рабочий стол LXDE** — из меню «Приложения» запускается полноценная лёгкая сессия LXDE на t2 (меню «Пуск», PCManFM, настройки экрана/клавиатуры/темы); возврат в киоск — Ctrl+Alt+F1.
+
 Дополнительно скрипт `ops/live-usb/fetch-skills.sh` позволяет подтянуть проверенные GitHub-скиллы по манифесту `ops/live-usb/skills-manifest.json` с фиксацией точных commit SHA в `ops/live-usb/skills-lock.json` и автоматическим сканированием офлайн-сканером **NVIDIA SkillSpector** (`--recursive --no-llm`) на prompt injection и tool poisoning.
 
 ---

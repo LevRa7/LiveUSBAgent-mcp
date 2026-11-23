@@ -628,9 +628,14 @@ def trigger_session_regenerate(
 #                    found by shutil.which wins. A tail of ``None`` means the
 #                    argv is computed at launch time (file manager target dir).
 #   missing_reason - Russian explanation returned when no binary is installed.
-APP_LAUNCH_ORDER: Tuple[str, ...] = ("terminal", "files", "editor")
+APP_LAUNCH_ORDER: Tuple[str, ...] = ("desktop", "terminal", "files", "editor")
 
 APP_LAUNCHERS: Dict[str, Dict[str, Any]] = {
+    "desktop": {
+        "label": "Рабочий стол (LXDE)",
+        "candidates": (("rhm-open-desktop", None),),
+        "missing_reason": "Рабочий стол LXDE недоступен: не установлен rhm-open-desktop",
+    },
     "terminal": {
         "label": "Терминал",
         "candidates": tuple(

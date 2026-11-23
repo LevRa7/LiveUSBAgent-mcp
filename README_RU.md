@@ -95,9 +95,28 @@
 
 ---
 
+## Скриншоты
+
+| Сеть / нет интернета | Готово: QR и токен |
+| :---: | :---: |
+| ![Экран сети](docs/liveusb/images/kiosk-network.png) | ![QR-экран](docs/liveusb/images/kiosk-ready.png) |
+
+| Приложения | Настройки сети |
+| :---: | :---: |
+| ![Меню приложений](docs/liveusb/images/kiosk-apps.png) | ![Настройки сети](docs/liveusb/images/network-settings-current.png) |
+
+| Файловый менеджер | Терминал |
+| :---: | :---: |
+| ![Файловый менеджер](docs/liveusb/images/kiosk-files.png) | ![Терминал](docs/liveusb/images/kiosk-terminal.png) |
+
+Остальные экраны, включая pending-сессию и вкладки PPPoE/WireGuard/OpenVPN:
+[docs/liveusb/STARTUP_UI.md](docs/liveusb/STARTUP_UI.md).
+
+---
+
 ## Пошаговая инструкция
 
-> **Примечание:** готовые ISO-релизы пока не публикуются — образ собирается локально на хосте или ВМ с Debian 13 (Trixie).
+> **Готовый ISO:** опубликован в [релизе v0.1.0](https://github.com/LevRa7/LiveUSBAgent-mcp/releases/tag/v0.1.0). Самостоятельная сборка — на Debian 13 (Trixie), как описано ниже.
 
 ### Шаг 1. Сборка ISO-образа на Debian
 

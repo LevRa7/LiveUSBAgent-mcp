@@ -78,9 +78,28 @@ Instead of flooding the AI's context window with dozens of long manuals, LiveUSB
 
 ---
 
+## Screenshots
+
+| Network / no internet | Ready: QR and token |
+| :---: | :---: |
+| ![Kiosk network view](docs/liveusb/images/kiosk-network.png) | ![Kiosk QR view](docs/liveusb/images/kiosk-ready.png) |
+
+| Applications | Network settings |
+| :---: | :---: |
+| ![Kiosk app launcher](docs/liveusb/images/kiosk-apps.png) | ![Network settings](docs/liveusb/images/network-settings-current.png) |
+
+| File manager | Terminal |
+| :---: | :---: |
+| ![File manager](docs/liveusb/images/kiosk-files.png) | ![Terminal](docs/liveusb/images/kiosk-terminal.png) |
+
+More screens, including pending-session and PPPoE/WireGuard/OpenVPN tabs:
+[docs/liveusb/STARTUP_UI.md](docs/liveusb/STARTUP_UI.md).
+
+---
+
 ## Step-by-Step: Build, Flash, Boot & Use
 
-> **Note:** Prebuilt ISO releases are not published yet — ISO images are currently built locally on a Debian 13 (Trixie) host or VM.
+> **Prebuilt ISO:** published on the [v0.1.0 release](https://github.com/LevRa7/LiveUSBAgent-mcp/releases/tag/v0.1.0). To build it yourself, use Debian 13 (Trixie) as described below.
 
 ### Step 1: Build the ISO (on Debian 13 Trixie)
 

@@ -3,8 +3,8 @@
 **Дата:** 23.11.2026, ~14:58 IST
 **Ветка:** `complete-liveusb`, локальный тег `v0.1.0`
 **Версия:** `0.1.0` (независимая нумерация форка; upstream-база — `0.6.0`)
-**ISO:** [`artifacts/LiveUSBAgent-0.1.0-final.iso`](artifacts/LiveUSBAgent-0.1.0-final.iso) — 1.8 ГБ, bootable
-**SHA-256:** `bb6dff194c00e1b2194aa9cad2ae4dbaea4ffe5d2e9e3092bc1884885992b79d`
+**ISO:** [`artifacts/LiveUSBAgent-0.1.0-network.iso`](artifacts/LiveUSBAgent-0.1.0-network.iso) — 1.7 ГБ, bootable
+**SHA-256:** `dccef6fcb7fc99977641925a8c4918dfd4cc52933749ea4d7f72fbbba0de091a`
 
 ---
 
@@ -105,7 +105,7 @@ APFS: `apfs-fuse` собран и установлен; DKMS-модуль `linux
 
 - Дефолтный публичный домен заменён на
   `racknerd-5a24bf9.merino-carob.ts.net` в `core/domain.py`, ISO,
-  README, docs и тестах; `smart-server.online` в активном дереве больше нет.
+  README, docs и тестах; прежний домен в активном дереве больше нет.
 - «Настройки сети»: текущие идентификаторы (hostname, node ID, link key с
   маскировкой), интерфейсы с MAC/IP/шлюзом/DNS; редактирование DHCP/static
   IPv4 и DNS; PPPoE; WireGuard (keyfile 0600); OpenVPN (импорт .ovpn).

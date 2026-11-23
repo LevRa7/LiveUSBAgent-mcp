@@ -2,7 +2,7 @@
 
 ## Domain
 
-`smart-server.online` is not a working domain. Every active code/doc/test
+the old domain is not a working domain. Every active code/doc/test
 reference has been replaced with:
 
 `racknerd-5a24bf9.merino-carob.ts.net`

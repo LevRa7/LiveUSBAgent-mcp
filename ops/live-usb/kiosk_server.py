@@ -4,7 +4,8 @@
 
 Stdlib-only (Python 3.8+) ThreadingHTTPServer bound strictly to 127.0.0.1:8787.
 Serves the Russian kiosk UI from ops/live-usb/kiosk_ui/ and exposes JSON/SVG
-endpoints for network status, Wi-Fi management, LiveUSB session state, and QR.
+endpoints for network status, Wi-Fi management, LiveUSB session state, QR, and
+the allowlisted local application launcher.
 """
 
 from __future__ import annotations
@@ -596,44 +597,171 @@ def trigger_session_regenerate(
     }
 
 
+# --- Allowlisted kiosk application launcher --------------------------------
+#
+# The kiosk UI may only ask the server to launch a *fixed* application id.
+# Every argv is built here from this table (never from request data), so a
+# browser can never supply a command, a binary, or an arbitrary path.
+#
+# Each entry has:
+#   label          - Russian label rendered by the UI.
+#   candidates     - ordered (binary name, argv tail) pairs; the first binary
+#                    found by shutil.which wins. A tail of ``None`` means the
+#                    argv is computed at launch time (file manager target dir).
+#   missing_reason - Russian explanation returned when no binary is installed.
+APP_LAUNCH_ORDER: Tuple[str, ...] = ("terminal", "files", "editor")
+
+APP_LAUNCHERS: Dict[str, Dict[str, Any]] = {
+    "terminal": {
+        "label": "Терминал",
+        "candidates": tuple(
+            (name, (flag, "bash")) for name, flag in TERMINAL_CANDIDATES
+        ),
+        "missing_reason": "Терминал недоступен: не найден эмулятор терминала",
+    },
+    "files": {
+        "label": "Файловый менеджер",
+        "candidates": (("rhm-open-files", None), ("xfe", None), ("pcmanfm", None)),
+        "missing_reason": "Файловый менеджер недоступен: не установлены rhm-open-files/xfe/pcmanfm",
+    },
+    "editor": {
+        "label": "Текстовый редактор",
+        "candidates": (("mousepad", ()),),
+        "missing_reason": "Текстовый редактор недоступен: mousepad не установлен",
+    },
+}
+
+# Directory the «Файловый менеджер» entry opens; the kiosk bootstrap creates
+# /mnt/rescue, and /root is the safe fallback on hosts without it.
+FILES_PRIMARY_DIR = "/mnt/rescue"
+FILES_FALLBACK_DIR = "/root"
+
+
+def _resolve_app_launcher(app_id: str) -> Tuple[Optional[str], Any]:
+    """Resolve the first installed binary for ``app_id`` via shutil.which."""
+    try:
+        candidates = APP_LAUNCHERS[app_id]["candidates"]
+    except KeyError:
+        return None, None
+    for name, argv_tail in candidates:
+        try:
+            exe = shutil.which(name)
+        except Exception:
+            exe = None
+        if exe:
+            return str(exe), argv_tail
+    return None, None
+
+
+def _files_target_dir() -> str:
+    """Return the fixed directory opened by the file manager entry."""
+    try:
+        if os.path.isdir(FILES_PRIMARY_DIR):
+            return FILES_PRIMARY_DIR
+    except Exception:
+        pass
+    return FILES_FALLBACK_DIR
+
+
+def _build_app_argv(exe: str, argv_tail: Any) -> List[str]:
+    """Build the fixed argv for a resolved launcher (no request data)."""
+    if argv_tail is None:
+        return [exe, _files_target_dir()]
+    return [exe, *[str(part) for part in argv_tail]]
+
+
+def list_local_apps() -> List[Dict[str, Any]]:
+    """Return the stable allowlisted application catalogue for GET /api/apps.
+
+    Each item is ``{"id", "label", "available", "reason"}``. ``available`` is
+    True only when the launcher binary is installed (resolved with
+    shutil.which); ``reason`` is a Russian explanation otherwise, else "".
+    """
+    apps: List[Dict[str, Any]] = []
+    for app_id in APP_LAUNCH_ORDER:
+        spec = APP_LAUNCHERS[app_id]
+        exe, _argv_tail = _resolve_app_launcher(app_id)
+        available = bool(exe)
+        apps.append(
+            {
+                "id": app_id,
+                "label": str(spec["label"]),
+                "available": available,
+                "reason": "" if available else str(spec["missing_reason"]),
+            }
+        )
+    return apps
+
+
+def launch_local_app(
+    app_id: str,
+    popen: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
+    """Launch one allowlisted kiosk application. Never raises.
+
+    The request may only choose an id; the argv comes from ``APP_LAUNCHERS``.
+    Returns ``{"ok": True, "pid": ..., "command": [...]}`` on success and
+    ``{"ok": False, "error": "unknown_app"|"unavailable", "message": "..."}``
+    otherwise. The helper should not raise, but the HTTP layer still guards.
+    """
+    label = "Приложение"
+    try:
+        if not isinstance(app_id, str) or app_id not in APP_LAUNCHERS:
+            return {
+                "ok": False,
+                "error": "unknown_app",
+                "message": "Неизвестное приложение",
+            }
+
+        spec = APP_LAUNCHERS[app_id]
+        label = str(spec["label"])
+
+        exe, argv_tail = _resolve_app_launcher(app_id)
+        if not exe:
+            return {
+                "ok": False,
+                "error": "unavailable",
+                "message": str(spec["missing_reason"]),
+            }
+
+        if not os.environ.get("DISPLAY"):
+            return {
+                "ok": False,
+                "error": "unavailable",
+                "message": f"{label} недоступен: нет графической сессии (DISPLAY не задан)",
+            }
+
+        cmd = _build_app_argv(exe, argv_tail)
+        spawn = popen if popen is not None else subprocess.Popen
+        proc = spawn(
+            cmd,
+            cwd="/",
+            env=os.environ.copy(),
+            shell=False,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return {"ok": True, "command": cmd, "pid": getattr(proc, "pid", None)}
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": "unavailable",
+            "message": f"Не удалось запустить {label.lower()}: {exc}",
+        }
+
+
 def launch_local_terminal(
     popen: Optional[Callable[..., Any]] = None,
 ) -> Dict[str, Any]:
     """Open a local bash terminal on the kiosk display (no shell=True).
 
-    Returns ``{"ok": True, "command": [...], "pid": ...}`` on success and
-    ``{"ok": False, "message": "..."}`` when there is no graphical session, no
-    terminal emulator, or the spawn itself fails. Never raises.
+    Thin wrapper around the allowlisted ``terminal`` launcher entry, kept so
+    ``POST /api/terminal`` and the existing callers stay unchanged. Returns
+    ``{"ok": True, "command": [...], "pid": ...}`` on success and
+    ``{"ok": False, "message": "..."}`` on failure. Never raises.
     """
-    if not os.environ.get("DISPLAY"):
-        return {
-            "ok": False,
-            "message": "Терминал недоступен: нет графической сессии (DISPLAY не задан)",
-        }
-
-    spawn = popen if popen is not None else subprocess.Popen
-    for name, flag in TERMINAL_CANDIDATES:
-        exe = shutil.which(name)
-        if not exe:
-            continue
-        cmd = [exe, flag, "bash"]
-        try:
-            proc = spawn(
-                cmd,
-                cwd="/",
-                env=os.environ.copy(),
-                start_new_session=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception as exc:
-            return {"ok": False, "message": f"Не удалось запустить терминал: {exc}"}
-        return {"ok": True, "command": cmd, "pid": getattr(proc, "pid", None)}
-
-    return {
-        "ok": False,
-        "message": "Терминал недоступен: не найден эмулятор терминала",
-    }
+    return launch_local_app("terminal", popen=popen)
 
 
 def render_qr_svg(
@@ -900,6 +1028,9 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/qr.svg":
                 self._handle_qr_svg()
                 return
+            if path == "/api/apps":
+                self._handle_apps()
+                return
             self._serve_static(path)
         except Exception:
             self._send_json(
@@ -922,6 +1053,9 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/terminal":
                 self._handle_terminal()
+                return
+            if path == "/api/apps/launch":
+                self._handle_app_launch()
                 return
             self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Not found"})
         except Exception:
@@ -1009,6 +1143,74 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
             {
                 "ok": False,
                 "message": result.get("message") or "Терминал недоступен",
+            },
+        )
+
+    def _handle_apps(self) -> None:
+        """List the allowlisted kiosk applications (GET /api/apps)."""
+        try:
+            apps = list_local_apps()
+        except Exception:
+            # The catalogue helper already tolerates a missing shutil.which;
+            # this guard only keeps a broken host from 500-ing the UI poll.
+            apps = []
+        self._send_json(HTTPStatus.OK, {"ok": True, "apps": apps})
+
+    def _handle_app_launch(self) -> None:
+        """Launch one allowlisted application (POST /api/apps/launch).
+
+        Only ``{"id": "<allowlisted id>"}`` is read from the body: any command,
+        binary, or path the request might carry is ignored. A successful spawn
+        is 200, an unknown id 400, and an unavailable launcher or failed spawn
+        503 with a Russian explanation.
+        """
+        body, err = self._read_json_body()
+        if err is not None or body is None:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"ok": False, "message": err or "Некорректный JSON"},
+            )
+            return
+
+        raw_id = body.get("id")
+        app_id = raw_id.strip() if isinstance(raw_id, str) else ""
+        if not app_id:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"ok": False, "message": "Не указано приложение"},
+            )
+            return
+
+        try:
+            result = launch_local_app(app_id)
+        except Exception as exc:  # defence in depth: the helper should not raise
+            result = {
+                "ok": False,
+                "error": "unavailable",
+                "message": f"Не удалось запустить приложение: {exc}",
+            }
+
+        if result.get("error") == "unknown_app":
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"ok": False, "message": result.get("message") or "Неизвестное приложение"},
+            )
+            return
+        if result.get("ok"):
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "pid": result.get("pid"),
+                    "command": result.get("command") or [],
+                },
+            )
+            return
+        self._send_json(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            {
+                "ok": False,
+                "message": result.get("message") or "Приложение недоступно",
             },
         )
 

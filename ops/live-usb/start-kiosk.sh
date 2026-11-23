@@ -103,6 +103,13 @@ if [[ -n "${DISPLAY:-}" ]]; then
     X11_WAS_RUNNING="1"
 fi
 export DISPLAY="${DISPLAY:-:0}"
+
+# The app launcher's «Файловый менеджер» entry opens /mnt/rescue when it exists
+# and falls back to /root otherwise, so create the mount point before the kiosk
+# server starts serving /api/apps. mkdir -p must never abort the kiosk: a
+# read-only or already-mounted /mnt/rescue is fine either way.
+mkdir -p /mnt/rescue 2>/dev/null || true
+
 python3 "${SCRIPT_DIR}/kiosk_server.py" --host "${KIOSK_HOST}" --port "${KIOSK_PORT}" &
 SERVER_PID=$!
 

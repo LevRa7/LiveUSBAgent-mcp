@@ -111,6 +111,7 @@ check_assets() {
         "ops/live-usb/kiosk_server.py"
         "ops/live-usb/kiosk_ui/index.html"
         "ops/live-usb/start-kiosk.sh"
+        "ops/live-usb/open-files.sh"
         "ops/live-usb/firstboot_tui.py"
         "ops/live-usb/udev/99-rhm-network-tethering.rules"
         "ops/live-usb/udev/99-rhm-no-automount.rules"
@@ -120,6 +121,7 @@ check_assets() {
     local -a shell_scripts=(
         "ops/live-usb/build-iso.sh"
         "ops/live-usb/start-kiosk.sh"
+        "ops/live-usb/open-files.sh"
         "ops/live-usb/fetch-skills.sh"
         "ops/live-usb/test-qemu.sh"
         "ops/live-usb/hooks/0100-build-apfs-and-drivers.hook.chroot"
@@ -138,6 +140,10 @@ check_assets() {
         apfs-dkms
         chromium
         xterm
+        xfe
+        xdotool
+        pcmanfm
+        mousepad
         memtest86+
     )
     local -a unit_tokens=(
@@ -406,7 +412,11 @@ x11-xserver-utils
 xinit
 openbox
 xterm
+xfe
+xdotool
 chromium
+pcmanfm
+mousepad
 fonts-dejavu-core
 qrencode
 python3
@@ -434,7 +444,9 @@ cp "${REPO_ROOT}/ops/live-usb/kiosk_server.py" "${CHROOT_OPT}/ops/live-usb/"
 cp -r "${REPO_ROOT}/ops/live-usb/kiosk_ui" "${CHROOT_OPT}/ops/live-usb/"
 cp "${REPO_ROOT}/ops/live-usb/start-kiosk.sh" "${CHROOT_OPT}/ops/live-usb/"
 cp "${REPO_ROOT}/ops/live-usb/firstboot_tui.py" "${CHROOT_OPT}/ops/live-usb/"
-chmod 0755 "${CHROOT_OPT}/ops/live-usb/start-kiosk.sh" "${CHROOT_OPT}/ops/live-usb/firstboot_tui.py"
+mkdir -p config/includes.chroot/usr/local/bin
+cp "${REPO_ROOT}/ops/live-usb/open-files.sh" config/includes.chroot/usr/local/bin/rhm-open-files
+chmod 0755 "${CHROOT_OPT}/ops/live-usb/start-kiosk.sh" "${CHROOT_OPT}/ops/live-usb/firstboot_tui.py" config/includes.chroot/usr/local/bin/rhm-open-files
 
 echo "[4/7] Installing udev rules and chroot build hooks..."
 mkdir -p config/includes.chroot/etc/udev/rules.d

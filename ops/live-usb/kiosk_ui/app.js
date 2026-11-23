@@ -28,7 +28,17 @@
     btnHiddenWifi: document.getElementById("btn-hidden-wifi"),
     btnChangeWifi: document.getElementById("btn-change-wifi"),
     btnTerminal: document.getElementById("btn-terminal"),
+    btnTerminalNetwork: document.getElementById("btn-terminal-network"),
+    btnApps: document.getElementById("btn-apps"),
+    btnAppsNetwork: document.getElementById("btn-apps-network"),
     btnNewToken: document.getElementById("btn-new-token"),
+    internetBanner: document.getElementById("internet-banner"),
+    terminalFeedbackNetwork: document.getElementById("terminal-feedback-network"),
+    terminalFeedbackReady: document.getElementById("terminal-feedback-ready"),
+    readyPending: document.getElementById("ready-pending"),
+    readyPendingTitle: document.getElementById("ready-pending-title"),
+    readyPendingText: document.getElementById("ready-pending-text"),
+    readyContent: document.getElementById("ready-content"),
     qrImage: document.getElementById("qr-image"),
     sessionUrl: document.getElementById("session-url"),
     sessionToken: document.getElementById("session-token"),
@@ -50,7 +60,25 @@
     btnModalCancel: document.getElementById("btn-modal-cancel"),
     btnModalSubmit: document.getElementById("btn-modal-submit"),
     oskContainer: document.getElementById("osk-container"),
+    appsBackdrop: document.getElementById("apps-modal-backdrop"),
+    appsList: document.getElementById("apps-list"),
+    appsFeedback: document.getElementById("apps-feedback"),
+    btnAppsClose: document.getElementById("btn-apps-close"),
+    btnAppsCancel: document.getElementById("btn-apps-cancel"),
   };
+
+  const INTERNET_BANNER_NO_INTERNET =
+    "Интернет не обнаружен. Подключите Wi-Fi, кабель или USB-модем.";
+  const INTERNET_BANNER_PENDING =
+    "Интернет есть. Получаем токен и QR…";
+  const INTERNET_BANNER_ONLINE = "Интернет подключён";
+
+  const PENDING_TITLE_INTERNET = "Интернет есть, получаем токен…";
+  const PENDING_TITLE_OFFLINE =
+    "Интернет не обнаружен. Подключите Wi-Fi, кабель или USB-модем.";
+  const PENDING_TEXT_INTERNET =
+    "QR-код и ссылка подключения появятся автоматически, как только сессия будет готова.";
+  const PENDING_TEXT_OFFLINE = "QR-код появится, когда появится интернет.";
 
   function setView(viewName, explicit) {
     state.activeView = viewName;
@@ -142,6 +170,46 @@
     els.qrImage.src = "/api/qr.svg?t=" + Date.now();
   }
 
+  function updateInternetBanner(reachable, sessionReady) {
+    let text;
+    if (!reachable) {
+      text = INTERNET_BANNER_NO_INTERNET;
+    } else if (!sessionReady) {
+      text = INTERNET_BANNER_PENDING;
+    } else {
+      text = INTERNET_BANNER_ONLINE;
+    }
+    els.internetBanner.textContent = text;
+    els.internetBanner.classList.toggle("is-ok", reachable);
+  }
+
+  function updateReadyPending(sessionReady, internetReachable) {
+    els.readyPending.classList.toggle("is-hidden", sessionReady);
+    els.readyContent.classList.toggle("is-hidden", !sessionReady);
+    els.readyPendingTitle.textContent = internetReachable
+      ? PENDING_TITLE_INTERNET
+      : PENDING_TITLE_OFFLINE;
+    els.readyPendingText.textContent = internetReachable
+      ? PENDING_TEXT_INTERNET
+      : PENDING_TEXT_OFFLINE;
+  }
+
+  function applyAutoView(internetReachable, sessionReady) {
+    if (state.userChoseNetworkView) {
+      return;
+    }
+    if (internetReachable) {
+      // Internet is up: show the ready view, pending or complete.
+      if (state.activeView !== "ready") {
+        setView("ready", false);
+      }
+      return;
+    }
+    if (!sessionReady && state.activeView !== "network") {
+      setView("network", false);
+    }
+  }
+
   async function fetchStatus() {
     try {
       const resp = await fetch("/api/status", { cache: "no-store" });
@@ -160,21 +228,27 @@
       els.iphoneTrustBanner.classList.toggle("is-hidden", !needsTrust);
 
       const session = data.session || {};
+      const internet = data.internet || {};
+      const internetReachable = Boolean(internet.reachable);
+      const sessionReady = Boolean(session.ready);
+
+      updateInternetBanner(internetReachable, sessionReady);
+      updateReadyPending(sessionReady, internetReachable);
+
       const connectUrl = session.connect_url || "";
       els.sessionUrl.textContent = connectUrl || "Ожидание ссылки подключения";
       els.sessionToken.textContent = session.token || "Ожидание токена";
       els.sessionTunnel.textContent = session.tunnel_status || "offline";
 
-      if (connectUrl !== state.lastConnectUrl) {
+      if (sessionReady && connectUrl !== state.lastConnectUrl) {
         state.lastConnectUrl = connectUrl;
         refreshQrImage();
       }
 
       renderDisks(data.disks);
 
-      if (session.ready && !state.userChoseNetworkView && state.activeView !== "ready") {
-        setView("ready", false);
-      }
+      // Internet wins the view; no internet falls back to the network screen.
+      applyAutoView(internetReachable, sessionReady);
     } catch (_err) {
       // Keep previous rendered state on transient polling errors
     }
@@ -332,24 +406,151 @@
     }
   }
 
-  async function openTerminal() {
-    els.btnTerminal.disabled = true;
-    els.regenFeedback.classList.remove("is-hidden");
-    els.regenFeedback.textContent = "Открытие терминала...";
+  async function openTerminal(button, feedbackEl) {
+    const trigger = button || els.btnTerminal;
+    const feedback = feedbackEl || els.terminalFeedbackReady;
+    trigger.disabled = true;
+    feedback.classList.remove("is-hidden");
+    feedback.textContent = "Открытие терминала...";
     try {
       const resp = await fetch("/api/terminal", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: "{}",
       });
-      const data = await resp.json();
-      els.regenFeedback.textContent = data.message || data.error ||
+      let data = {};
+      try {
+        data = await resp.json();
+      } catch (_parseErr) {
+        data = {};
+      }
+      feedback.textContent = data.message || data.error ||
         (data.ok ? "Терминал открыт" : "Не удалось открыть терминал");
     } catch (_err) {
-      els.regenFeedback.textContent = "Не удалось открыть терминал";
+      feedback.textContent = "Не удалось открыть терминал";
     } finally {
-      els.btnTerminal.disabled = false;
+      trigger.disabled = false;
     }
+  }
+
+  function showAppsMessage(text) {
+    els.appsFeedback.textContent = text;
+    els.appsFeedback.classList.remove("is-hidden");
+  }
+
+  function renderAppsError(text) {
+    els.appsList.innerHTML = "";
+    const row = document.createElement("div");
+    row.className = "empty-row";
+    row.textContent = text;
+    els.appsList.appendChild(row);
+  }
+
+  function renderApps(apps) {
+    els.appsList.innerHTML = "";
+    if (!apps || apps.length === 0) {
+      renderAppsError("Приложения не найдены");
+      return;
+    }
+
+    apps.forEach(function (app) {
+      const available = app.available !== false;
+      const label = app.label || app.id || "Приложение";
+
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "app-item";
+      item.setAttribute("role", "listitem");
+      item.disabled = !available;
+      item.dataset.appId = app.id || "";
+      item.title = available ? label : (app.reason || "Недоступно на этой системе");
+
+      const labelEl = document.createElement("span");
+      labelEl.className = "app-label";
+      labelEl.textContent = label;
+
+      const noteEl = document.createElement("span");
+      noteEl.className = "app-note";
+      noteEl.textContent = available ? "Запустить" : (app.reason || "Недоступно");
+
+      item.appendChild(labelEl);
+      item.appendChild(noteEl);
+
+      if (available) {
+        item.addEventListener("click", function () {
+          launchApp(app.id, label);
+        });
+      }
+
+      els.appsList.appendChild(item);
+    });
+  }
+
+  async function launchApp(appId, label) {
+    if (!appId) {
+      return;
+    }
+    showAppsMessage("Запуск: " + (label || appId) + "…");
+    try {
+      const resp = await fetch("/api/apps/launch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: appId }),
+      });
+      let data = {};
+      try {
+        data = await resp.json();
+      } catch (_parseErr) {
+        data = {};
+      }
+      if (data.ok) {
+        const parts = [data.message || ("Запущено: " + (label || appId))];
+        if (data.pid) {
+          parts.push("pid " + data.pid);
+        }
+        if (Array.isArray(data.command) && data.command.length > 0) {
+          parts.push(data.command.join(" "));
+        }
+        showAppsMessage(parts.join(" · "));
+      } else {
+        showAppsMessage(data.message || "Не удалось запустить приложение");
+      }
+    } catch (_err) {
+      showAppsMessage("Не удалось запустить приложение");
+    }
+  }
+
+  async function openAppsModal() {
+    els.appsBackdrop.classList.remove("is-hidden");
+    els.appsFeedback.classList.add("is-hidden");
+    els.appsFeedback.textContent = "";
+    els.appsList.innerHTML = "";
+
+    const loading = document.createElement("div");
+    loading.className = "empty-row";
+    loading.textContent = "Загрузка списка приложений…";
+    els.appsList.appendChild(loading);
+
+    try {
+      const resp = await fetch("/api/apps", { cache: "no-store" });
+      let data = {};
+      try {
+        data = await resp.json();
+      } catch (_parseErr) {
+        data = {};
+      }
+      if (!resp.ok || !data.ok) {
+        renderAppsError(data.message || "Список приложений недоступен");
+        return;
+      }
+      renderApps(data.apps || []);
+    } catch (_err) {
+      renderAppsError("Сервер недоступен");
+    }
+  }
+
+  function closeAppsModal() {
+    els.appsBackdrop.classList.add("is-hidden");
   }
 
   const OSK_ROWS_LOWER = [
@@ -446,7 +647,16 @@
     setView("network", true);
   });
   els.btnNewToken.addEventListener("click", regenerateSession);
-  els.btnTerminal.addEventListener("click", openTerminal);
+  els.btnTerminal.addEventListener("click", function () {
+    openTerminal(els.btnTerminal, els.terminalFeedbackReady);
+  });
+  els.btnTerminalNetwork.addEventListener("click", function () {
+    openTerminal(els.btnTerminalNetwork, els.terminalFeedbackNetwork);
+  });
+  els.btnApps.addEventListener("click", openAppsModal);
+  els.btnAppsNetwork.addEventListener("click", openAppsModal);
+  els.btnAppsClose.addEventListener("click", closeAppsModal);
+  els.btnAppsCancel.addEventListener("click", closeAppsModal);
   els.btnModalClose.addEventListener("click", closeWifiModal);
   els.btnModalCancel.addEventListener("click", closeWifiModal);
   els.wifiForm.addEventListener("submit", submitWifiConnect);

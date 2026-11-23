@@ -23,12 +23,20 @@
           <div class="head-actions">
             <button type="button" class="btn btn-secondary" id="btn-hidden-wifi">Скрытая сеть</button>
             <button type="button" class="btn btn-primary" id="btn-refresh-wifi">Обновить список</button>
+            <button type="button" class="btn btn-secondary" id="btn-apps-network">Приложения</button>
+            <button type="button" class="btn btn-secondary" id="btn-terminal-network">Открыть терминал</button>
           </div>
+        </div>
+
+        <div id="internet-banner" class="alert-banner" role="status">
+          Интернет не обнаружен. Подключите Wi-Fi, кабель или USB-модем.
         </div>
 
         <div id="iphone-trust-banner" class="alert-banner is-hidden" role="alert">
           Нажмите «Доверять» на iPhone и введите код-пароль
         </div>
+
+        <div id="terminal-feedback-network" class="feedback-line is-hidden" role="status"></div>
 
         <div class="interface-grid" aria-label="Сетевые интерфейсы">
           <div class="card iface-card">
@@ -65,15 +73,27 @@
           <div class="head-actions">
             <button type="button" class="btn btn-secondary" id="btn-change-wifi">Сменить Wi-Fi</button>
             <button type="button" class="btn btn-secondary" id="btn-terminal">Открыть терминал</button>
+            <button type="button" class="btn btn-secondary" id="btn-apps">Приложения</button>
             <button type="button" class="btn btn-primary" id="btn-new-token">Новый токен</button>
           </div>
         </div>
 
-        <div class="ready-grid">
+        <div id="ready-pending" class="card pending-card is-hidden" role="status">
+          <div id="ready-pending-title" class="pending-title">Интернет есть, получаем токен…</div>
+          <div id="ready-pending-text" class="pending-text">QR-код и ссылка подключения появятся автоматически, как только сессия будет готова.</div>
+        </div>
+
+        <div id="terminal-feedback-ready" class="feedback-line is-hidden" role="status"></div>
+        <div id="regen-feedback" class="feedback-line is-hidden" role="status"></div>
+
+        <div id="ready-content" class="ready-grid">
           <div class="card qr-card">
             <div class="qr-frame">
               <img id="qr-image" class="qr-image" src="/api/qr.svg" alt="QR-код подключения MCP">
             </div>
+            <p id="qr-instruction" class="qr-instruction">
+              Отсканируйте QR-код или откройте ссылку подключения, затем выберите Gemini, ChatGPT или Claude на странице подключения.
+            </p>
           </div>
 
           <div class="ready-details">
@@ -105,8 +125,6 @@
                 <div class="empty-row">—</div>
               </div>
             </div>
-
-            <div id="regen-feedback" class="feedback-line is-hidden" role="status"></div>
           </div>
         </div>
       </section>
@@ -151,6 +169,26 @@
       </form>
 
       <div id="osk-container" class="osk-container is-hidden" aria-label="Экранная клавиатура"></div>
+    </div>
+  </div>
+
+  <div id="apps-modal-backdrop" class="modal-backdrop is-hidden" role="dialog" aria-modal="true" aria-labelledby="apps-modal-title">
+    <div class="card modal-card">
+      <div class="card-head">
+        <h2 id="apps-modal-title" class="card-title">Приложения</h2>
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-apps-close">Закрыть</button>
+      </div>
+
+      <div class="modal-body">
+        <div id="apps-feedback" class="feedback-line is-hidden" role="status"></div>
+        <div id="apps-list" class="apps-list" role="list">
+          <div class="empty-row">Загрузка списка приложений…</div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" id="btn-apps-cancel">Отмена</button>
+      </div>
     </div>
   </div>
 

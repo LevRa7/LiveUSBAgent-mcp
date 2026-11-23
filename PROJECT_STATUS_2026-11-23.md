@@ -21,10 +21,10 @@
 | Область | Было | Стало |
 | :--- | :--- | :--- |
 | Rescue-API | 5 секций и 4 действия не реализованы | все 12 секций и 11 действий |
-| Тесты | 5 failed / 1756 passed | **0 failed / 1858 passed / 8 skipped** |
+| Тесты | 5 failed / 1756 passed | **0 failed / 1880 passed / 8 skipped** |
 | Версия | 0.6.0 | **0.1.0** |
 | ISO | не собран | **1.5 ГБ, собран и загружен в QEMU** |
-| `--check` | отсутствовал | **36/36 PASS** |
+| `--check` | отсутствовал | **42/42 PASS** |
 | Kiosk terminal | не было | кнопка + `xterm` + `DISPLAY` |
 | CI/docs | неполные | LiveUSB CI, `docs/liveusb/*`, release notes |
 
@@ -69,12 +69,31 @@ APFS: `apfs-fuse` собран и установлен; DKMS-модуль `linux
 | Ядро + initramfs + squashfs | ✅ загрузка до systemd |
 | systemd | ✅ `graphical.target`, `rhm-live-agent.service` started |
 | Консоль | ✅ `debian login:` на `ttyS0` |
-| Kiosk Chromium | ⚠️ headless-фреймбуфер после GRUB чёрный; визуально не подтверждён |
+| Kiosk Chromium | ✅ UI прогнан в Chromium/Xvfb (клики, QR, модалки); кадр QEMU после GRUB чёрный |
 | Физическое железо | ⏳ не проверялось |
 
 Лог загрузки: [`artifacts/qemu-boot-uefi-kernel.log`](artifacts/qemu-boot-uefi-kernel.log).
 Скриншот GRUB: [`artifacts/qemu-grub2.png`](artifacts/qemu-grub2.png).
 Сборка и загрузка выполнялись в WSL Debian 13.5; артефакт скопирован в `artifacts/`.
+
+### 4.1. Kiosk UX: сеть, интернет, QR, приложения
+
+- Баннер на сетевом экране отличает линк от интернета: «Интернет не обнаружен…»,
+  затем pending-экран «Интернет есть, получаем токен…», затем QR-экран с
+  инструкцией.
+- Терминал доступен на обоих экранах; меню «Приложения» открывает allowlist:
+  терминал, файловый менеджер (`xfe` через `rhm-open-files`, fallback
+  `pcmanfm`) и редактор (`mousepad`).
+- Визуальный прогон: Chromium + Playwright протыкал сеть, Wi-Fi-модалку,
+  скрытую сеть, приложения, файловый менеджер, терминал, pending и ready;
+  файловый менеджер и терминал подтверждены скриншотами Xvfb.
+- Скриншоты: [сеть](docs/liveusb/images/kiosk-network.png),
+  [pending](docs/liveusb/images/kiosk-pending.png),
+  [QR](docs/liveusb/images/kiosk-ready.png),
+  [приложения](docs/liveusb/images/kiosk-apps.png),
+  [файловый менеджер](docs/liveusb/images/kiosk-files.png),
+  [терминал](docs/liveusb/images/kiosk-terminal.png).
+  Описание: [docs/liveusb/STARTUP_UI.md](docs/liveusb/STARTUP_UI.md).
 
 ---
 
@@ -82,10 +101,10 @@ APFS: `apfs-fuse` собран и установлен; DKMS-модуль `linux
 
 | Проверка | Результат |
 | :--- | :--- |
-| `py -m pytest tests -q` | **1858 passed, 8 skipped, 0 failed** |
+| `py -m pytest tests -q` | **1880 passed, 8 skipped, 0 failed** |
 | `tests/test_rescue.py` | 155 passed |
-| `tests/test_liveusb_iso_pipeline.py` | 22 passed |
-| `build-iso.sh --check` | **36/36 PASS**, exit 0 |
+| `tests/test_liveusb_iso_pipeline.py` | 24 passed |
+| `build-iso.sh --check` | **42/42 PASS**, exit 0 |
 | `bash -n` build-iso / start-kiosk / hook | exit 0 |
 | `compileall`, `node --check app.js` | exit 0 |
 

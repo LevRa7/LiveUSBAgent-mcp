@@ -571,6 +571,8 @@ def test_trigger_session_regenerate_fallback_register_ephemeral_node(tmp_path: P
 
 def test_launch_local_terminal_without_display_is_unavailable(monkeypatch):
     monkeypatch.delenv("DISPLAY", raising=False)
+    # The emulator must exist so the DISPLAY check is the only failure cause.
+    _which_map(monkeypatch, {"xterm": "/usr/bin/xterm"})
 
     def must_not_spawn(*args: Any, **kwargs: Any) -> None:
         raise AssertionError("Popen must not be called without DISPLAY")
@@ -605,7 +607,8 @@ def test_launch_local_terminal_spawns_first_available_emulator(monkeypatch):
     assert result["command"] == ["/usr/bin/xterm", "-e", "bash"]
     assert result["pid"] == 4321
     assert captured["cmd"] == ["/usr/bin/xterm", "-e", "bash"]
-    assert "shell" not in captured["kwargs"]
+    # shell=False (explicit or default) is required: never shell=True.
+    assert captured["kwargs"].get("shell") is not True
     assert captured["kwargs"]["cwd"] == "/"
     assert captured["kwargs"]["start_new_session"] is True
     assert captured["kwargs"]["stdout"] is kiosk.subprocess.DEVNULL
@@ -639,6 +642,266 @@ def test_launch_local_terminal_popen_failure_is_reported_not_raised(monkeypatch)
     result = kiosk.launch_local_terminal(popen=broken_popen)
     assert result["ok"] is False
     assert "cannot open display" in result["message"]
+
+
+# --- 3c. Allowlisted application launcher (/api/apps) ---------------------
+
+
+def _which_map(monkeypatch, mapping: Dict[str, str]) -> None:
+    """Patch shutil.which so only the mapped binaries resolve."""
+    monkeypatch.setattr(kiosk.shutil, "which", lambda name: mapping.get(name))
+
+
+def _fake_popen(captured: Dict[str, Any], pid: int = 2468):
+    """Return a Popen stand-in that records its argv/kwargs and yields ``pid``."""
+
+    class _FakeProc:
+        pass
+
+    proc = _FakeProc()
+    proc.pid = pid
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["kwargs"] = dict(kwargs)
+        return proc
+
+    return fake_popen
+
+
+APP_LABELS = ["Терминал", "Файловый менеджер", "Текстовый редактор"]
+
+
+def test_list_local_apps_allowlist_and_availability(monkeypatch):
+    _which_map(monkeypatch, {"xterm": "/usr/bin/xterm", "pcmanfm": "/usr/bin/pcmanfm"})
+
+    apps = kiosk.list_local_apps()
+    assert [a["id"] for a in apps] == ["terminal", "files", "editor"]
+    assert [a["label"] for a in apps] == APP_LABELS
+    assert [a["available"] for a in apps] == [True, True, False]
+    assert apps[0]["reason"] == ""
+    assert apps[1]["reason"] == ""
+    assert "mousepad" in apps[2]["reason"]
+    # Stable shape: exactly the four contract keys.
+    assert all(set(a) == {"id", "label", "available", "reason"} for a in apps)
+
+    # Nothing installed -> all unavailable, each with a non-empty Russian reason.
+    _which_map(monkeypatch, {})
+    missing = kiosk.list_local_apps()
+    assert [a["available"] for a in missing] == [False, False, False]
+    assert all(a["reason"] for a in missing)
+
+
+def test_http_api_apps_returns_three_ids_and_availability(running_server, monkeypatch):
+    _which_map(monkeypatch, {"xterm": "/usr/bin/xterm", "mousepad": "/usr/bin/mousepad"})
+    base = running_server["base_url"]
+
+    status, _, body = _http_request(base, "/api/apps")
+    assert status == 200
+    data = json.loads(body.decode("utf-8"))
+    assert data["ok"] is True
+    apps = data["apps"]
+    assert [a["id"] for a in apps] == ["terminal", "files", "editor"]
+    assert [a["label"] for a in apps] == APP_LABELS
+    assert [a["available"] for a in apps] == [True, False, True]
+    assert "pcmanfm" in apps[1]["reason"]
+
+    # The catalogue stays behind the existing Host/Origin/Sec-Fetch gate.
+    st_evil, _, _ = _http_request(
+        base, "/api/apps", extra_headers={"Origin": "https://evil.example.com"}
+    )
+    assert st_evil == 403
+
+
+def test_http_api_app_launch_happy_path_uses_allowlisted_argv(
+    running_server, monkeypatch
+):
+    monkeypatch.setenv("DISPLAY", ":0")
+    _which_map(
+        monkeypatch,
+        {
+            "xterm": "/usr/bin/xterm",
+            "pcmanfm": "/usr/bin/pcmanfm",
+            "mousepad": "/usr/bin/mousepad",
+        },
+    )
+    real_isdir = kiosk.os.path.isdir
+    monkeypatch.setattr(
+        kiosk.os.path,
+        "isdir",
+        lambda p: True if p == "/mnt/rescue" else real_isdir(p),
+    )
+    captured: Dict[str, Any] = {}
+    monkeypatch.setattr(kiosk.subprocess, "Popen", _fake_popen(captured, pid=2468))
+
+    status, _, body = _http_request(
+        running_server["base_url"],
+        "/api/apps/launch",
+        method="POST",
+        payload={"id": "files"},
+    )
+    assert status == 200
+    data = json.loads(body.decode("utf-8"))
+    assert data["ok"] is True
+    assert data["pid"] == 2468
+    assert data["command"] == ["/usr/bin/pcmanfm", "/mnt/rescue"]
+
+    assert captured["cmd"] == ["/usr/bin/pcmanfm", "/mnt/rescue"]
+    kwargs = captured["kwargs"]
+    assert kwargs["shell"] is False
+    assert kwargs["start_new_session"] is True
+    assert kwargs["stdout"] is kiosk.subprocess.DEVNULL
+    assert kwargs["stderr"] is kiosk.subprocess.DEVNULL
+    assert kwargs["env"]["DISPLAY"] == ":0"
+
+
+def test_http_api_app_launch_ignores_request_supplied_command(
+    running_server, monkeypatch
+):
+    monkeypatch.setenv("DISPLAY", ":0")
+    _which_map(monkeypatch, {"mousepad": "/usr/bin/mousepad"})
+    captured: Dict[str, Any] = {}
+    monkeypatch.setattr(kiosk.subprocess, "Popen", _fake_popen(captured, pid=99))
+
+    status, _, body = _http_request(
+        running_server["base_url"],
+        "/api/apps/launch",
+        method="POST",
+        payload={
+            "id": "editor",
+            "command": ["/bin/sh", "-c", "id"],
+            "argv": ["/bin/sh"],
+            "path": "/etc/shadow",
+            "exe": "/bin/sh",
+        },
+    )
+    assert status == 200
+    assert json.loads(body.decode("utf-8"))["command"] == ["/usr/bin/mousepad"]
+    assert captured["cmd"] == ["/usr/bin/mousepad"]
+
+
+def test_http_api_app_launch_unknown_id_returns_400(running_server, monkeypatch):
+    monkeypatch.setenv("DISPLAY", ":0")
+    _which_map(monkeypatch, {"xterm": "/usr/bin/xterm"})
+    captured: Dict[str, Any] = {}
+    monkeypatch.setattr(kiosk.subprocess, "Popen", _fake_popen(captured))
+    base = running_server["base_url"]
+
+    for payload in (
+        {"id": "shell"},
+        {"id": "rm -rf /"},
+        {"id": "../../bin/sh"},
+        {"id": "TERMINAL"},
+        {"id": 7},
+        {"command": "bash"},
+        {},
+    ):
+        status, _, body = _http_request(
+            base, "/api/apps/launch", method="POST", payload=payload
+        )
+        assert status == 400, payload
+        data = json.loads(body.decode("utf-8"))
+        assert data["ok"] is False
+        assert data["message"]
+    # Unknown/missing ids must never reach Popen.
+    assert captured == {}
+
+
+def test_http_api_app_launch_unavailable_returns_503(running_server, monkeypatch):
+    monkeypatch.setenv("DISPLAY", ":0")
+    _which_map(monkeypatch, {})
+
+    def must_not_spawn(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("Popen must not be called for an unavailable app")
+
+    monkeypatch.setattr(kiosk.subprocess, "Popen", must_not_spawn)
+
+    status, _, body = _http_request(
+        running_server["base_url"],
+        "/api/apps/launch",
+        method="POST",
+        payload={"id": "editor"},
+    )
+    assert status == 503
+    data = json.loads(body.decode("utf-8"))
+    assert data["ok"] is False
+    assert "mousepad" in data["message"]
+
+
+def test_http_api_app_launch_popen_failure_returns_503_without_raising(
+    running_server, monkeypatch
+):
+    monkeypatch.setenv("DISPLAY", ":0")
+    _which_map(monkeypatch, {"mousepad": "/usr/bin/mousepad"})
+
+    def boom(*args: Any, **kwargs: Any):
+        raise OSError("cannot open display :0")
+
+    monkeypatch.setattr(kiosk.subprocess, "Popen", boom)
+
+    status, _, body = _http_request(
+        running_server["base_url"],
+        "/api/apps/launch",
+        method="POST",
+        payload={"id": "editor"},
+    )
+    assert status == 503
+    data = json.loads(body.decode("utf-8"))
+    assert data["ok"] is False
+    assert "cannot open display" in data["message"]
+
+
+def test_launch_local_app_terminal_argv_and_display_check(monkeypatch):
+    _which_map(monkeypatch, {"xterm": "/usr/bin/xterm"})
+
+    monkeypatch.delenv("DISPLAY", raising=False)
+
+    def must_not_spawn(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("Popen must not be called without DISPLAY")
+
+    no_display = kiosk.launch_local_app("terminal", popen=must_not_spawn)
+    assert no_display["ok"] is False
+    assert "DISPLAY" in no_display["message"]
+    assert "Терминал" in no_display["message"]
+
+    monkeypatch.setenv("DISPLAY", ":0")
+    captured: Dict[str, Any] = {}
+    result = kiosk.launch_local_app(
+        "terminal", popen=_fake_popen(captured, pid=4321)
+    )
+    assert result["ok"] is True
+    assert result["command"] == ["/usr/bin/xterm", "-e", "bash"]
+    assert result["pid"] == 4321
+    assert captured["cmd"] == ["/usr/bin/xterm", "-e", "bash"]
+    assert captured["kwargs"]["shell"] is False
+    assert captured["kwargs"]["env"]["DISPLAY"] == ":0"
+
+    # The legacy helper delegates to the same allowlisted terminal entry.
+    legacy = kiosk.launch_local_terminal(popen=_fake_popen({}, pid=1))
+    assert legacy["ok"] is True
+    assert legacy["command"] == ["/usr/bin/xterm", "-e", "bash"]
+
+
+def test_launch_local_app_files_uses_rescue_dir_or_root(monkeypatch):
+    monkeypatch.setenv("DISPLAY", ":0")
+    _which_map(monkeypatch, {"pcmanfm": "/usr/bin/pcmanfm"})
+    real_isdir = kiosk.os.path.isdir
+
+    monkeypatch.setattr(
+        kiosk.os.path,
+        "isdir",
+        lambda p: True if p == "/mnt/rescue" else real_isdir(p),
+    )
+    rescue = kiosk.launch_local_app("files", popen=_fake_popen({}))
+    assert rescue["command"] == ["/usr/bin/pcmanfm", "/mnt/rescue"]
+
+    monkeypatch.setattr(
+        kiosk.os.path,
+        "isdir",
+        lambda p: False if p == "/mnt/rescue" else real_isdir(p),
+    )
+    fallback = kiosk.launch_local_app("files", popen=_fake_popen({}))
+    assert fallback["command"] == ["/usr/bin/pcmanfm", "/root"]
 
 
 def test_firstboot_tui_renders_session_json(tmp_path: Path):

@@ -9,6 +9,8 @@
   --accent: #2f81f7;
   --accent-hover: #4493f8;
   --ok-text: #3fb950;
+  --ok-bg: #0f2418;
+  --ok-border: #1f6f3a;
   --warn-bg: #261d12;
   --warn-border: #6e4a16;
   --warn-text: #f0c060;
@@ -104,6 +106,7 @@ body {
 
 .head-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
 }
 
@@ -123,6 +126,12 @@ body {
   margin-bottom: 20px;
   font-size: 15px;
   font-weight: 500;
+}
+
+.alert-banner.is-ok {
+  background-color: var(--ok-bg);
+  border-color: var(--ok-border);
+  color: var(--ok-text);
 }
 
 .interface-grid {
@@ -253,6 +262,23 @@ body {
   align-items: start;
 }
 
+.pending-card {
+  padding: 20px;
+  margin-bottom: 20px;
+  border-color: var(--border-strong);
+}
+
+.pending-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.pending-text {
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
 .qr-card {
   padding: 20px;
 }
@@ -270,6 +296,13 @@ body {
   display: block;
   width: 248px;
   height: 248px;
+}
+
+.qr-instruction {
+  margin: 16px 0 0;
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.5;
 }
 
 .ready-details {
@@ -409,6 +442,77 @@ body {
   gap: 16px;
 }
 
+.modal-body {
+  padding: 12px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.modal-body .feedback-line {
+  padding: 4px 20px;
+}
+
+.modal-footer {
+  padding: 0 20px 20px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.apps-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.app-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 14px 20px;
+  background-color: transparent;
+  color: var(--text-primary);
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 150ms ease-out;
+}
+
+.app-item:last-child {
+  border-bottom: 0;
+}
+
+.app-item:hover {
+  background-color: var(--surface-hover);
+}
+
+.app-item:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.app-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-note {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+.app-item:disabled .app-note {
+  color: var(--warn-text);
+}
+
 .field-group {
   display: flex;
   flex-direction: column;
@@ -522,6 +626,11 @@ body {
 }
 
 .wifi-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.app-item:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }

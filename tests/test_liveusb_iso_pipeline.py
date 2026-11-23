@@ -270,6 +270,86 @@ def test_build_iso_ships_xterm_and_kiosk_server_inherits_display() -> None:
     assert "kiosk X session is :0" in start_text
 
 
+def _generated_package_list() -> set:
+    """Parse the live-build package list heredoc out of build-iso.sh."""
+    build_text = BUILD_ISO_SH.read_text(encoding="utf-8")
+    heredoc = build_text.split(
+        "cat <<EOF > config/package-lists/rhm-rescue.list.chroot", 1
+    )[1].split("\nEOF\n", 1)[0]
+    return {
+        line.strip()
+        for line in heredoc.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
+
+
+def _check_required_packages() -> List[str]:
+    """Parse the `--check` required_packages array out of build-iso.sh."""
+    build_text = BUILD_ISO_SH.read_text(encoding="utf-8")
+    check_block = build_text.split("local -a required_packages=(", 1)[1].split(")", 1)[0]
+    return check_block.split()
+
+
+def test_build_iso_ships_file_manager_and_editor_for_the_app_launcher() -> None:
+    """The «Приложения» launcher needs a file manager and a text editor in the image.
+
+    xfe (with pcmanfm as a fallback) backs the `files` entry and mousepad backs
+    the editor entry, so all three must be installed by live-build *and* pinned
+    by `--check` so a later package-list edit cannot silently drop them.
+    """
+    packages = _generated_package_list()
+    required = _check_required_packages()
+
+    for package in ("xfe", "xdotool", "pcmanfm", "mousepad"):
+        assert package in packages, (
+            f"the generated package list must install {package!r} for the app launcher"
+        )
+        assert package in required, (
+            f"build-iso.sh --check must verify package: {package}"
+        )
+
+    # The pre-existing kiosk GUI packages must survive the addition.
+    for package in ("xterm", "chromium"):
+        assert package in packages, (
+            f"the kiosk GUI package block must keep {package!r}"
+        )
+
+
+def test_build_iso_installs_the_root_warning_wrapper() -> None:
+    """Xfe shows a root warning; the ISO must install the auto-dismiss wrapper."""
+    text = BUILD_ISO_SH.read_text(encoding="utf-8")
+    wrapper = LIVEUSB_DIR / "open-files.sh"
+
+    assert wrapper.is_file()
+    assert "open-files.sh" in text
+    assert "/usr/local/bin/rhm-open-files" in text
+    assert "xdotool" in text
+    wrapper_text = wrapper.read_text(encoding="utf-8")
+    assert "xfe" in wrapper_text
+    assert "Warning" in wrapper_text
+
+
+def test_start_kiosk_creates_mnt_rescue_before_the_kiosk_server_starts() -> None:
+    """`files` opens /mnt/rescue, so the mount point must exist before the server."""
+    start_text = START_KIOSK_SH.read_text(encoding="utf-8")
+
+    mkdir_line = "mkdir -p /mnt/rescue"
+    assert mkdir_line in start_text, (
+        "start-kiosk.sh must create /mnt/rescue for the «Файловый менеджер» entry"
+    )
+
+    mkdir_at = start_text.index(mkdir_line)
+    server_at = start_text.index('python3 "${SCRIPT_DIR}/kiosk_server.py"')
+    assert mkdir_at < server_at, (
+        "/mnt/rescue must be created before kiosk_server.py starts"
+    )
+
+    # The X11 detection branch must keep working on the pre-export DISPLAY value.
+    assert 'X11_WAS_RUNNING=""' in start_text
+    assert 'X11_WAS_RUNNING="1"' in start_text
+    assert start_text.index('X11_WAS_RUNNING=""') < mkdir_at
+
+
 def test_build_iso_check_passes_and_does_not_create_work_dir(tmp_path: Path) -> None:
     """Pin `build-iso.sh --check`: exit 0, a PASS summary, no WORK_DIR side effect."""
     try:

@@ -2129,7 +2129,7 @@ def plan_or_run_rescue_action(args: Dict[str, Any]) -> Dict[str, Any]:
             "step_results": step_results,
         }
 
-    return {"action": action, "dry_run": dry_run, "status": "schema_ready"}
+    return {"error": f"rescue action is not implemented in this build: {action}"}
 
 
 # ---------------------------------------------------------------------------

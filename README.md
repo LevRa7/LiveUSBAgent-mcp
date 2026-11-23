@@ -63,7 +63,7 @@ When a PC refuses to boot, a drive starts failing, BitLocker or LUKS locks you o
 | **Linux** | **XFS** | `xfsprogs` | Full R/W, `xfs_repair`, `xfs_info`. |
 | **Linux** | **F2FS** | `f2fs-tools` | Full R/W (`fsck.f2fs`, `dump.f2fs`). |
 | **Linux** | **ZFS (OpenZFS)** | `zfsutils-linux`, `zfs-dkms` | Full R/W and read-only `zpool import -f -R /mnt/rescue <pool>`. |
-| **Linux** | **LVM2 / mdadm / LUKS** | `lvm2`, `mdadm`, `cryptsetup`, `dmraid`, `kpartx` | Manual RAID assembly, LUKS1/LUKS2 unlock, and LVM activation. |
+| **Linux** | **LVM2 / mdadm / LUKS** | `lvm2`, `mdadm`, `cryptsetup`, `kpartx` | Manual RAID assembly, LUKS1/LUKS2 unlock, and LVM activation. |
 | **macOS** | **HFS / HFS+** | `hfsplus`, `libfshfs-utils`, kernel `hfsplus` | Safe R/O; R/W supported (`fsck.hfsplus`, `-o force,rw` for journaled volumes). |
 | **macOS** | **APFS** | `apfs-dkms`, `apfsprogs`, `apfs-fuse` (compiled from source in the chroot hook to `/usr/local/bin/apfs-fuse`), `libfsapfs-utils` | Dual-mode: native `apfs-dkms` for unencrypted APFS (default R/O; experimental R/W with warning), `apfs-fuse` (R/O) for FileVault-encrypted volumes, and `libfsapfs-utils` (`fsapfsmount`/`fsapfsinfo`) for damaged containers. |
 

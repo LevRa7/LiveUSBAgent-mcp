@@ -228,6 +228,21 @@ def test_build_iso_contract_journald_grub_and_udev_rules() -> None:
     # Chroot build hook wired up
     assert "0100-build-apfs-and-drivers.hook.chroot" in text
 
+    # Binary hook that creates /live/vmlinuz and /live/initrd.img symlinks
+    assert "0200-rhm-kernel-symlinks.hook.binary" in text
+    assert "/live/vmlinuz" in text
+    assert "/live/initrd.img" in text
+
+
+def test_builder_creates_the_live_kernel_symlinks_the_grub_menu_needs() -> None:
+    """GRUB points at unversioned /live paths; the hook must create them."""
+    hook = LIVEUSB_DIR / "hooks" / "0200-rhm-kernel-symlinks.hook.binary"
+    text = hook.read_text(encoding="utf-8")
+    assert "vmlinuz-*" in text
+    assert "initrd.img-*" in text
+    assert "ln -sf" in text
+    assert "exit 1" in text
+
 
 def test_build_iso_ships_xterm_and_kiosk_server_inherits_display() -> None:
     """The kiosk terminal button needs an emulator package and a usable DISPLAY."""

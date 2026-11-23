@@ -157,7 +157,7 @@
 | | **XFS** | `xfsprogs` | Полный **R/W**, `xfs_repair`. |
 | | **F2FS** | `f2fs-tools` | Полный **R/W** (флешки, SSD, Steam Deck / Android). |
 | | **ZFS (OpenZFS)** | `zfsutils-linux`, `zfs-dkms` (или prebuilt `zfs-modules`) | Полный **R/W** (`zpool import -f -R /mnt/rescue <pool>`, read-only режим `-o readonly=on`). |
-| | **LVM2 / mdadm / LUKS** | `lvm2`, `mdadm`, `cryptsetup`, `dmraid`, `kpartx` | Полная сборка массивов, расшифровка LUKS1/LUKS2 и активация томов. |
+| | **LVM2 / mdadm / LUKS** | `lvm2`, `mdadm`, `cryptsetup`, `kpartx` | Полная сборка массивов, расшифровка LUKS1/LUKS2 и активация томов. |
 | **macOS** | **HFS / HFS+** | `hfsprogs`, `hfsplus`, `hfsutils` + ядерный модуль `hfsplus` | **R/O** всегда безопасно; **R/W** из коробки (для журналируемых томов HFS+ требуется `-o force,rw` или снятие флага журнала; `fsck.hfsplus`). |
 | | **APFS** | **[linux-apfs-rw](https://github.com/linux-apfs/linux-apfs-rw)** (DKMS-модуль ядра + `apfsprogs`) **+** **[apfs-fuse](https://github.com/sgan81/apfs-fuse)** (FUSE) **+** **[libfsapfs-utils](https://github.com/libyal/libfsapfs)** | **Двухконтурная поддержка:**<br>1) **Незашифрованный APFS:** нативный `linux-apfs-rw` (`mount -t apfs`, быстрое чтение и экспериментальная запись с явным предупреждением о бэкапе перед RW).<br>2) **Зашифрованный APFS (FileVault):** `apfs-fuse` (надёжное чтение и выгрузка данных после ввода пароля/ключа).<br>3) **Битые контейнеры:** `fsapfsmount` (`libfsapfs`) / `AgentDFIR` (без монтирования). |
 

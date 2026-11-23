@@ -4,4 +4,5 @@
 # reintroduce them; tests/test_liveusb_iso_pipeline.py asserts the same.
 *.sh text eol=lf
 *.hook.chroot text eol=lf
+*.hook.binary text eol=lf
 *.rules text eol=lf

@@ -76,7 +76,7 @@
 | | **XFS** | `xfsprogs` | Полный R/W, `xfs_repair`, `xfs_info`. |
 | | **F2FS** | `f2fs-tools` | Полный R/W (флешки, SSD, портативные консоли). |
 | | **ZFS (OpenZFS)** | `zfsutils-linux`, `zfs-dkms` | Импорт пулов (`zpool import`), в том числе `readonly=on`. |
-| | **LVM2 / mdadm / LUKS** | `lvm2`, `mdadm`, `cryptsetup`, `dmraid`, `kpartx` | Ручная безопасная сборка массивов, расшифровка LUKS1/LUKS2 и активация томов. |
+| | **LVM2 / mdadm / LUKS** | `lvm2`, `mdadm`, `cryptsetup`, `kpartx` | Ручная безопасная сборка массивов, расшифровка LUKS1/LUKS2 и активация томов. |
 | **macOS** | **HFS / HFS+** | `hfsplus`, `libfshfs-utils`, ядерный `hfsplus` | Надёжный R/O и R/W (для журналируемых томов при необходимости `force,rw`). |
 | | **APFS** | `apfs-dkms`, `apfsprogs`, `apfs-fuse` (собирается из исходников в chroot-хуке в `/usr/local/bin/apfs-fuse`), `libfsapfs-utils` | Незашифрованный APFS — нативный `apfs-dkms` (по умолчанию R/O; запись экспериментальная). Зашифрованный **FileVault** — R/O через `apfs-fuse`. Битые контейнеры — `fsapfsmount` (`libfsapfs-utils`). |
 

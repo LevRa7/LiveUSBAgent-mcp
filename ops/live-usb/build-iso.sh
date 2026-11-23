@@ -115,6 +115,7 @@ check_assets() {
         "ops/live-usb/udev/99-rhm-network-tethering.rules"
         "ops/live-usb/udev/99-rhm-no-automount.rules"
         "ops/live-usb/hooks/0100-build-apfs-and-drivers.hook.chroot"
+        "ops/live-usb/hooks/0200-rhm-kernel-symlinks.hook.binary"
     )
     local -a shell_scripts=(
         "ops/live-usb/build-iso.sh"
@@ -122,6 +123,7 @@ check_assets() {
         "ops/live-usb/fetch-skills.sh"
         "ops/live-usb/test-qemu.sh"
         "ops/live-usb/hooks/0100-build-apfs-and-drivers.hook.chroot"
+        "ops/live-usb/hooks/0200-rhm-kernel-symlinks.hook.binary"
         "install.sh"
     )
     local -a python_sources=(
@@ -145,6 +147,8 @@ check_assets() {
     local -a grub_tokens=(
         "toram"
         "Low RAM"
+        "/live/vmlinuz"
+        "/live/initrd.img"
     )
 
     echo "[check] Repository assets"
@@ -365,7 +369,6 @@ libfsapfs-utils
 lvm2
 mdadm
 cryptsetup
-dmraid
 kpartx
 squashfs-tools
 fuse3
@@ -446,7 +449,10 @@ chmod 0644 \
 mkdir -p config/hooks/live
 cp "${REPO_ROOT}/ops/live-usb/hooks/0100-build-apfs-and-drivers.hook.chroot" \
     config/hooks/live/0100-build-apfs-and-drivers.hook.chroot
-chmod 0755 config/hooks/live/0100-build-apfs-and-drivers.hook.chroot
+cp "${REPO_ROOT}/ops/live-usb/hooks/0200-rhm-kernel-symlinks.hook.binary" \
+    config/hooks/live/0200-rhm-kernel-symlinks.hook.binary
+chmod 0755 config/hooks/live/0100-build-apfs-and-drivers.hook.chroot \
+    config/hooks/live/0200-rhm-kernel-symlinks.hook.binary
 
 echo "[5/7] Configuring systemd services, tty1 kiosk / tty2 TUI autologin, LVM/RAID guards, and journald..."
 mkdir -p config/includes.chroot/etc/systemd/system

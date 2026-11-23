@@ -1,0 +1,31 @@
+#!/bin/sh
+# ops/live-usb/hooks/0200-rhm-kernel-symlinks.hook.binary
+#
+# live-build runs binary hooks from the binary/ directory. The GRUB menu in
+# build-iso.sh points at /live/vmlinuz and /live/initrd.img, while the kernel
+# packages install versioned files (vmlinuz-<version>, initrd.img-<version>).
+# Without these compatibility symlinks GRUB displays the menu but every entry
+# fails with "file not found".
+
+set -e
+
+cd live
+
+for f in vmlinuz-*; do
+    if [ -f "${f}" ]; then
+        ln -sf "${f}" vmlinuz
+        break
+    fi
+done
+
+for f in initrd.img-*; do
+    if [ -f "${f}" ]; then
+        ln -sf "${f}" initrd.img
+        break
+    fi
+done
+
+if [ ! -e vmlinuz ] || [ ! -e initrd.img ]; then
+    echo "rhm-kernel-symlinks: vmlinuz or initrd.img is missing in binary/live" >&2
+    exit 1
+fi

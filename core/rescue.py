@@ -243,6 +243,26 @@ RESCUE_TOOLS_SPEC: List[Dict[str, Any]] = [
                     "type": "string",
                     "description": "chroot_exec: command to execute inside the mounted guest OS.",
                 },
+                "force": {
+                    "type": "boolean",
+                    "description": (
+                        "umount: add -f (force detach). mount_safe/mount_auto: override the "
+                        "kernel I/O-error guard with force=true (a mount is refused after more "
+                        "than 10 active dmesg I/O errors for the target). Use only on "
+                        "known-healthy media."
+                    ),
+                },
+                "lazy": {
+                    "type": "boolean",
+                    "description": "umount: add -l (lazy detach) when the mountpoint is busy.",
+                },
+                "bind_mounts": {
+                    "type": "boolean",
+                    "description": (
+                        "chroot_exec: bind /dev, /proc, /sys and /run into the guest before "
+                        "running chroot_cmd (default true)."
+                    ),
+                },
                 "dry_run": {
                     "type": "boolean",
                     "description": "Validate safety guards and return exact argv without executing (default true).",
@@ -930,7 +950,7 @@ def collect_partitions(device: Optional[str] = None, timeout: int = 8) -> Dict[s
     """Read the partition table of ``device`` via ``sfdisk -J`` with an ``lsblk`` fallback."""
     if _IS_WINDOWS:
         return {"available": False, "reason": "partitions requires Linux"}
-    device = (device or "").strip().rstrip("/")
+    device = str(device or "").strip().rstrip("/")
     if not device or not _valid_dev_path(device):
         return {
             "available": False,
@@ -1391,6 +1411,34 @@ def _detect_fstype(device: str, timeout: int = 5) -> str:
     return ""
 
 
+def _mount_io_guard(device: str, args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Refuse a mount when the kernel is already logging I/O errors for the target.
+
+    ``collect_dmesg_io`` is best-effort: an unavailable collector (Windows host,
+    no ``dmesg`` permission) never blocks a mount.  More than ten active errors
+    for the requested device is the threshold where the media should be cloned
+    first; ``force=true`` is the explicit operator override.
+    """
+    if _IS_WINDOWS:
+        return None
+    try:
+        io_check = collect_dmesg_io(device, 4)
+    except Exception:
+        return None
+    try:
+        count = int(io_check.get("io_error_count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    if count > 10 and args.get("force") is not True:
+        return {
+            "error": (
+                f"refusing to mount {device}: {count} active kernel I/O errors; "
+                "pass force=true to override"
+            )
+        }
+    return None
+
+
 def _plan_or_run_mount_auto(args: Dict[str, Any], dry_run: bool) -> Dict[str, Any]:
     device = str(args.get("device") or "").strip()
     writable = bool(args.get("writable", False))
@@ -1427,6 +1475,11 @@ def _plan_or_run_mount_auto(args: Dict[str, Any], dry_run: bool) -> Dict[str, An
     fallback_argv: Optional[List[str]] = None
     planned_steps: Optional[List[List[str]]] = None
     extra: Dict[str, Any] = {}
+
+    if _valid_dev_path(device):
+        io_guard = _mount_io_guard(device, args)
+        if io_guard is not None:
+            return io_guard
 
     if fstype == "exfat":
         opts = "rw,noatime" if writable else "ro"
@@ -1611,6 +1664,9 @@ def plan_or_run_rescue_action(args: Dict[str, Any]) -> Dict[str, Any]:
                 )
             }
         opts = "rw,noatime" if writable else "ro,noload"
+        io_guard = _mount_io_guard(device, args)
+        if io_guard is not None:
+            return io_guard
         argv = ["mount", "-o", opts, device, mountpoint]
         plan = {
             "action": action,
@@ -1712,6 +1768,261 @@ def plan_or_run_rescue_action(args: Dict[str, Any]) -> Dict[str, Any]:
         rc, out, err = _run_cmd(argv, timeout=30)
         return {"action": action, "device": device, "argv": argv, "exit_code": rc, "stdout": out, "stderr": err}
 
+    if action == "umount":
+        mountpoint = str(args.get("mountpoint") or "").strip()
+        if not mountpoint and _valid_dev_path(device):
+            mountpoint = f"/mnt/rescue/{os.path.basename(device)}"
+        if not mountpoint:
+            return {
+                "error": "umount requires 'mountpoint' or a valid 'device' to derive /mnt/rescue/<basename>"
+            }
+        if not _valid_mountpoint(mountpoint):
+            return {
+                "error": (
+                    f"Invalid mountpoint '{mountpoint}': must be a subdirectory under "
+                    "/mnt/rescue/ or /mnt/scratch/ without '..' traversal."
+                )
+            }
+        lazy = bool(args.get("lazy", False))
+        force_umount = bool(args.get("force", False))
+        argv = ["umount"]
+        if lazy:
+            argv.append("-l")
+        if force_umount:
+            argv.append("-f")
+        argv.append(mountpoint)
+        plan = {
+            "action": action,
+            "mountpoint": mountpoint,
+            "lazy": lazy,
+            "force": force_umount,
+            "argv": argv,
+            "dry_run": dry_run,
+        }
+        if dry_run:
+            return plan
+        if _IS_WINDOWS:
+            return {"error": "umount execution requires a Linux Live USB node"}
+        try:
+            mounted = bool(os.path.ismount(mountpoint))
+        except Exception:
+            mounted = False
+        if not mounted:
+            return {
+                "action": action,
+                "mountpoint": mountpoint,
+                "argv": argv,
+                "dry_run": False,
+                "error": f"not mounted: {mountpoint}",
+            }
+        rc, out, err = _run_cmd(argv, timeout=15)
+        plan.update({"exit_code": rc, "stdout": out, "stderr": err})
+        return plan
+
+    if action == "fsck_check":
+        if not _valid_dev_path(device):
+            return {"error": "fsck_check requires a valid device path (e.g. /dev/sda2)"}
+        fstype = _normalize_fstype(str(args.get("fstype") or ""))
+        if not fstype:
+            fstype = _detect_fstype(device)
+        if fstype.startswith("ext"):
+            argv = ["e2fsck", "-n", device]
+        elif fstype == "xfs":
+            argv = ["xfs_repair", "-n", device]
+        elif fstype == "btrfs":
+            argv = ["btrfs", "check", "--readonly", device]
+        elif fstype in ("vfat", "fat16", "fat32", "msdos"):
+            argv = ["fsck.vfat", "-n", device]
+        elif fstype == "exfat":
+            argv = ["fsck.exfat", "-n", device]
+        elif fstype == "ntfs":
+            argv = ["ntfsfix", "-n", device]
+        elif fstype == "hfsplus":
+            argv = ["fsck.hfsplus", "-n", device]
+        else:
+            argv = ["fsck", "-n", device]
+        plan = {
+            "action": action,
+            "device": device,
+            "fstype": fstype or None,
+            "argv": argv,
+            "repair": False,
+            "dry_run": dry_run,
+        }
+        if dry_run:
+            return plan
+        if _IS_WINDOWS:
+            return {"error": "fsck_check execution requires a Linux Live USB node"}
+        rc, out, err = _run_cmd(argv, timeout=30)
+        plan.update({"exit_code": rc, "stdout": out, "stderr": err, "repair": False})
+        return plan
+
+    if action == "win_sam_reset":
+        mountpoint = str(args.get("mountpoint") or "").strip()
+        if not mountpoint and _valid_dev_path(device):
+            mountpoint = f"/mnt/rescue/{os.path.basename(device)}"
+        sam_user = str(args.get("sam_user") or "").strip()
+        if not mountpoint:
+            return {
+                "error": "win_sam_reset requires 'mountpoint' (or a 'device' mounted under /mnt/rescue/)"
+            }
+        if not _valid_mountpoint(mountpoint):
+            return {
+                "error": (
+                    f"Invalid mountpoint '{mountpoint}': must be a subdirectory under "
+                    "/mnt/rescue/ or /mnt/scratch/ without '..' traversal."
+                )
+            }
+        if not sam_user:
+            return {"error": "win_sam_reset requires 'sam_user' (a Windows local account name)"}
+        mount_root = mountpoint.rstrip("/")
+        sam_path = f"{mount_root}/Windows/System32/config/SAM"
+        argv = ["chntpw", "-u", sam_user, sam_path]
+        plan = {
+            "action": action,
+            "mountpoint": mount_root,
+            "sam_user": sam_user,
+            "sam_path": sam_path,
+            "argv": argv,
+            "dry_run": dry_run,
+        }
+        if dry_run:
+            return plan
+        # chntpw is a full-screen interactive editor.  Running it through
+        # subprocess pipes would hang or silently corrupt the hive, so the action
+        # is honest about being a manual step instead of pretending to execute.
+        plan.update(
+            {
+                "dry_run": False,
+                "status": "requires_interactive",
+                "executed": False,
+                "message": "run chntpw interactively; no silent SAM write",
+            }
+        )
+        return plan
+
+    if action == "chroot_exec":
+        mountpoint = str(args.get("mountpoint") or "").strip()
+        chroot_cmd = str(args.get("chroot_cmd") or "").strip()
+        bind_mounts = True if args.get("bind_mounts") is None else bool(args.get("bind_mounts"))
+        if not _valid_mountpoint(mountpoint):
+            return {
+                "error": (
+                    "chroot_exec requires a mountpoint under /mnt/rescue/ or /mnt/scratch/ "
+                    f"(got '{mountpoint}')"
+                )
+            }
+        if not chroot_cmd:
+            return {"error": "chroot_exec requires a non-empty 'chroot_cmd'"}
+        try:
+            chroot_argv = shlex.split(chroot_cmd)
+        except ValueError as exc:
+            return {"error": f"chroot_exec could not parse 'chroot_cmd': {exc}"}
+        # Whitespace-only or quoted-empty commands parse to no usable tokens.
+        chroot_argv = [token for token in chroot_argv if token]
+        if not chroot_argv:
+            return {"error": "chroot_exec requires a non-empty 'chroot_cmd'"}
+
+        root_mp = mountpoint.rstrip("/") or mountpoint
+        bind_sources: List[str] = []
+        if bind_mounts:
+            for source in ("/dev", "/proc", "/sys", "/run"):
+                try:
+                    present = bool(os.path.exists(source))
+                except Exception:
+                    present = False
+                if present:
+                    bind_sources.append(source)
+        bind_steps = [["mount", "--bind", source, f"{root_mp}{source}"] for source in bind_sources]
+        chroot_step = ["chroot", root_mp] + chroot_argv
+        unmount_steps = [["umount", f"{root_mp}{source}"] for source in reversed(bind_sources)]
+        plan = {
+            "action": action,
+            "mountpoint": root_mp,
+            "argv": chroot_step,
+            "bind_mounts": bind_mounts,
+            "binds": bind_sources,
+            "planned_steps": bind_steps + [chroot_step] + unmount_steps,
+            "dry_run": dry_run,
+        }
+        if dry_run:
+            return plan
+        if _IS_WINDOWS:
+            return {"error": "chroot_exec execution requires a Linux Live USB node"}
+        try:
+            mounted = bool(os.path.ismount(root_mp))
+        except Exception:
+            mounted = False
+        if not mounted:
+            return {
+                "action": action,
+                "mountpoint": root_mp,
+                "argv": chroot_step,
+                "dry_run": False,
+                "error": f"not mounted: {root_mp}",
+            }
+
+        step_results: List[Dict[str, Any]] = []
+        exit_code = 0
+        stdout = ""
+        stderr = ""
+        chroot_ran = False
+        try:
+            bind_failed = False
+            for step in bind_steps:
+                try:
+                    os.makedirs(step[-1], exist_ok=True)
+                except Exception as exc:
+                    step_results.append(
+                        {
+                            "argv": list(step),
+                            "exit_code": 1,
+                            "stdout": "",
+                            "stderr": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
+                    exit_code = 1
+                    bind_failed = True
+                    break
+                rc, out, err = _run_cmd(step, timeout=60)
+                step_results.append(
+                    {"argv": list(step), "exit_code": rc, "stdout": out, "stderr": err}
+                )
+                exit_code, stdout, stderr = rc, out, err
+                if rc != 0:
+                    bind_failed = True
+                    break
+            if not bind_failed:
+                rc, out, err = _run_cmd(chroot_step, timeout=60)
+                step_results.append(
+                    {"argv": list(chroot_step), "exit_code": rc, "stdout": out, "stderr": err}
+                )
+                exit_code, stdout, stderr = rc, out, err
+                chroot_ran = True
+        finally:
+            # Bind mounts must never leak, even when a bind or the chroot failed.
+            for step in unmount_steps:
+                rc_cleanup, out_cleanup, err_cleanup = _run_cmd(step, timeout=60)
+                step_results.append(
+                    {
+                        "argv": list(step),
+                        "exit_code": rc_cleanup,
+                        "stdout": out_cleanup,
+                        "stderr": err_cleanup,
+                        "phase": "cleanup",
+                    }
+                )
+        plan.update(
+            {
+                "exit_code": exit_code,
+                "stdout": stdout,
+                "stderr": stderr,
+                "chroot_ran": chroot_ran,
+                "step_results": step_results,
+            }
+        )
+        return plan
+
     if action == "grub_repair":
         efi_part = str(args.get("efi_partition") or "").strip()
         mountpoint = str(args.get("mountpoint") or "/mnt/rescue/root").strip()
@@ -1734,7 +2045,74 @@ def plan_or_run_rescue_action(args: Dict[str, Any]) -> Dict[str, Any]:
             ["chroot", mountpoint, "grub-install", "--target=x86_64-efi", "--efi-directory=/boot/efi", "--bootloader-id=GRUB"],
             ["chroot", mountpoint, "update-grub"],
         ]
-        return {"action": action, "dry_run": dry_run, "planned_steps": steps}
+        if dry_run:
+            return {"action": action, "dry_run": True, "planned_steps": steps}
+        if _IS_WINDOWS:
+            return {"error": "grub_repair execution requires a Linux Live USB node"}
+
+        mount_targets = [
+            mountpoint,
+            f"{mountpoint}/boot/efi",
+            f"{mountpoint}/dev",
+            f"{mountpoint}/proc",
+            f"{mountpoint}/sys",
+            f"{mountpoint}/run",
+        ]
+        try:
+            for target in mount_targets:
+                os.makedirs(target, exist_ok=True)
+        except Exception as exc:
+            return {
+                "action": action,
+                "dry_run": False,
+                "executed": False,
+                "error": (
+                    f"could not create mountpoints under {mountpoint}: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+            }
+
+        unmount_steps = [
+            ["umount", f"{mountpoint}/run"],
+            ["umount", f"{mountpoint}/sys"],
+            ["umount", f"{mountpoint}/proc"],
+            ["umount", f"{mountpoint}/dev"],
+            ["umount", f"{mountpoint}/boot/efi"],
+            ["umount", mountpoint],
+        ]
+        step_results: List[Dict[str, Any]] = []
+        exit_code = 0
+        try:
+            for step in steps:
+                rc, out, err = _run_cmd(step, timeout=60)
+                step_results.append(
+                    {"argv": list(step), "exit_code": rc, "stdout": out, "stderr": err}
+                )
+                exit_code = rc
+                if rc != 0:
+                    break
+        finally:
+            # Unmount failures are reported in step_results but must not mask the
+            # exit code of the repair step that actually failed.
+            for step in unmount_steps:
+                rc_cleanup, out_cleanup, err_cleanup = _run_cmd(step, timeout=15)
+                step_results.append(
+                    {
+                        "argv": list(step),
+                        "exit_code": rc_cleanup,
+                        "stdout": out_cleanup,
+                        "stderr": err_cleanup,
+                        "phase": "cleanup",
+                    }
+                )
+        return {
+            "action": action,
+            "dry_run": False,
+            "executed": True,
+            "exit_code": exit_code,
+            "planned_steps": steps,
+            "step_results": step_results,
+        }
 
     return {"action": action, "dry_run": dry_run, "status": "schema_ready"}
 

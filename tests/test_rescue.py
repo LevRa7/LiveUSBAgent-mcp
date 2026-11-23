@@ -287,8 +287,11 @@ def test_mount_auto_ntfs_prefers_ntfs3_with_ntfs3g_fallback(linux_rescue_env):
     )
     assert live["fallback_used"] is True
     assert live["exit_code"] == 0
-    assert calls[0][:3] == ["mount", "-t", "ntfs3"]
-    assert calls[1][0] == "ntfs-3g"
+    # The kernel I/O health probe (dmesg) runs before any mount attempt; skip it
+    # when pinning the mount command order.
+    mount_calls = [call for call in calls if call[0] != "dmesg"]
+    assert mount_calls[0][:3] == ["mount", "-t", "ntfs3"]
+    assert mount_calls[1][0] == "ntfs-3g"
 
 
 def test_mount_auto_exfat_and_linux_fs(linux_rescue_env):
@@ -606,9 +609,12 @@ def test_mount_auto_bitlocker_executes_loop_mount_after_dislocker_succeeds(linux
     )
     assert res["exit_code"] == 0
     assert res["unlock_exit_code"] == 0
-    assert len(calls) == 2
-    assert calls[0][0] == "dislocker"
-    assert calls[1] == [
+    # The kernel I/O health probe (dmesg) runs before the unlock; skip it when
+    # pinning the two mounting commands.
+    action_calls = [call for call in calls if call[0] != "dmesg"]
+    assert len(action_calls) == 2
+    assert action_calls[0][0] == "dislocker"
+    assert action_calls[1] == [
         "mount",
         "-o",
         "loop,ro",
@@ -1505,3 +1511,636 @@ def test_new_collectors_are_unavailable_on_windows(monkeypatch, call, marker):
 
     assert res["available"] is False
     assert marker in res["reason"]
+
+
+# ---------------------------------------------------------------------------
+# 10. Recovery actions: umount, fsck_check, win_sam_reset, chroot_exec,
+#     grub_repair execution, and the mount I/O guard
+# ---------------------------------------------------------------------------
+
+def _dmesg_io_errors(count: int, device: str = "sda") -> str:
+    return "\n".join(
+        f"[Sun Nov 22 10:00:{index:02d} 2026] "
+        f"blk_update_request: I/O error, dev {device}, sector {index}"
+        for index in range(count)
+    )
+
+
+def test_rescue_action_schema_advertises_the_new_parameters():
+    spec = next(t for t in rescue.RESCUE_TOOLS_SPEC if t["name"] == "rescue_action")
+    props = spec["inputSchema"]["properties"]
+    for name in ("force", "lazy", "bind_mounts"):
+        assert props[name]["type"] == "boolean", name
+        assert props[name]["description"].strip(), name
+    assert "force=true" in props["force"]["description"]
+    assert "chroot_exec" in props["bind_mounts"]["description"]
+
+
+# --- umount -----------------------------------------------------------------
+
+def test_umount_dry_run_resolves_mountpoint_and_flags(linux_rescue_env):
+    explicit = rescue.plan_or_run_rescue_action(
+        {
+            "action": "umount",
+            "mountpoint": "/mnt/rescue/sda2",
+            "lazy": True,
+            "force": True,
+        }
+    )
+    assert explicit["dry_run"] is True
+    assert explicit["mountpoint"] == "/mnt/rescue/sda2"
+    assert explicit["lazy"] is True
+    assert explicit["force"] is True
+    assert explicit["argv"] == ["umount", "-l", "-f", "/mnt/rescue/sda2"]
+
+    derived = rescue.plan_or_run_rescue_action({"action": "umount", "device": "/dev/sda2"})
+    assert derived["mountpoint"] == "/mnt/rescue/sda2"
+    assert derived["argv"] == ["umount", "/mnt/rescue/sda2"]
+
+
+def test_umount_execute_runs_with_timeout_and_returns_output(linux_rescue_env):
+    calls: List[Tuple[List[str], int]] = []
+
+    def fake_run(argv, timeout=15):
+        calls.append((list(argv), timeout))
+        return 0, "target unmounted", ""
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    linux_rescue_env.setattr(os.path, "ismount", lambda path: True)
+
+    res = rescue.plan_or_run_rescue_action(
+        {"action": "umount", "mountpoint": "/mnt/scratch/sdb1", "lazy": True, "dry_run": False}
+    )
+    assert res["exit_code"] == 0
+    assert res["stdout"] == "target unmounted"
+    assert res["stderr"] == ""
+    assert calls == [(["umount", "-l", "/mnt/scratch/sdb1"], 15)]
+
+
+def test_umount_refuses_invalid_or_missing_mountpoint(linux_rescue_env):
+    linux_rescue_env.setattr(rescue, "_run_cmd", lambda *a, **k: pytest.fail("umount must not run"))
+
+    for bad in ("/", "/etc", "/mnt/rescue", "/mnt/rescue/../etc", "relative/path"):
+        res = rescue.plan_or_run_rescue_action(
+            {"action": "umount", "mountpoint": bad, "dry_run": False}
+        )
+        assert "error" in res, bad
+
+    missing = rescue.plan_or_run_rescue_action({"action": "umount"})
+    assert "error" in missing
+
+
+def test_umount_refuses_when_the_mountpoint_is_not_mounted(linux_rescue_env):
+    linux_rescue_env.setattr(rescue, "_run_cmd", lambda *a, **k: pytest.fail("umount must not run"))
+    linux_rescue_env.setattr(os.path, "ismount", lambda path: False)
+
+    res = rescue.plan_or_run_rescue_action(
+        {"action": "umount", "mountpoint": "/mnt/rescue/sda2", "dry_run": False}
+    )
+    assert res["error"].startswith("not mounted:")
+    assert "/mnt/rescue/sda2" in res["error"]
+
+
+# --- fsck_check -------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "fstype, expected_argv",
+    [
+        ("ext2", ["e2fsck", "-n", "/dev/sda2"]),
+        ("ext3", ["e2fsck", "-n", "/dev/sda2"]),
+        ("ext4", ["e2fsck", "-n", "/dev/sda2"]),
+        ("xfs", ["xfs_repair", "-n", "/dev/sda2"]),
+        ("btrfs", ["btrfs", "check", "--readonly", "/dev/sda2"]),
+        ("vfat", ["fsck.vfat", "-n", "/dev/sda2"]),
+        ("exfat", ["fsck.exfat", "-n", "/dev/sda2"]),
+        ("ntfs", ["ntfsfix", "-n", "/dev/sda2"]),
+        ("hfsplus", ["fsck.hfsplus", "-n", "/dev/sda2"]),
+        ("reiserfs", ["fsck", "-n", "/dev/sda2"]),
+    ],
+)
+def test_fsck_check_plans_only_read_only_argv(linux_rescue_env, fstype, expected_argv):
+    linux_rescue_env.setattr(
+        rescue, "_run_cmd", lambda *a, **k: pytest.fail("dry run must not execute")
+    )
+
+    res = rescue.plan_or_run_rescue_action(
+        {"action": "fsck_check", "device": "/dev/sda2", "fstype": fstype}
+    )
+
+    assert res["argv"] == expected_argv
+    assert res["repair"] is False
+    assert res["dry_run"] is True
+    assert "-y" not in res["argv"]
+    assert "--repair" not in res["argv"]
+
+
+def test_fsck_check_detects_fstype_and_executes_without_repairing(linux_rescue_env):
+    calls: List[Tuple[List[str], int]] = []
+
+    def fake_run(argv, timeout=5):
+        calls.append((list(argv), timeout))
+        if argv[0] == "blkid":
+            return 0, "ext4\n", ""
+        return 0, "clean", ""
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+
+    plan = rescue.plan_or_run_rescue_action({"action": "fsck_check", "device": "/dev/sda2"})
+    assert plan["fstype"] == "ext4"
+    assert plan["argv"] == ["e2fsck", "-n", "/dev/sda2"]
+    assert plan["repair"] is False
+    assert calls == [(["blkid", "-o", "value", "-s", "TYPE", "/dev/sda2"], 5)]
+
+    res = rescue.plan_or_run_rescue_action(
+        {"action": "fsck_check", "device": "/dev/sda2", "dry_run": False}
+    )
+    assert res["exit_code"] == 0
+    assert res["stdout"] == "clean"
+    assert res["repair"] is False
+    fsck_calls = [call for call in calls if call[0][0] in ("e2fsck", "fsck")]
+    assert fsck_calls == [(["e2fsck", "-n", "/dev/sda2"], 30)]
+
+
+@pytest.mark.parametrize("bad_device", [None, "", "/dev/mem", "/dev/../etc/passwd"])
+def test_fsck_check_rejects_invalid_device(linux_rescue_env, bad_device):
+    linux_rescue_env.setattr(
+        rescue, "_run_cmd", lambda *a, **k: pytest.fail("no probe for an invalid device")
+    )
+    res = rescue.plan_or_run_rescue_action({"action": "fsck_check", "device": bad_device})
+    assert "error" in res
+
+
+# --- win_sam_reset ----------------------------------------------------------
+
+def test_win_sam_reset_dry_run_returns_chntpw_argv(linux_rescue_env):
+    linux_rescue_env.setattr(
+        rescue, "_run_cmd", lambda *a, **k: pytest.fail("dry run must not execute")
+    )
+
+    res = rescue.plan_or_run_rescue_action(
+        {"action": "win_sam_reset", "mountpoint": "/mnt/rescue/win_c", "sam_user": "alice"}
+    )
+    assert res["dry_run"] is True
+    assert res["sam_user"] == "alice"
+    assert res["sam_path"] == "/mnt/rescue/win_c/Windows/System32/config/SAM"
+    assert res["argv"] == [
+        "chntpw",
+        "-u",
+        "alice",
+        "/mnt/rescue/win_c/Windows/System32/config/SAM",
+    ]
+
+    derived = rescue.plan_or_run_rescue_action(
+        {"action": "win_sam_reset", "device": "/dev/sda3", "sam_user": "bob"}
+    )
+    assert derived["mountpoint"] == "/mnt/rescue/sda3"
+    assert derived["argv"][-1] == "/mnt/rescue/sda3/Windows/System32/config/SAM"
+
+
+def test_win_sam_reset_dry_run_false_never_writes_the_sam(linux_rescue_env):
+    linux_rescue_env.setattr(
+        rescue, "_run_cmd", lambda *a, **k: pytest.fail("chntpw must not run")
+    )
+
+    res = rescue.plan_or_run_rescue_action(
+        {
+            "action": "win_sam_reset",
+            "mountpoint": "/mnt/rescue/win_c",
+            "sam_user": "alice",
+            "dry_run": False,
+        }
+    )
+    assert res["status"] == "requires_interactive"
+    assert res["executed"] is False
+    assert res["dry_run"] is False
+    assert res["argv"][0] == "chntpw"
+    assert "interactively" in res["message"]
+
+
+def test_win_sam_reset_requires_user_and_safe_mountpoint(linux_rescue_env):
+    missing_user = rescue.plan_or_run_rescue_action(
+        {"action": "win_sam_reset", "mountpoint": "/mnt/rescue/win_c"}
+    )
+    assert "error" in missing_user
+
+    bad_mp = rescue.plan_or_run_rescue_action(
+        {"action": "win_sam_reset", "mountpoint": "/etc", "sam_user": "alice"}
+    )
+    assert "error" in bad_mp
+
+
+# --- chroot_exec ------------------------------------------------------------
+
+def test_chroot_exec_dry_run_plans_binds_chroot_and_reverse_unmounts(linux_rescue_env):
+    linux_rescue_env.setattr(
+        os.path, "exists", lambda path: path in ("/dev", "/proc", "/sys", "/run")
+    )
+
+    res = rescue.plan_or_run_rescue_action(
+        {
+            "action": "chroot_exec",
+            "mountpoint": "/mnt/rescue/root",
+            "chroot_cmd": "apt-get install -y grub-efi",
+        }
+    )
+
+    assert res["dry_run"] is True
+    assert res["bind_mounts"] is True
+    assert res["binds"] == ["/dev", "/proc", "/sys", "/run"]
+    assert res["argv"] == ["chroot", "/mnt/rescue/root", "apt-get", "install", "-y", "grub-efi"]
+    assert res["planned_steps"] == [
+        ["mount", "--bind", "/dev", "/mnt/rescue/root/dev"],
+        ["mount", "--bind", "/proc", "/mnt/rescue/root/proc"],
+        ["mount", "--bind", "/sys", "/mnt/rescue/root/sys"],
+        ["mount", "--bind", "/run", "/mnt/rescue/root/run"],
+        ["chroot", "/mnt/rescue/root", "apt-get", "install", "-y", "grub-efi"],
+        ["umount", "/mnt/rescue/root/run"],
+        ["umount", "/mnt/rescue/root/sys"],
+        ["umount", "/mnt/rescue/root/proc"],
+        ["umount", "/mnt/rescue/root/dev"],
+    ]
+
+
+def test_chroot_exec_only_binds_existing_sources_and_can_skip_binds(linux_rescue_env):
+    linux_rescue_env.setattr(os.path, "exists", lambda path: path in ("/dev", "/run"))
+
+    res = rescue.plan_or_run_rescue_action(
+        {"action": "chroot_exec", "mountpoint": "/mnt/scratch/guest", "chroot_cmd": "true"}
+    )
+    assert res["binds"] == ["/dev", "/run"]
+    assert [step for step in res["planned_steps"] if step[0] == "mount"] == [
+        ["mount", "--bind", "/dev", "/mnt/scratch/guest/dev"],
+        ["mount", "--bind", "/run", "/mnt/scratch/guest/run"],
+    ]
+    assert res["planned_steps"][-2:] == [
+        ["umount", "/mnt/scratch/guest/run"],
+        ["umount", "/mnt/scratch/guest/dev"],
+    ]
+
+    no_binds = rescue.plan_or_run_rescue_action(
+        {
+            "action": "chroot_exec",
+            "mountpoint": "/mnt/scratch/guest",
+            "chroot_cmd": "true",
+            "bind_mounts": False,
+        }
+    )
+    assert no_binds["binds"] == []
+    assert no_binds["planned_steps"] == [["chroot", "/mnt/scratch/guest", "true"]]
+
+
+def test_chroot_exec_executes_binds_chroot_then_unmounts_in_finally(linux_rescue_env):
+    calls: List[List[str]] = []
+
+    def fake_run(argv, timeout=60):
+        calls.append(list(argv))
+        return 0, f"ok:{argv[0]}", ""
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    linux_rescue_env.setattr(os.path, "ismount", lambda path: True)
+    linux_rescue_env.setattr(
+        os.path, "exists", lambda path: path in ("/dev", "/proc", "/sys", "/run")
+    )
+    made: List[str] = []
+    linux_rescue_env.setattr(os, "makedirs", lambda path, **kwargs: made.append(path))
+
+    res = rescue.plan_or_run_rescue_action(
+        {
+            "action": "chroot_exec",
+            "mountpoint": "/mnt/rescue/root",
+            "chroot_cmd": "systemctl enable sshd",
+            "dry_run": False,
+        }
+    )
+
+    assert res["chroot_ran"] is True
+    assert res["exit_code"] == 0
+    assert res["stdout"] == "ok:chroot"
+    assert made == [
+        "/mnt/rescue/root/dev",
+        "/mnt/rescue/root/proc",
+        "/mnt/rescue/root/sys",
+        "/mnt/rescue/root/run",
+    ]
+    assert calls[:4] == [
+        ["mount", "--bind", "/dev", "/mnt/rescue/root/dev"],
+        ["mount", "--bind", "/proc", "/mnt/rescue/root/proc"],
+        ["mount", "--bind", "/sys", "/mnt/rescue/root/sys"],
+        ["mount", "--bind", "/run", "/mnt/rescue/root/run"],
+    ]
+    assert calls[4] == ["chroot", "/mnt/rescue/root", "systemctl", "enable", "sshd"]
+    assert calls[5:] == [
+        ["umount", "/mnt/rescue/root/run"],
+        ["umount", "/mnt/rescue/root/sys"],
+        ["umount", "/mnt/rescue/root/proc"],
+        ["umount", "/mnt/rescue/root/dev"],
+    ]
+    cleanup = [step for step in res["step_results"] if step.get("phase") == "cleanup"]
+    assert len(cleanup) == 4
+
+
+@pytest.mark.parametrize("failing", ["mount", "chroot"])
+def test_chroot_exec_always_cleans_up_on_failure(linux_rescue_env, failing):
+    calls: List[List[str]] = []
+
+    def fake_run(argv, timeout=60):
+        calls.append(list(argv))
+        if failing == "mount" and argv[0] == "mount" and argv[-1].endswith("/sys"):
+            return 32, "", "mount: /sys bind failed"
+        if failing == "chroot" and argv[0] == "chroot":
+            return 1, "", "chroot: apt-get failed"
+        return 0, "", ""
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    linux_rescue_env.setattr(os.path, "ismount", lambda path: True)
+    linux_rescue_env.setattr(os.path, "exists", lambda path: True)
+    linux_rescue_env.setattr(os, "makedirs", lambda path, **kwargs: None)
+
+    res = rescue.plan_or_run_rescue_action(
+        {
+            "action": "chroot_exec",
+            "mountpoint": "/mnt/rescue/root",
+            "chroot_cmd": "apt-get -y install grub-efi",
+            "dry_run": False,
+        }
+    )
+
+    assert res["exit_code"] != 0
+    unmounts = [call for call in calls if call[0] == "umount"]
+    assert unmounts == [
+        ["umount", "/mnt/rescue/root/run"],
+        ["umount", "/mnt/rescue/root/sys"],
+        ["umount", "/mnt/rescue/root/proc"],
+        ["umount", "/mnt/rescue/root/dev"],
+    ]
+    assert len([step for step in res["step_results"] if step.get("phase") == "cleanup"]) == 4
+    chroot_calls = [call for call in calls if call[0] == "chroot"]
+    if failing == "mount":
+        assert chroot_calls == []
+        assert res["chroot_ran"] is False
+    else:
+        assert len(chroot_calls) == 1
+        assert res["chroot_ran"] is True
+
+
+def test_chroot_exec_requires_a_mounted_guest(linux_rescue_env):
+    linux_rescue_env.setattr(rescue, "_run_cmd", lambda *a, **k: pytest.fail("must not run"))
+    linux_rescue_env.setattr(os.path, "exists", lambda path: True)
+    linux_rescue_env.setattr(os.path, "ismount", lambda path: False)
+
+    res = rescue.plan_or_run_rescue_action(
+        {
+            "action": "chroot_exec",
+            "mountpoint": "/mnt/rescue/root",
+            "chroot_cmd": "true",
+            "dry_run": False,
+        }
+    )
+    assert "not mounted" in res["error"]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"action": "chroot_exec", "mountpoint": "/etc", "chroot_cmd": "true"},
+        {"action": "chroot_exec", "mountpoint": "/mnt/rescue/root", "chroot_cmd": "   "},
+        {"action": "chroot_exec", "mountpoint": "/mnt/rescue/root", "chroot_cmd": "''"},
+    ],
+)
+def test_chroot_exec_rejects_unsafe_mountpoint_or_empty_command(linux_rescue_env, args):
+    linux_rescue_env.setattr(os.path, "exists", lambda path: True)
+    res = rescue.plan_or_run_rescue_action(args)
+    assert "error" in res
+
+
+# --- grub_repair ------------------------------------------------------------
+
+GRUB_PLANNED_STEPS = [
+    ["mount", "/dev/sda2", "/mnt/rescue/root"],
+    ["mount", "/dev/sda1", "/mnt/rescue/root/boot/efi"],
+    ["mount", "--bind", "/dev", "/mnt/rescue/root/dev"],
+    ["mount", "--bind", "/proc", "/mnt/rescue/root/proc"],
+    ["mount", "--bind", "/sys", "/mnt/rescue/root/sys"],
+    ["mount", "--bind", "/run", "/mnt/rescue/root/run"],
+    [
+        "chroot",
+        "/mnt/rescue/root",
+        "grub-install",
+        "--target=x86_64-efi",
+        "--efi-directory=/boot/efi",
+        "--bootloader-id=GRUB",
+    ],
+    ["chroot", "/mnt/rescue/root", "update-grub"],
+]
+
+GRUB_UNMOUNT_STEPS = [
+    ["umount", "/mnt/rescue/root/run"],
+    ["umount", "/mnt/rescue/root/sys"],
+    ["umount", "/mnt/rescue/root/proc"],
+    ["umount", "/mnt/rescue/root/dev"],
+    ["umount", "/mnt/rescue/root/boot/efi"],
+    ["umount", "/mnt/rescue/root"],
+]
+
+
+def _grub_args(dry_run: bool = False) -> Dict[str, object]:
+    return {
+        "action": "grub_repair",
+        "device": "/dev/sda2",
+        "efi_partition": "/dev/sda1",
+        "mountpoint": "/mnt/rescue/root",
+        "dry_run": dry_run,
+    }
+
+
+def test_grub_repair_dry_run_is_unchanged():
+    res = rescue.plan_or_run_rescue_action(_grub_args(dry_run=True))
+
+    assert res == {
+        "action": "grub_repair",
+        "dry_run": True,
+        "planned_steps": GRUB_PLANNED_STEPS,
+    }
+
+
+def test_grub_repair_executes_all_steps_then_unmounts_in_reverse(linux_rescue_env):
+    calls: List[List[str]] = []
+
+    def fake_run(argv, timeout=60):
+        calls.append(list(argv))
+        return 0, "", ""
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    made: List[str] = []
+    linux_rescue_env.setattr(os, "makedirs", lambda path, **kwargs: made.append(path))
+
+    res = rescue.plan_or_run_rescue_action(_grub_args(dry_run=False))
+
+    assert res["executed"] is True
+    assert res["dry_run"] is False
+    assert res["exit_code"] == 0
+    assert made == [
+        "/mnt/rescue/root",
+        "/mnt/rescue/root/boot/efi",
+        "/mnt/rescue/root/dev",
+        "/mnt/rescue/root/proc",
+        "/mnt/rescue/root/sys",
+        "/mnt/rescue/root/run",
+    ]
+    executed_argvs = [step["argv"] for step in res["step_results"]]
+    assert executed_argvs[:8] == GRUB_PLANNED_STEPS
+    assert executed_argvs[8:] == GRUB_UNMOUNT_STEPS
+    assert calls == GRUB_PLANNED_STEPS + GRUB_UNMOUNT_STEPS
+
+
+def test_grub_repair_stops_at_first_failure_and_still_unmounts(linux_rescue_env):
+    calls: List[List[str]] = []
+
+    def fake_run(argv, timeout=60):
+        calls.append(list(argv))
+        if argv[0] == "chroot" and "grub-install" in argv:
+            return 1, "", "grub-install: error: cannot find EFI directory"
+        return 0, "", ""
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    linux_rescue_env.setattr(os, "makedirs", lambda path, **kwargs: None)
+
+    res = rescue.plan_or_run_rescue_action(_grub_args(dry_run=False))
+
+    assert res["executed"] is True
+    assert res["exit_code"] == 1
+    # update-grub must never run after grub-install failed.
+    assert not any("update-grub" in call for call in calls)
+    assert res["step_results"][6]["argv"][2] == "grub-install"
+    assert res["step_results"][6]["exit_code"] == 1
+    assert [call for call in calls if call[0] == "umount"] == GRUB_UNMOUNT_STEPS
+    assert len([step for step in res["step_results"] if step.get("phase") == "cleanup"]) == 6
+
+
+def test_grub_repair_reports_unmount_failures_without_masking_the_exit_code(linux_rescue_env):
+    def fake_run(argv, timeout=60):
+        if argv[0] == "umount":
+            return 32, "", "target is busy"
+        return 0, "", ""
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    linux_rescue_env.setattr(os, "makedirs", lambda path, **kwargs: None)
+
+    res = rescue.plan_or_run_rescue_action(_grub_args(dry_run=False))
+
+    assert res["exit_code"] == 0
+    cleanup = [step for step in res["step_results"] if step.get("phase") == "cleanup"]
+    assert len(cleanup) == 6
+    assert all(step["exit_code"] == 32 for step in cleanup)
+
+
+def test_grub_repair_never_reports_dry_run_false_without_executing(monkeypatch):
+    monkeypatch.setattr(rescue, "_IS_WINDOWS", True)
+    monkeypatch.setattr(
+        rescue, "_run_cmd", lambda *a, **k: pytest.fail("chroot cannot run on Windows")
+    )
+
+    res = rescue.plan_or_run_rescue_action(_grub_args(dry_run=False))
+
+    assert "error" in res
+    assert "dry_run" not in res
+
+
+# --- mount I/O guard --------------------------------------------------------
+
+def test_mount_safe_refuses_after_active_kernel_io_errors(linux_rescue_env):
+    linux_rescue_env.setattr(
+        rescue, "_run_cmd", lambda argv, timeout=4: (0, _dmesg_io_errors(11, "sda1"), "")
+    )
+
+    res = rescue.plan_or_run_rescue_action({"action": "mount_safe", "device": "/dev/sda1"})
+    assert "error" in res
+    assert res["error"].startswith("refusing to mount /dev/sda1:")
+    assert "11 active kernel I/O errors" in res["error"]
+    assert "force=true" in res["error"]
+
+    forced = rescue.plan_or_run_rescue_action(
+        {"action": "mount_safe", "device": "/dev/sda1", "force": True}
+    )
+    assert "error" not in forced
+    assert forced["dry_run"] is True
+    assert forced["argv"] == ["mount", "-o", "ro,noload", "/dev/sda1", "/mnt/rescue/sda1"]
+
+
+def test_mount_auto_refuses_after_active_kernel_io_errors(linux_rescue_env):
+    linux_rescue_env.setattr(
+        rescue, "_run_cmd", lambda argv, timeout=4: (0, _dmesg_io_errors(12, "sda1"), "")
+    )
+
+    res = rescue.plan_or_run_rescue_action(
+        {"action": "mount_auto", "device": "/dev/sda1", "fstype": "ext4"}
+    )
+    assert "refusing to mount /dev/sda1" in res["error"]
+    assert "12 active kernel I/O errors" in res["error"]
+
+    forced = rescue.plan_or_run_rescue_action(
+        {"action": "mount_auto", "device": "/dev/sda1", "fstype": "ext4", "force": True}
+    )
+    assert "error" not in forced
+    assert forced["argv"] == [
+        "mount",
+        "-t",
+        "ext4",
+        "-o",
+        "ro,noload",
+        "/dev/sda1",
+        "/mnt/rescue/sda1",
+    ]
+
+
+def test_mount_io_guard_allows_ten_errors_and_unavailable_collector(linux_rescue_env):
+    linux_rescue_env.setattr(
+        rescue, "_run_cmd", lambda argv, timeout=4: (0, _dmesg_io_errors(10, "sda1"), "")
+    )
+
+    ok = rescue.plan_or_run_rescue_action({"action": "mount_safe", "device": "/dev/sda1"})
+    assert "error" not in ok
+    assert ok["argv"] == ["mount", "-o", "ro,noload", "/dev/sda1", "/mnt/rescue/sda1"]
+
+    # An unavailable dmesg collector (no permission) must never block recovery.
+    linux_rescue_env.setattr(
+        rescue, "_run_cmd", lambda argv, timeout=4: (1, "", "dmesg: read kernel buffer failed")
+    )
+    still_ok = rescue.plan_or_run_rescue_action({"action": "mount_safe", "device": "/dev/sda2"})
+    assert "error" not in still_ok
+
+
+def test_mount_io_guard_blocks_the_execution_path_before_any_mount(linux_rescue_env):
+    calls: List[List[str]] = []
+
+    def fake_run(argv, timeout=4):
+        calls.append(list(argv))
+        return 0, _dmesg_io_errors(11, "sda1"), ""
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    linux_rescue_env.setattr(
+        os, "makedirs", lambda *a, **k: pytest.fail("no mountpoint may be created")
+    )
+
+    res = rescue.plan_or_run_rescue_action(
+        {"action": "mount_safe", "device": "/dev/sda1", "dry_run": False}
+    )
+
+    assert "refusing to mount /dev/sda1" in res["error"]
+    assert calls == [["dmesg", "--color=never", "-T"]]
+
+
+# --- collect_partitions argument coercion -----------------------------------
+
+@pytest.mark.parametrize("bad_device", [123, 4.5, ["/dev/sda"], b"/dev/sda", object()])
+def test_collect_partitions_tolerates_non_string_arguments(linux_rescue_env, bad_device):
+    linux_rescue_env.setattr(
+        rescue, "_run_cmd", lambda *a, **k: pytest.fail("no probe for an invalid device")
+    )
+
+    res = rescue.collect_partitions(bad_device)
+
+    assert isinstance(res, dict)
+    assert res["available"] is False
+    assert "reason" in res
+    assert json.dumps(res)

@@ -65,6 +65,7 @@ launch_browser() {
                 --disable-infobars \
                 --disable-session-crashed-bubble \
                 --disable-translate \
+                --disable-gpu \
                 --overscroll-history-navigation=0 \
                 --user-data-dir=/tmp/rhm-kiosk-profile \
                 "${KIOSK_URL}"

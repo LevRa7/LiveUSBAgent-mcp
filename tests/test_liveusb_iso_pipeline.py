@@ -329,6 +329,16 @@ def test_build_iso_installs_the_root_warning_wrapper() -> None:
     assert "Warning" in wrapper_text
 
 
+def test_build_iso_installs_kiosk_service_and_masks_getty() -> None:
+    """The kiosk must own tty1; a live-config 'user' getty left it at a prompt."""
+    text = BUILD_ISO_SH.read_text(encoding="utf-8")
+    assert "rhm-live-kiosk.service" in text
+    assert "TTYPath=/dev/tty1" in text
+    assert "ExecStart=/opt/remote-harness-mcp/ops/live-usb/start-kiosk.sh" in text
+    assert "ln -sf /dev/null config/includes.chroot/etc/systemd/system/getty@tty1.service" in text
+    assert "multi-user.target.wants/rhm-live-kiosk.service" in text
+
+
 def test_start_kiosk_creates_mnt_rescue_before_the_kiosk_server_starts() -> None:
     """`files` opens /mnt/rescue, so the mount point must exist before the server."""
     start_text = START_KIOSK_SH.read_text(encoding="utf-8")

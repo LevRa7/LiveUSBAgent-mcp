@@ -72,3 +72,15 @@ kiosk HTTP server and a mocked `/api/status`. The file-manager and terminal
 screenshots are Xvfb captures of the actual launched windows. `/root` appears
 because the UI harness does not create `/mnt/rescue`; the ISO's
 `start-kiosk.sh` creates that directory before the server starts.
+
+## 5. The same UI on the built ISO
+
+![Kiosk running from the built ISO](images/kiosk-image-pending.png)
+
+The final ISO was booted in QEMU UEFI (TCG) after the
+`rhm-live-kiosk.service` fix. The kiosk service starts Chromium on `tty1` and
+the real UI appears (the screenshot shows the pending session because the QEMU
+network has no reachable gateway to register with). The service owns `tty1`
+and masks `getty@tty1`, so live-config's default user can no longer park the
+image at a login prompt.
+

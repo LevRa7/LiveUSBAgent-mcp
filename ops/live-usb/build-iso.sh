@@ -495,6 +495,39 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
+# tty1 kiosk as a systemd service: live-config may create a default "user" and
+# take over getty@tty1, which left the kiosk on a plain login prompt. The service
+# owns tty1 directly, starts start-kiosk.sh as root, and masks getty@tty1.
+cat <<EOF > config/includes.chroot/etc/systemd/system/rhm-live-kiosk.service
+[Unit]
+Description=Remote-Harness MCP Live USB Kiosk
+After=systemd-user-sessions.service network-online.target
+Wants=network-online.target
+Conflicts=getty@tty1.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/remote-harness-mcp
+Environment="PYTHONPATH=/opt/remote-harness-mcp"
+Environment="MESH_SCENARIO=live_usb"
+Environment="MESH_GATEWAY=${MESH_GATEWAY}"
+Environment="MESH_LIVE_STATE_DIR=/run/rhm-live"
+Environment="TERM=linux"
+StandardInput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+ExecStart=/opt/remote-harness-mcp/ops/live-usb/start-kiosk.sh
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 # Prevent auto-activation of dying host LVM volume groups and mdadm RAID arrays at boot
 mkdir -p config/includes.chroot/etc/lvm config/includes.chroot/etc/mdadm
 cat <<'EOF' > config/includes.chroot/etc/lvm/lvm.conf
@@ -513,14 +546,12 @@ EOF
 mkdir -p config/includes.chroot/etc/systemd/system/multi-user.target.wants
 ln -sf /etc/systemd/system/rhm-live-agent.service \
     config/includes.chroot/etc/systemd/system/multi-user.target.wants/rhm-live-agent.service
+ln -sf /etc/systemd/system/rhm-live-kiosk.service \
+    config/includes.chroot/etc/systemd/system/multi-user.target.wants/rhm-live-kiosk.service
 
-# tty1 autologin -> start-kiosk.sh (falls back to firstboot_tui.py if X11 unavailable)
-mkdir -p config/includes.chroot/etc/systemd/system/getty@tty1.service.d
-cat <<'EOF' > config/includes.chroot/etc/systemd/system/getty@tty1.service.d/autologin.conf
-[Service]
-ExecStart=
-ExecStart=-/sbin/agetty --autologin root --noclear %I $TERM
-EOF
+# The kiosk service owns tty1; mask the autologin getty that live-config creates.
+mkdir -p config/includes.chroot/etc/systemd/system
+ln -sf /dev/null config/includes.chroot/etc/systemd/system/getty@tty1.service
 
 # tty2 autologin -> firstboot_tui.py console dashboard
 mkdir -p config/includes.chroot/etc/systemd/system/getty@tty2.service.d

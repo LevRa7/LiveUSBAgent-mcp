@@ -3,8 +3,8 @@
 **Дата:** 23.11.2026, ~14:58 IST
 **Ветка:** `complete-liveusb`, локальный тег `v0.1.0`
 **Версия:** `0.1.0` (независимая нумерация форка; upstream-база — `0.6.0`)
-**ISO:** [`artifacts/LiveUSBAgent-0.1.0.iso`](artifacts/LiveUSBAgent-0.1.0.iso) — 1.5 ГБ, bootable
-**SHA-256:** `e2f2abf43f1e42ab655b0ea70169f097475174b3223c167768d88807f585fdfb`
+**ISO:** [`artifacts/LiveUSBAgent-0.1.0-final.iso`](artifacts/LiveUSBAgent-0.1.0-final.iso) — 1.8 ГБ, bootable
+**SHA-256:** `bb6dff194c00e1b2194aa9cad2ae4dbaea4ffe5d2e9e3092bc1884885992b79d`
 
 ---
 
@@ -21,7 +21,7 @@
 | Область | Было | Стало |
 | :--- | :--- | :--- |
 | Rescue-API | 5 секций и 4 действия не реализованы | все 12 секций и 11 действий |
-| Тесты | 5 failed / 1756 passed | **0 failed / 1880 passed / 8 skipped** |
+| Тесты | 5 failed / 1756 passed | **0 failed / 1881 passed / 8 skipped** |
 | Версия | 0.6.0 | **0.1.0** |
 | ISO | не собран | **1.5 ГБ, собран и загружен в QEMU** |
 | `--check` | отсутствовал | **42/42 PASS** |
@@ -69,7 +69,7 @@ APFS: `apfs-fuse` собран и установлен; DKMS-модуль `linux
 | Ядро + initramfs + squashfs | ✅ загрузка до systemd |
 | systemd | ✅ `graphical.target`, `rhm-live-agent.service` started |
 | Консоль | ✅ `debian login:` на `ttyS0` |
-| Kiosk Chromium | ✅ UI прогнан в Chromium/Xvfb (клики, QR, модалки); кадр QEMU после GRUB чёрный |
+| Kiosk Chromium | ✅ реальный ISO: Chromium на tty1 показывает pending-экран; клики/модалки прогнаны в Chromium/Xvfb |
 | Физическое железо | ⏳ не проверялось |
 
 Лог загрузки: [`artifacts/qemu-boot-uefi-kernel.log`](artifacts/qemu-boot-uefi-kernel.log).
@@ -87,6 +87,10 @@ APFS: `apfs-fuse` собран и установлен; DKMS-модуль `linux
 - Визуальный прогон: Chromium + Playwright протыкал сеть, Wi-Fi-модалку,
   скрытую сеть, приложения, файловый менеджер, терминал, pending и ready;
   файловый менеджер и терминал подтверждены скриншотами Xvfb.
+- В реальном ISO kiosk запускается отдельным `rhm-live-kiosk.service`
+  (tty1, `getty@tty1` замаскирован): раньше live-config логинил `user` и
+  оставлял образ на login prompt. Скриншот из QEMU:
+  [kiosk-image-pending.png](docs/liveusb/images/kiosk-image-pending.png).
 - Скриншоты: [сеть](docs/liveusb/images/kiosk-network.png),
   [pending](docs/liveusb/images/kiosk-pending.png),
   [QR](docs/liveusb/images/kiosk-ready.png),
@@ -101,7 +105,7 @@ APFS: `apfs-fuse` собран и установлен; DKMS-модуль `linux
 
 | Проверка | Результат |
 | :--- | :--- |
-| `py -m pytest tests -q` | **1880 passed, 8 skipped, 0 failed** |
+| `py -m pytest tests -q` | **1881 passed, 8 skipped, 0 failed** |
 | `tests/test_rescue.py` | 155 passed |
 | `tests/test_liveusb_iso_pipeline.py` | 24 passed |
 | `build-iso.sh --check` | **42/42 PASS**, exit 0 |

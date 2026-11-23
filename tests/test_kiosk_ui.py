@@ -729,6 +729,10 @@ def test_amneziawg_subscription_qr_uses_encoded_url(
     assert "window.clearTimeout" in js_text
     assert 'els.btnNetAwgSubCopy.addEventListener("click", copySubscriptionUrl)' in js_text
     assert 'els.netAwgSubForm.addEventListener("submit", submitNetworkSubscription)' in js_text
+    # The QR endpoint answers 400/503 with JSON, so an <img> error must not
+    # leave a broken image: hide the frame and explain the fallback.
+    assert 'els.netAwgQr.addEventListener("error"' in js_text
+    assert "QR-код не построен" in js_text
 
 
 def test_amneziawg_tab_renders_live_state(amnezia_panel: str, js_text: str) -> None:

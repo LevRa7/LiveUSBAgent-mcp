@@ -1405,7 +1405,8 @@
   });
   els.netAwgQr.addEventListener("error", function () {
     els.netAwgQrFrame.classList.add("is-hidden");
-    els.netAwgQrHint.textContent = "QR-код недоступен: нужна корректная HTTPS-ссылка.";
+    els.netAwgQrHint.textContent =
+      "QR-код не построен: проверьте HTTPS-ссылку и qrencode на сервере.";
     els.netAwgQrHint.classList.add("is-warn");
   });
   els.btnModalClose.addEventListener("click", closeWifiModal);

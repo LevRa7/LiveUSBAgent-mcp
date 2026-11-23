@@ -15,6 +15,10 @@ import base64
 import json
 import os
 
+import pytest
+
+pytest.importorskip("google.antigravity")  # private SDK: skip on Linux CI, never a collection ERROR
+
 import gateway
 from core import policies, redact, web_share
 from starlette.requests import Request

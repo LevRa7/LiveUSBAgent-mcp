@@ -236,7 +236,7 @@ LiveUSBAgent-mcp is designed to be transparent about both its power and its buil
 - **Dry-run & read-only defaults:** `rescue_action` defaults to `dry_run=True` (previewing exact commands before execution) and `writable=False` (`ro,noload` for `mount_safe`).
 - **Mountpoint restrictions:** `rescue_action` restricts target mount directories to `/mnt/rescue/*` and `/mnt/scratch/*`.
 - **Volatile RAM-disk write refusal:** Before creating disk images (`ddrescue_plan`) or RAM dumps (`ram_dump_plan`), `core/rescue.py` inspects `/proc/mounts` and refuses destinations on volatile `tmpfs`, `ramfs`, `overlay`, `squashfs`, or `devtmpfs` filesystems (including `/tmp`, `/run`, and `/var/tmp`) to prevent crashing a `toram` session via OOM. Also caps `journald` to `50M` volatile RAM (`Storage=volatile`, `SystemMaxUse=50M`).
-- **APFS experimental-write warning:** APFS volumes default to read-only. Encrypted FileVault volumes use read-only `apfs-fuse`. Write mode on unencrypted APFS (`apfs-dkms`) is explicitly flagged as experimental and requires opt-in after backing up critical data.
+- **APFS read-only policy:** `mount_auto` always mounts APFS read-only; encrypted FileVault volumes use read-only `apfs-fuse`. The experimental `linux-apfs-rw` write path is not exposed by `rescue_action` (a `writable=true` request is downgraded to `ro` with a warning), so the tool never writes to an APFS volume.
 
 ### 4. Network, UI & Skill Safety
 - **Active uplink protection (`active_uplink_lock`):** Protects the active default-route interface carrying the WebSocket tunnel from accidental disconnection during network troubleshooting.

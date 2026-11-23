@@ -6,6 +6,8 @@
 
 Проект вырос из [remote-harness-mcp](https://github.com/LevRa7/remote-harness-mcp) и развивается как самостоятельный репозиторий [LiveUSBAgent-mcp](https://github.com/LevRa7/LiveUSBAgent-mcp), заточенный специально под сценарии LiveUSB: нулевую настройку, максимальную совместимость с железом и файловыми системами и безопасную работу с повреждёнными дисками.
 
+**Version:** 0.7.0 — заметки к релизу: [docs/releases/v0.7.0.md](docs/releases/v0.7.0.md).
+
 ---
 
 ## Зачем это нужно
@@ -260,5 +262,7 @@ LiveUSB-сессия намеренно даёт ИИ-агенту широки�
 ## Дополнительная документация
 
 - **Руководство по сборке LiveUSB ISO и тестированию в QEMU:** [ops/live-usb/README.md](ops/live-usb/README.md)
+- **Сборка, запись и загрузка LiveUSB (англ.):** [docs/liveusb/README.md](docs/liveusb/README.md)
+- **Диагностика проблем LiveUSB — нет Wi-Fi, туннеля, ошибки I/O, OOM (англ.):** [docs/liveusb/TROUBLESHOOTING.md](docs/liveusb/TROUBLESHOOTING.md)
 - **Английская версия README:** [README.md](README.md)
 - **Архитектура и план развития:** [ProjectPlan.md](ProjectPlan.md)

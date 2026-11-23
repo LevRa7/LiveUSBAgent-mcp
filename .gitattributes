@@ -1,0 +1,7 @@
+# LiveUSB shell scripts, chroot hooks and udev rules are copied verbatim into a
+# Debian live-build chroot, where a CRLF ending breaks /bin/sh (": not found"),
+# udev rule parsing and hook execution. Pin LF so a Windows checkout cannot
+# reintroduce them; tests/test_liveusb_iso_pipeline.py asserts the same.
+*.sh text eol=lf
+*.hook.chroot text eol=lf
+*.rules text eol=lf

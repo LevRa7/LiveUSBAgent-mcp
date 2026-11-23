@@ -12,6 +12,7 @@
 #   --gateway HOST           Mesh gateway domain (default: ${MESH_GATEWAY:-smart-server.online})
 #   --with-external-skills   Run ops/live-usb/fetch-skills.sh before copying skills/
 #   --build                  Immediately run 'lb build' after configuring (requires root)
+#   --check                  Validate repository assets and exit; needs neither root nor live-build
 #   -h, --help               Show this help message
 
 set -euo pipefail
@@ -25,9 +26,209 @@ ARCH="${ARCH:-amd64}"
 MESH_GATEWAY="${MESH_GATEWAY:-smart-server.online}"
 WITH_EXTERNAL_SKILLS="0"
 RUN_BUILD="0"
+RUN_CHECK="0"
 
 usage() {
-    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+# --- --check: validate the repository assets without root or live-build ------
+# The builder below embeds the package list, the systemd unit and the GRUB menu
+# as heredocs. --check reads those heredocs back out of this very script, so the
+# thing that is validated is the thing that will be written into the image.
+CHECK_TOTAL=0
+CHECK_FAILED=0
+
+check_pass() {
+    CHECK_TOTAL=$((CHECK_TOTAL + 1))
+    printf '  [PASS] %s\n' "$1"
+}
+
+check_fail() {
+    CHECK_TOTAL=$((CHECK_TOTAL + 1))
+    CHECK_FAILED=$((CHECK_FAILED + 1))
+    printf '  [FAIL] %s\n' "$1"
+    if [[ -n "${2:-}" ]]; then
+        printf '         %s\n' "$2"
+    fi
+}
+
+# Print the body of the first "cat <<EOF > <file>" heredoc whose line matches $1.
+# Patterns are plain ERE without backslashes: awk -v eats backslash escapes.
+heredoc_body() {
+    awk -v pattern="$1" '
+        $0 ~ pattern { inside = 1; next }
+        inside && /^EOF$/ { exit }
+        inside { print }
+    ' "${BASH_SOURCE[0]}"
+}
+
+# Print the first Python 3 interpreter that actually runs (on Windows the
+# python3/python aliases can exist as Store stubs that fail every command).
+python_bin() {
+    local candidate
+    for candidate in python3 python py; do
+        command -v "${candidate}" >/dev/null 2>&1 || continue
+        if "${candidate}" -c 'import sys; sys.exit(0 if sys.version_info[0] >= 3 else 1)' >/dev/null 2>&1; then
+            printf '%s' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# py_compile a source file without leaving bytecode anywhere in the repository.
+python_compile_check() {
+    local python
+    python="$(python_bin)" || return 1
+    "${python}" - "$1" <<'PYEOF'
+import os
+import py_compile
+import sys
+import tempfile
+
+source = sys.argv[1]
+handle, target = tempfile.mkstemp(suffix=".pyc")
+os.close(handle)
+try:
+    py_compile.compile(source, cfile=target, doraise=True)
+except py_compile.PyCompileError as exc:
+    sys.stderr.write("%s\n" % exc)
+    sys.exit(1)
+finally:
+    os.unlink(target)
+PYEOF
+}
+
+check_assets() {
+    local rel_path package token output
+    local package_text unit_text grub_text
+    local -a required_files=(
+        "core/agent.py"
+        "core/rescue.py"
+        "core/skills_loader.py"
+        "skills/orchestrator.md"
+        "ops/live-usb/kiosk_server.py"
+        "ops/live-usb/kiosk_ui/index.html"
+        "ops/live-usb/start-kiosk.sh"
+        "ops/live-usb/firstboot_tui.py"
+        "ops/live-usb/udev/99-rhm-network-tethering.rules"
+        "ops/live-usb/udev/99-rhm-no-automount.rules"
+        "ops/live-usb/hooks/0100-build-apfs-and-drivers.hook.chroot"
+    )
+    local -a shell_scripts=(
+        "ops/live-usb/build-iso.sh"
+        "ops/live-usb/start-kiosk.sh"
+        "ops/live-usb/fetch-skills.sh"
+        "ops/live-usb/test-qemu.sh"
+        "ops/live-usb/hooks/0100-build-apfs-and-drivers.hook.chroot"
+        "install.sh"
+    )
+    local -a python_sources=(
+        "ops/live-usb/firstboot_tui.py"
+        "ops/live-usb/kiosk_server.py"
+    )
+    local -a required_packages=(
+        network-manager
+        ntfs-3g
+        exfatprogs
+        gddrescue
+        apfs-dkms
+        chromium
+        memtest86+
+    )
+    local -a unit_tokens=(
+        "core.agent --ephemeral-liveusb"
+        "MESH_SCENARIO=live_usb"
+    )
+    local -a grub_tokens=(
+        "toram"
+        "Low RAM"
+    )
+
+    echo "[check] Repository assets"
+    for rel_path in "${required_files[@]}"; do
+        if [[ -s "${REPO_ROOT}/${rel_path}" ]]; then
+            check_pass "present: ${rel_path}"
+        else
+            check_fail "missing or empty: ${rel_path}"
+        fi
+    done
+
+    echo "[check] Shell and Python syntax"
+    for rel_path in "${shell_scripts[@]}"; do
+        if [[ ! -f "${REPO_ROOT}/${rel_path}" ]]; then
+            check_fail "bash -n ${rel_path} (file missing)"
+            continue
+        fi
+        if output="$("${BASH:-bash}" -n "${REPO_ROOT}/${rel_path}" 2>&1)"; then
+            check_pass "bash -n ${rel_path}"
+        else
+            check_fail "bash -n ${rel_path}" "${output}"
+        fi
+    done
+    for rel_path in "${python_sources[@]}"; do
+        if [[ ! -f "${REPO_ROOT}/${rel_path}" ]]; then
+            check_fail "py_compile ${rel_path} (file missing)"
+            continue
+        fi
+        if output="$(python_compile_check "${REPO_ROOT}/${rel_path}" 2>&1)"; then
+            check_pass "py_compile ${rel_path}"
+        else
+            check_fail "py_compile ${rel_path}" "${output}"
+        fi
+    done
+
+    echo "[check] Generated package list"
+    package_text="$(heredoc_body '^cat <<EOF > config/package-lists/rhm-rescue.list.chroot$')"
+    if [[ -z "${package_text}" ]]; then
+        check_fail "package list heredoc not found in build-iso.sh"
+    else
+        check_pass "package list heredoc found ($(printf '%s\n' "${package_text}" | grep -cv -e '^[[:space:]]*$' -e '^[[:space:]]*#') packages)"
+        for package in "${required_packages[@]}"; do
+            if grep -qxF -e "${package}" <<<"${package_text}"; then
+                check_pass "package: ${package}"
+            else
+                check_fail "package missing from config/package-lists/rhm-rescue.list.chroot: ${package}"
+            fi
+        done
+    fi
+
+    echo "[check] systemd unit (rhm-live-agent.service)"
+    unit_text="$(heredoc_body '^cat <<EOF > config/includes.chroot/etc/systemd/system/rhm-live-agent.service$')"
+    if [[ -z "${unit_text}" ]]; then
+        check_fail "rhm-live-agent.service heredoc not found in build-iso.sh"
+    else
+        for token in "${unit_tokens[@]}"; do
+            if grep -qF -e "${token}" <<<"${unit_text}"; then
+                check_pass "unit contains: ${token}"
+            else
+                check_fail "unit is missing: ${token}"
+            fi
+        done
+    fi
+
+    echo "[check] GRUB menu (config/includes.binary/boot/grub/grub.cfg)"
+    grub_text="$(heredoc_body "^cat <<'EOF' > config/includes.binary/boot/grub/grub.cfg$")"
+    if [[ -z "${grub_text}" ]]; then
+        check_fail "grub.cfg heredoc not found in build-iso.sh"
+    else
+        for token in "${grub_tokens[@]}"; do
+            if grep -qF -e "${token}" <<<"${grub_text}"; then
+                check_pass "grub menu contains: ${token}"
+            else
+                check_fail "grub menu is missing: ${token}"
+            fi
+        done
+    fi
+
+    echo
+    if [[ "${CHECK_FAILED}" -eq 0 ]]; then
+        printf 'PASS: %d asset checks passed (root and live-build not required)\n' "${CHECK_TOTAL}"
+        return 0
+    fi
+    printf 'FAIL: %d of %d asset checks failed\n' "${CHECK_FAILED}" "${CHECK_TOTAL}"
+    return 1
 }
 
 while [[ $# -gt 0 ]]; do
@@ -56,6 +257,10 @@ while [[ $# -gt 0 ]]; do
             RUN_BUILD="1"
             shift
             ;;
+        --check)
+            RUN_CHECK="1"
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -67,6 +272,15 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ "${RUN_CHECK}" == "1" ]]; then
+    # Validate before touching WORK_DIR or calling lb: a broken checkout must
+    # fail here, on a developer machine, and not halfway through a build.
+    if check_assets; then
+        exit 0
+    fi
+    exit 1
+fi
 
 echo "[1/7] Preparing Debian ${DISTRO} (${ARCH}) live-build workspace at ${WORK_DIR}..."
 mkdir -p "${WORK_DIR}"

@@ -6,7 +6,7 @@
 
 **Repository:** [github.com/LevRa7/LiveUSBAgent-mcp](https://github.com/LevRa7/LiveUSBAgent-mcp) (evolved from [github.com/LevRa7/remote-harness-mcp](https://github.com/LevRa7/remote-harness-mcp))
 
-**Version:** 0.6.0 — release notes: [docs/releases/v0.6.0.md](docs/releases/v0.6.0.md) (upstream Windows `*-Setup-*.exe` installers are not published by this fork; it ships a bootable Debian 13 ISO).
+**Version:** 0.7.0 — release notes: [docs/releases/v0.7.0.md](docs/releases/v0.7.0.md).
 
 ---
 
@@ -251,5 +251,7 @@ LiveUSBAgent-mcp is designed to be transparent about both its power and its buil
 ## Additional Documentation
 
 - **LiveUSB ISO build & QEMU testing guide:** [ops/live-usb/README.md](ops/live-usb/README.md)
+- **LiveUSB build, write and boot guide:** [docs/liveusb/README.md](docs/liveusb/README.md)
+- **LiveUSB troubleshooting (no Wi-Fi, no tunnel, I/O errors, RAM OOM):** [docs/liveusb/TROUBLESHOOTING.md](docs/liveusb/TROUBLESHOOTING.md)
 - **Russian README:** [README_RU.md](README_RU.md)
 - **Architecture & development roadmap:** [ProjectPlan.md](ProjectPlan.md)

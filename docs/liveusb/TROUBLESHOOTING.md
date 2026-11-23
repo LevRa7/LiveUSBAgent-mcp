@@ -19,11 +19,12 @@ Useful entry points:
 > report.
 
 > **Local shell escape.** The ready view has **«Открыть терминал»**
-> (`POST /api/terminal`), which opens `bash` in the kiosk's X session; the
-> `tty2` dashboard offers the same as `[S] Shell (bash)`. Both run as `root`
-> (tty1/tty2 autologin) on the machine you booted, and the kiosk control answers
-> `503` when there is no `DISPLAY` or no terminal emulator. Do not leave an
-> unattended LiveUSB at a location where someone else can reach the keyboard.
+> (`POST /api/terminal`), which launches `xterm` running `bash` on the local X
+> display (`:0`). The image ships `xterm`, and `start-kiosk.sh` exports the
+> display to the kiosk server, so the button works on a stock boot; if it
+> reports unavailable (`503`), use `Ctrl+Alt+F2` → `[S] Shell (bash)` on the
+> console dashboard instead. Both run as `root` (tty1/tty2 autologin) on the
+> machine you booted: do not leave an unattended LiveUSB within keyboard reach.
 
 ---
 

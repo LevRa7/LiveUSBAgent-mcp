@@ -983,13 +983,20 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
     def _handle_terminal(self) -> None:
         """Open the local terminal escape advertised by the kiosk UI.
 
-        The request body is optional and ignored; the answer is 200 when a
-        terminal was spawned and 503 with a Russian explanation otherwise.
+        The request body is optional and ignored; a malformed JSON body is
+        refused with 400 before anything is spawned. A successful launch is
+        200, and 503 with a Russian explanation is returned otherwise.
         """
         try:
-            self._read_json_body()
+            _body, err = self._read_json_body()
         except Exception:
-            pass
+            _body, err = None, "Некорректный JSON"
+        if err is not None:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"ok": False, "message": err or "Некорректный JSON"},
+            )
+            return
         try:
             result = launch_local_terminal()
         except Exception as exc:  # defence in depth: the helper should not raise

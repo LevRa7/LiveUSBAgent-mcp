@@ -414,6 +414,30 @@ def test_http_api_terminal_success_returns_200(running_server, monkeypatch):
     assert data["pid"] == 777
 
 
+def test_http_api_terminal_rejects_malformed_json_without_spawning(
+    running_server, monkeypatch
+):
+    spawns: List[int] = []
+
+    def fake_launch():
+        spawns.append(1)
+        return {"ok": True, "command": ["/usr/bin/xterm", "-e", "bash"], "pid": 1}
+
+    monkeypatch.setattr(kiosk, "launch_local_terminal", fake_launch)
+    status, _, body = _http_request(
+        running_server["base_url"],
+        "/api/terminal",
+        method="POST",
+        extra_headers={"Content-Type": "application/json"},
+        raw_body=b"{not valid json",
+    )
+    assert status == 400
+    data = json.loads(body.decode("utf-8"))
+    assert data["ok"] is False
+    assert "JSON" in data["message"]
+    assert spawns == []
+
+
 def test_http_api_qr_svg_real_and_fallback(running_server):
     base = running_server["base_url"]
     mock_state = running_server["mock_state"]

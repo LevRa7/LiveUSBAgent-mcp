@@ -93,7 +93,16 @@ if [[ "${1:-}" == "--inner-browser" ]]; then
     exit 0
 fi
 
-# 1. Start localhost kiosk HTTP server
+# 1. Start localhost kiosk HTTP server.
+# The kiosk X session is :0. Export DISPLAY before the server starts so
+# kiosk_server.py inherits it and «Открыть терминал» (POST /api/terminal) can
+# spawn xterm on the local display. X11_WAS_RUNNING keeps the branch below on
+# the pre-export value, so a fresh boot still goes through xinit as before.
+X11_WAS_RUNNING=""
+if [[ -n "${DISPLAY:-}" ]]; then
+    X11_WAS_RUNNING="1"
+fi
+export DISPLAY="${DISPLAY:-:0}"
 python3 "${SCRIPT_DIR}/kiosk_server.py" --host "${KIOSK_HOST}" --port "${KIOSK_PORT}" &
 SERVER_PID=$!
 
@@ -110,7 +119,7 @@ if [[ -z "${BROWSER_BIN}" ]]; then
 fi
 
 # 3. Launch under existing X11 session or start xinit + openbox
-if [[ -n "${DISPLAY:-}" ]]; then
+if [[ -n "${X11_WAS_RUNNING}" ]]; then
     if command -v openbox >/dev/null 2>&1; then
         openbox &
     fi

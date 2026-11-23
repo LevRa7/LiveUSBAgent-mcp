@@ -135,6 +135,7 @@ check_assets() {
         gddrescue
         apfs-dkms
         chromium
+        xterm
         memtest86+
     )
     local -a unit_tokens=(
@@ -401,6 +402,7 @@ xserver-xorg-input-all
 x11-xserver-utils
 xinit
 openbox
+xterm
 chromium
 fonts-dejavu-core
 qrencode

@@ -129,8 +129,11 @@ ops/live-usb/test-qemu.sh --headless --create-fs-disks
 
 What a good boot looks like: GRUB shows the `toram`, `Low RAM` and
 `Memtest86+` entries; `tty1` reaches the kiosk screen; `Ctrl+Alt+F2` gives the
-console dashboard; a `rescue_info` call returns real disks. The QEMU stdout is
-logged to `qemu-boot-*.log` in the current directory.
+console dashboard; a `rescue_info` call returns real disks. On the kiosk ready
+view, «Открыть терминал» launches `xterm` on the local X display (`:0`, shipped
+with the image); if it reports unavailable, the console fallback is
+`Ctrl+Alt+F2` → `[S] Shell`. The QEMU stdout is logged to `qemu-boot-*.log` in
+the current directory.
 
 ## 6. CI
 

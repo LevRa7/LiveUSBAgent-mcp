@@ -33,6 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 LIVEUSB_DIR = REPO_ROOT / "ops" / "live-usb"
 BUILD_ISO_SH = LIVEUSB_DIR / "build-iso.sh"
 TEST_QEMU_SH = LIVEUSB_DIR / "test-qemu.sh"
+START_KIOSK_SH = LIVEUSB_DIR / "start-kiosk.sh"
 KIOSK_SERVER_PY = LIVEUSB_DIR / "kiosk_server.py"
 KIOSK_UI_DIR = LIVEUSB_DIR / "kiosk_ui"
 
@@ -226,6 +227,32 @@ def test_build_iso_contract_journald_grub_and_udev_rules() -> None:
 
     # Chroot build hook wired up
     assert "0100-build-apfs-and-drivers.hook.chroot" in text
+
+
+def test_build_iso_ships_xterm_and_kiosk_server_inherits_display() -> None:
+    """The kiosk terminal button needs an emulator package and a usable DISPLAY."""
+    build_text = BUILD_ISO_SH.read_text(encoding="utf-8")
+    start_text = START_KIOSK_SH.read_text(encoding="utf-8")
+
+    # The generated package list (installed by live-build) must contain xterm.
+    package_heredoc = build_text.split(
+        "cat <<EOF > config/package-lists/rhm-rescue.list.chroot", 1
+    )[1].split("\nEOF\n", 1)[0]
+    packages = {line.strip() for line in package_heredoc.splitlines()}
+    assert "xterm" in packages, "the image must install xterm for «Открыть терминал»"
+
+    # …and --check must require it, so it cannot silently disappear again.
+    check_block = build_text.split("local -a required_packages=(", 1)[1].split(")", 1)[0]
+    assert "xterm" in check_block.split(), "build-iso.sh --check must verify package: xterm"
+
+    # start-kiosk.sh must export DISPLAY (:0 fallback) before starting the server,
+    # because the server spawns xterm for POST /api/terminal.
+    export_line = 'export DISPLAY="${DISPLAY:-:0}"'
+    assert export_line in start_text
+    export_at = start_text.index(export_line)
+    server_at = start_text.index('python3 "${SCRIPT_DIR}/kiosk_server.py"')
+    assert export_at < server_at, "DISPLAY must be exported before kiosk_server.py starts"
+    assert "kiosk X session is :0" in start_text
 
 
 def test_build_iso_check_passes_and_does_not_create_work_dir(tmp_path: Path) -> None:

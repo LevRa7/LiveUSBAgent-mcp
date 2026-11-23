@@ -1411,13 +1411,18 @@ def _detect_fstype(device: str, timeout: int = 5) -> str:
     return ""
 
 
-def _mount_io_guard(device: str, args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Refuse a mount when the kernel is already logging I/O errors for the target.
+def _mount_io_guard(
+    device: str,
+    args: Dict[str, Any],
+    pool_name: str = "",
+) -> Optional[Dict[str, Any]]:
+    """Refuse a mount/import when the kernel is already logging I/O errors.
 
     ``collect_dmesg_io`` is best-effort: an unavailable collector (Windows host,
     no ``dmesg`` permission) never blocks a mount.  More than ten active errors
-    for the requested device is the threshold where the media should be cloned
-    first; ``force=true`` is the explicit operator override.
+    is the threshold where the media should be cloned first; ``force=true`` is
+    the explicit operator override.  A device-less ZFS import reports a
+    pool-oriented message instead of an empty device name.
     """
     if _IS_WINDOWS:
         return None
@@ -1430,9 +1435,15 @@ def _mount_io_guard(device: str, args: Dict[str, Any]) -> Optional[Dict[str, Any
     except (TypeError, ValueError):
         count = 0
     if count > 10 and args.get("force") is not True:
+        if device:
+            target = f"mount {device}"
+        elif pool_name:
+            target = f"import pool {pool_name}"
+        else:
+            target = "import zpools"
         return {
             "error": (
-                f"refusing to mount {device}: {count} active kernel I/O errors; "
+                f"refusing to {target}: {count} active kernel I/O errors; "
                 "pass force=true to override"
             )
         }
@@ -1476,10 +1487,13 @@ def _plan_or_run_mount_auto(args: Dict[str, Any], dry_run: bool) -> Dict[str, An
     planned_steps: Optional[List[List[str]]] = None
     extra: Dict[str, Any] = {}
 
-    if _valid_dev_path(device):
-        io_guard = _mount_io_guard(device, args)
-        if io_guard is not None:
-            return io_guard
+    io_guard = _mount_io_guard(
+        device if _valid_dev_path(device) else "",
+        args,
+        pool_name=pool_name,
+    )
+    if io_guard is not None:
+        return io_guard
 
     if fstype == "exfat":
         opts = "rw,noatime" if writable else "ro"
@@ -1783,8 +1797,8 @@ def plan_or_run_rescue_action(args: Dict[str, Any]) -> Dict[str, Any]:
                     "/mnt/rescue/ or /mnt/scratch/ without '..' traversal."
                 )
             }
-        lazy = bool(args.get("lazy", False))
-        force_umount = bool(args.get("force", False))
+        lazy = args.get("lazy") is True
+        force_umount = args.get("force") is True
         argv = ["umount"]
         if lazy:
             argv.append("-l")
@@ -2066,6 +2080,7 @@ def plan_or_run_rescue_action(args: Dict[str, Any]) -> Dict[str, Any]:
                 "action": action,
                 "dry_run": False,
                 "executed": False,
+                "stage": "preflight",
                 "error": (
                     f"could not create mountpoints under {mountpoint}: "
                     f"{type(exc).__name__}: {exc}"

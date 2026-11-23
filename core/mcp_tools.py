@@ -512,9 +512,10 @@ _READ_ONLY_ALLOWED = frozenset({
     # command and touches no project file, so recording it stays available in
     # read-only mode (that is exactly when a goal is worth writing down).
     "goal",
-    # Live USB / rescue (parallel workstream): inspection stays available in
-    # read-only mode; rescue_action is intentionally NOT here and is refused
-    # centrally until its own dry-run/confirmation gate is wired.
+    # Live USB / rescue: inspection stays available in read-only mode;
+    # rescue_action is intentionally NOT here. Every recovery action mutates a
+    # disk, a guest OS or a SAM hive, so the central guard below refuses it with
+    # READ_ONLY_ERROR before it ever reaches core/rescue.
     "rescue_info",
     "list_skills",
     "load_skill",

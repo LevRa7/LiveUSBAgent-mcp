@@ -503,6 +503,65 @@ def test_mcp_tools_registers_and_dispatches_rescue_tools_on_live_usb(
     assert action_res["argv"] == ["memtester", "128M", "1"]
 
 
+@pytest.mark.parametrize(
+    "action_args",
+    [
+        {"action": "mount_safe", "device": "/dev/sda1", "dry_run": False},
+        {"action": "umount", "mountpoint": "/mnt/rescue/sda1", "dry_run": False},
+        {"action": "fsck_check", "device": "/dev/sda1", "fstype": "ext4", "dry_run": False},
+        {
+            "action": "chroot_exec",
+            "mountpoint": "/mnt/rescue/root",
+            "chroot_cmd": "true",
+            "dry_run": False,
+        },
+        {
+            "action": "grub_repair",
+            "device": "/dev/sda2",
+            "efi_partition": "/dev/sda1",
+            "dry_run": False,
+        },
+        {
+            "action": "win_sam_reset",
+            "mountpoint": "/mnt/rescue/win_c",
+            "sam_user": "alice",
+            "dry_run": False,
+        },
+    ],
+    ids=["mount_safe", "umount", "fsck_check", "chroot_exec", "grub_repair", "win_sam_reset"],
+)
+def test_read_only_refuses_every_rescue_action_before_execution(
+    monkeypatch, linux_rescue_env, restore_mcp_tools, action_args
+):
+    """MESH_READ_ONLY is the hard stop for every mutating recovery action.
+
+    ``rescue_action`` is not in ``_READ_ONLY_ALLOWED``, so the central guard and
+    the handler guard must both refuse it with the canonical READ_ONLY_ERROR and
+    nothing may reach ``rescue._run_cmd`` -- even with ``dry_run=false``.
+    """
+    monkeypatch.setenv("MESH_SCENARIO", "live_usb")
+    mcp_tools.sync_scenario_tools()
+    monkeypatch.setattr(mcp_tools, "_read_only_active", lambda: True)
+    monkeypatch.setattr(mcp_tools.control, "paused", lambda: False)
+    linux_rescue_env.setattr(
+        rescue, "_run_cmd", lambda *a, **k: pytest.fail("a read-only node ran a recovery command")
+    )
+
+    handler_res = mcp_tools._tool_rescue_action(dict(action_args))
+    assert handler_res["error"] == mcp_tools.READ_ONLY_ERROR
+
+    dispatch_res = mcp_tools.call_tool("rescue_action", dict(action_args))
+    assert dispatch_res["error"] == mcp_tools.READ_ONLY_ERROR
+
+    # Observation stays available in the same mode.
+    linux_rescue_env.setattr(rescue, "_read_file_text", lambda p: "\text4\n")
+    linux_rescue_env.setattr(rescue, "_which", lambda name: "/sbin/e2fsck" if name == "e2fsck" else None)
+    info_res = mcp_tools.call_tool("rescue_info", {"section": "filesystems"})
+    assert "error" not in info_res
+    assert info_res["available"] is True
+    assert "e2fsprogs" in info_res["supported"]
+
+
 # ---------------------------------------------------------------------------
 # 7. Volatile mount detection, mountpoint validation, BitLocker step 2, uplink lock
 # ---------------------------------------------------------------------------
@@ -1557,6 +1616,19 @@ def test_umount_dry_run_resolves_mountpoint_and_flags(linux_rescue_env):
     assert derived["mountpoint"] == "/mnt/rescue/sda2"
     assert derived["argv"] == ["umount", "/mnt/rescue/sda2"]
 
+    # Only a real boolean may select -l/-f: the string "false" must never force.
+    strict = rescue.plan_or_run_rescue_action(
+        {
+            "action": "umount",
+            "mountpoint": "/mnt/rescue/sda3",
+            "lazy": "true",
+            "force": "false",
+        }
+    )
+    assert strict["lazy"] is False
+    assert strict["force"] is False
+    assert strict["argv"] == ["umount", "/mnt/rescue/sda3"]
+
 
 def test_umount_execute_runs_with_timeout_and_returns_output(linux_rescue_env):
     calls: List[Tuple[List[str], int]] = []
@@ -2034,6 +2106,25 @@ def test_grub_repair_reports_unmount_failures_without_masking_the_exit_code(linu
     assert all(step["exit_code"] == 32 for step in cleanup)
 
 
+def test_grub_repair_preflight_failure_is_explicit_and_runs_nothing(linux_rescue_env):
+    def refusing_makedirs(path, **kwargs):
+        raise PermissionError("read-only filesystem")
+
+    linux_rescue_env.setattr(os, "makedirs", refusing_makedirs)
+    linux_rescue_env.setattr(
+        rescue, "_run_cmd", lambda *a, **k: pytest.fail("no step may run after a preflight failure")
+    )
+
+    res = rescue.plan_or_run_rescue_action(_grub_args(dry_run=False))
+
+    assert res["executed"] is False
+    assert res["dry_run"] is False
+    assert res["stage"] == "preflight"
+    assert "could not create mountpoints" in res["error"]
+    assert "PermissionError" in res["error"]
+    assert "step_results" not in res
+
+
 def test_grub_repair_never_reports_dry_run_false_without_executing(monkeypatch):
     monkeypatch.setattr(rescue, "_IS_WINDOWS", True)
     monkeypatch.setattr(
@@ -2090,6 +2181,40 @@ def test_mount_auto_refuses_after_active_kernel_io_errors(linux_rescue_env):
         "ro,noload",
         "/dev/sda1",
         "/mnt/rescue/sda1",
+    ]
+
+
+def test_mount_auto_zfs_import_is_guarded_by_kernel_io_errors(linux_rescue_env):
+    linux_rescue_env.setattr(
+        rescue, "_run_cmd", lambda argv, timeout=4: (0, _dmesg_io_errors(11), "")
+    )
+
+    res = rescue.plan_or_run_rescue_action(
+        {"action": "mount_auto", "fstype": "zfs", "pool_name": "rpool", "mountpoint": "/mnt/rescue/rpool"}
+    )
+    assert res["error"].startswith("refusing to import pool rpool:")
+    assert "11 active kernel I/O errors" in res["error"]
+    assert "force=true" in res["error"]
+
+    forced = rescue.plan_or_run_rescue_action(
+        {
+            "action": "mount_auto",
+            "fstype": "zfs",
+            "pool_name": "rpool",
+            "mountpoint": "/mnt/rescue/rpool",
+            "force": True,
+        }
+    )
+    assert "error" not in forced
+    assert forced["argv"] == [
+        "zpool",
+        "import",
+        "-f",
+        "-o",
+        "readonly=on",
+        "-R",
+        "/mnt/rescue/rpool",
+        "rpool",
     ]
 
 

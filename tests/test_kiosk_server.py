@@ -387,6 +387,33 @@ def test_http_api_session_regenerate(running_server):
     assert (state_dir / "regenerate.trigger").is_file()
 
 
+def test_http_api_terminal_unavailable_returns_503(running_server, monkeypatch):
+    monkeypatch.delenv("DISPLAY", raising=False)
+    status, _, body = _http_request(
+        running_server["base_url"], "/api/terminal", method="POST", payload={}
+    )
+    assert status == 503
+    data = json.loads(body.decode("utf-8"))
+    assert data["ok"] is False
+    assert "Терминал" in data["message"]
+
+
+def test_http_api_terminal_success_returns_200(running_server, monkeypatch):
+    monkeypatch.setattr(
+        kiosk,
+        "launch_local_terminal",
+        lambda: {"ok": True, "command": ["/usr/bin/xterm", "-e", "bash"], "pid": 777},
+    )
+    status, _, body = _http_request(
+        running_server["base_url"], "/api/terminal", method="POST", payload={}
+    )
+    assert status == 200
+    data = json.loads(body.decode("utf-8"))
+    assert data["ok"] is True
+    assert data["command"] == ["/usr/bin/xterm", "-e", "bash"]
+    assert data["pid"] == 777
+
+
 def test_http_api_qr_svg_real_and_fallback(running_server):
     base = running_server["base_url"]
     mock_state = running_server["mock_state"]
@@ -515,6 +542,81 @@ def test_trigger_session_regenerate_fallback_register_ephemeral_node(tmp_path: P
     assert reg_calls == [("https://smart-server.online", str(state_dir))]
 
 
+# --- 3b. Kiosk «Открыть терминал» local shell escape ---
+
+
+def test_launch_local_terminal_without_display_is_unavailable(monkeypatch):
+    monkeypatch.delenv("DISPLAY", raising=False)
+
+    def must_not_spawn(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("Popen must not be called without DISPLAY")
+
+    result = kiosk.launch_local_terminal(popen=must_not_spawn)
+    assert result["ok"] is False
+    assert "DISPLAY" in result["message"]
+
+
+def test_launch_local_terminal_spawns_first_available_emulator(monkeypatch):
+    monkeypatch.setenv("DISPLAY", ":0")
+    # Only xterm is installed: x-terminal-emulator/lxterminal/gnome-terminal are not.
+    monkeypatch.setattr(
+        kiosk.shutil,
+        "which",
+        lambda name: "/usr/bin/xterm" if name == "xterm" else None,
+    )
+
+    captured: Dict[str, Any] = {}
+
+    class FakePopen:
+        pid = 4321
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["kwargs"] = dict(kwargs)
+        return FakePopen()
+
+    result = kiosk.launch_local_terminal(popen=fake_popen)
+
+    assert result["ok"] is True
+    assert result["command"] == ["/usr/bin/xterm", "-e", "bash"]
+    assert result["pid"] == 4321
+    assert captured["cmd"] == ["/usr/bin/xterm", "-e", "bash"]
+    assert "shell" not in captured["kwargs"]
+    assert captured["kwargs"]["cwd"] == "/"
+    assert captured["kwargs"]["start_new_session"] is True
+    assert captured["kwargs"]["stdout"] is kiosk.subprocess.DEVNULL
+    assert captured["kwargs"]["stderr"] is kiosk.subprocess.DEVNULL
+    assert captured["kwargs"]["env"]["DISPLAY"] == ":0"
+
+
+def test_launch_local_terminal_without_emulator_is_unavailable(monkeypatch):
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr(kiosk.shutil, "which", lambda name: None)
+
+    def must_not_spawn(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("Popen must not be called without an emulator")
+
+    result = kiosk.launch_local_terminal(popen=must_not_spawn)
+    assert result["ok"] is False
+    assert "эмулятор" in result["message"]
+
+
+def test_launch_local_terminal_popen_failure_is_reported_not_raised(monkeypatch):
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr(
+        kiosk.shutil,
+        "which",
+        lambda name: "/usr/bin/xterm" if name == "xterm" else None,
+    )
+
+    def broken_popen(cmd, **kwargs):
+        raise OSError("cannot open display")
+
+    result = kiosk.launch_local_terminal(popen=broken_popen)
+    assert result["ok"] is False
+    assert "cannot open display" in result["message"]
+
+
 def test_firstboot_tui_renders_session_json(tmp_path: Path):
     tui_path = REPO_ROOT / "ops" / "live-usb" / "firstboot_tui.py"
     spec = importlib.util.spec_from_file_location("rhm_firstboot_tui_test", str(tui_path))
@@ -597,6 +699,22 @@ def test_unslop_ui_surface_regex_audit():
         "Клавиатура",
     ):
         assert required_text in html_text, f"Missing required Russian label: {required_text}"
+
+
+def test_kiosk_ui_exposes_open_terminal_control():
+    html_text = (KIOSK_UI_DIR / "index.html").read_text(encoding="utf-8")
+    js_text = (KIOSK_UI_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="btn-terminal"' in html_text
+    assert "Открыть терминал" in html_text
+    # The ready-view control sits next to the two existing head actions.
+    ready_head = html_text.split('id="btn-change-wifi"', 1)[1].split("</div>", 1)[0]
+    assert 'id="btn-terminal"' in ready_head
+    assert 'id="btn-new-token"' in ready_head
+
+    assert "btn-terminal" in js_text
+    assert "/api/terminal" in js_text
+    assert "openTerminal" in js_text
 
 
 def test_http_security_headers_and_host_origin_csrf_rejection(running_server):

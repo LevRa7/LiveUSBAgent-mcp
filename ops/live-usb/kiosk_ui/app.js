@@ -27,6 +27,7 @@
     btnRefreshWifi: document.getElementById("btn-refresh-wifi"),
     btnHiddenWifi: document.getElementById("btn-hidden-wifi"),
     btnChangeWifi: document.getElementById("btn-change-wifi"),
+    btnTerminal: document.getElementById("btn-terminal"),
     btnNewToken: document.getElementById("btn-new-token"),
     qrImage: document.getElementById("qr-image"),
     sessionUrl: document.getElementById("session-url"),
@@ -331,6 +332,26 @@
     }
   }
 
+  async function openTerminal() {
+    els.btnTerminal.disabled = true;
+    els.regenFeedback.classList.remove("is-hidden");
+    els.regenFeedback.textContent = "Открытие терминала...";
+    try {
+      const resp = await fetch("/api/terminal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const data = await resp.json();
+      els.regenFeedback.textContent = data.message || data.error ||
+        (data.ok ? "Терминал открыт" : "Не удалось открыть терминал");
+    } catch (_err) {
+      els.regenFeedback.textContent = "Не удалось открыть терминал";
+    } finally {
+      els.btnTerminal.disabled = false;
+    }
+  }
+
   const OSK_ROWS_LOWER = [
     ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "_"],
     ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
@@ -425,6 +446,7 @@
     setView("network", true);
   });
   els.btnNewToken.addEventListener("click", regenerateSession);
+  els.btnTerminal.addEventListener("click", openTerminal);
   els.btnModalClose.addEventListener("click", closeWifiModal);
   els.btnModalCancel.addEventListener("click", closeWifiModal);
   els.wifiForm.addEventListener("submit", submitWifiConnect);

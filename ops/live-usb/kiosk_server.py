@@ -36,6 +36,15 @@ _STATIC_DIR = Path(__file__).resolve().parent / "kiosk_ui"
 # Type alias for injectable command runner (makes unit testing deterministic).
 CommandRunner = Callable[[List[str], float], Tuple[int, str, str]]
 
+# Terminal emulators tried in order by launch_local_terminal(), with the flag
+# each one uses to pass a command line through to the shell it runs.
+TERMINAL_CANDIDATES: Tuple[Tuple[str, str], ...] = (
+    ("x-terminal-emulator", "-e"),
+    ("xterm", "-e"),
+    ("lxterminal", "-e"),
+    ("gnome-terminal", "--"),
+)
+
 
 def default_run_cmd(cmd: List[str], timeout: float = 5.0) -> Tuple[int, str, str]:
     """Run a subprocess safely without shell=True. Never raises."""
@@ -587,6 +596,46 @@ def trigger_session_regenerate(
     }
 
 
+def launch_local_terminal(
+    popen: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
+    """Open a local bash terminal on the kiosk display (no shell=True).
+
+    Returns ``{"ok": True, "command": [...], "pid": ...}`` on success and
+    ``{"ok": False, "message": "..."}`` when there is no graphical session, no
+    terminal emulator, or the spawn itself fails. Never raises.
+    """
+    if not os.environ.get("DISPLAY"):
+        return {
+            "ok": False,
+            "message": "Терминал недоступен: нет графической сессии (DISPLAY не задан)",
+        }
+
+    spawn = popen if popen is not None else subprocess.Popen
+    for name, flag in TERMINAL_CANDIDATES:
+        exe = shutil.which(name)
+        if not exe:
+            continue
+        cmd = [exe, flag, "bash"]
+        try:
+            proc = spawn(
+                cmd,
+                cwd="/",
+                env=os.environ.copy(),
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            return {"ok": False, "message": f"Не удалось запустить терминал: {exc}"}
+        return {"ok": True, "command": cmd, "pid": getattr(proc, "pid", None)}
+
+    return {
+        "ok": False,
+        "message": "Терминал недоступен: не найден эмулятор терминала",
+    }
+
+
 def render_qr_svg(
     connect_url: str,
     run_cmd: CommandRunner = default_run_cmd,
@@ -871,6 +920,9 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/session/regenerate":
                 self._handle_session_regenerate()
                 return
+            if path == "/api/terminal":
+                self._handle_terminal()
+                return
             self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Not found"})
         except Exception:
             self._send_json(
@@ -927,6 +979,31 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
             run_cmd=self.server.run_cmd,
         )
         self._send_json(HTTPStatus.OK, result)
+
+    def _handle_terminal(self) -> None:
+        """Open the local terminal escape advertised by the kiosk UI.
+
+        The request body is optional and ignored; the answer is 200 when a
+        terminal was spawned and 503 with a Russian explanation otherwise.
+        """
+        try:
+            self._read_json_body()
+        except Exception:
+            pass
+        try:
+            result = launch_local_terminal()
+        except Exception as exc:  # defence in depth: the helper should not raise
+            result = {"ok": False, "message": f"Не удалось открыть терминал: {exc}"}
+        if result.get("ok"):
+            self._send_json(HTTPStatus.OK, result)
+            return
+        self._send_json(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            {
+                "ok": False,
+                "message": result.get("message") or "Терминал недоступен",
+            },
+        )
 
     def _handle_qr_svg(self) -> None:
         session = read_session_state(self.server.state_dir)

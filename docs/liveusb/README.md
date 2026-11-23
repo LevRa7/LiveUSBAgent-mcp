@@ -28,7 +28,9 @@ sudo apt-get install -y \
 ```
 
 Check the checkout **before** spending 15–40 minutes on a build. This needs
-neither root nor `live-build`:
+neither root nor `live-build` — but it is not tool-free either: the
+`py_compile` checks need a working Python 3 on `PATH` (`python3`, `python` or
+`py`):
 
 ```bash
 bash ops/live-usb/build-iso.sh --check

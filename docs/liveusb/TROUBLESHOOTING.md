@@ -18,6 +18,13 @@ Useful entry points:
 > 24-hour root-equivalent key. Do not paste either file into a chat or a bug
 > report.
 
+> **Local shell escape.** The ready view has **«Открыть терминал»**
+> (`POST /api/terminal`), which opens `bash` in the kiosk's X session; the
+> `tty2` dashboard offers the same as `[S] Shell (bash)`. Both run as `root`
+> (tty1/tty2 autologin) on the machine you booted, and the kiosk control answers
+> `503` when there is no `DISPLAY` or no terminal emulator. Do not leave an
+> unattended LiveUSB at a location where someone else can reach the keyboard.
+
 ---
 
 ## No Wi-Fi
@@ -43,9 +50,9 @@ dmesg | grep -iE 'iwlwifi|ath|brcm|rtw|firmware' | tail -30
   names the file that is not in that list. Plug in Ethernet or a phone instead
   and the session still works.
 - **Unmanaged device:** `nmcli device set wlan0 managed yes`.
-- **Some older Broadcom/MacBook adapters** need `broadcom-sta-dkms`, which is
-  not preinstalled — use a USB Ethernet adapter or phone tethering for the
-  rescue session.
+- **Some older Broadcom/MacBook adapters** need `broadcom-sta-dkms`, installed
+  best-effort by the chroot hook; use Ethernet/tethering if the build could not
+  install it.
 - **Hidden network:** the kiosk has a `Скрытая сеть` (hidden SSID) control, so
   the network does not have to be broadcast.
 
@@ -83,7 +90,7 @@ says the node is offline, or the agent service keeps restarting.
 ```bash
 systemctl status rhm-live-agent
 journalctl -u rhm-live-agent -b --no-pager | tail -50
-cat /run/rhm-live/session.json            # connect_url, session_code, tunnel_status
+cat /run/rhm-live/session.json            # connect_url, session_code
 curl -sS -o /dev/null -w '%{http_code}\n' https://<your-gateway>/health
 getent hosts <your-gateway>
 ```

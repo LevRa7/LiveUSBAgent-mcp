@@ -228,6 +228,41 @@ def test_build_iso_contract_journald_grub_and_udev_rules() -> None:
     assert "0100-build-apfs-and-drivers.hook.chroot" in text
 
 
+def test_build_iso_check_passes_and_does_not_create_work_dir(tmp_path: Path) -> None:
+    """Pin `build-iso.sh --check`: exit 0, a PASS summary, no WORK_DIR side effect."""
+    try:
+        bash_exe = _find_bash()
+    except AssertionError as exc:  # pragma: no cover - environments without bash
+        pytest.skip(str(exc))
+
+    work_dir = tmp_path / "rhm-live-build-should-not-exist"
+    proc = subprocess.run(
+        [
+            bash_exe,
+            str(BUILD_ISO_SH),
+            "--check",
+            "--work-dir",
+            str(work_dir),
+        ],
+        cwd=str(REPO_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=False,
+    )
+
+    assert proc.returncode == 0, (
+        f"build-iso.sh --check failed (rc={proc.returncode}):\n"
+        f"STDOUT: {proc.stdout}\nSTDERR: {proc.stderr}"
+    )
+    assert "PASS" in proc.stdout
+    assert "asset checks passed" in proc.stdout
+    assert not work_dir.exists(), "build-iso.sh --check must not touch --work-dir"
+
+
 # ---------------------------------------------------------------------------
 # 4. `ops/live-usb/test-qemu.sh --dry-run` execution tests (UEFI & BIOS)
 # ---------------------------------------------------------------------------

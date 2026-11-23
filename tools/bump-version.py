@@ -1,6 +1,6 @@
 """Bump the release version in every place the repository declares it.
 
-Run from anywhere: ``python tools/bump-version.py 0.6.0``. Without an argument
+Run from anywhere: ``python tools/bump-version.py 0.7.0``. Without an argument
 it keeps the current ``core/version.py`` value, which is only useful to
 re-derive the other files. tests/test_version_single_source.py is the gate.
 """

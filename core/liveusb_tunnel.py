@@ -75,12 +75,17 @@ def cloudflared_asset_name(
     sys_name = (system or platform.system() or "linux").strip().lower()
     arch = (machine or platform.machine() or "x86_64").strip().lower()
     is_arm64 = arch in ("aarch64", "arm64")
+    is_x86 = arch in ("i386", "i486", "i586", "i686", "x86", "386")
 
     if sys_name.startswith("win"):
-        return "cloudflared-windows-amd64.exe"
+        return "cloudflared-windows-386.exe" if is_x86 else "cloudflared-windows-amd64.exe"
     if sys_name == "darwin":
         return "cloudflared-darwin-arm64.tgz" if is_arm64 else "cloudflared-darwin-amd64.tgz"
-    return "cloudflared-linux-arm64" if is_arm64 else "cloudflared-linux-amd64"
+    if is_arm64:
+        return "cloudflared-linux-arm64"
+    if is_x86:
+        return "cloudflared-linux-386"
+    return "cloudflared-linux-amd64"
 
 
 def cloudflared_download_url(

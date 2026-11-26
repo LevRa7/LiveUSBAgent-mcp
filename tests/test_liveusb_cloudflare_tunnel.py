@@ -32,7 +32,9 @@ def test_parse_trycloudflare_url_ignores_api_subdomain():
 def test_cloudflared_asset_names():
     assert liveusb_tunnel.cloudflared_asset_name("Linux", "x86_64") == "cloudflared-linux-amd64"
     assert liveusb_tunnel.cloudflared_asset_name("Linux", "aarch64") == "cloudflared-linux-arm64"
+    assert liveusb_tunnel.cloudflared_asset_name("Linux", "i686") == "cloudflared-linux-386"
     assert liveusb_tunnel.cloudflared_asset_name("Windows", "AMD64") == "cloudflared-windows-amd64.exe"
+    assert liveusb_tunnel.cloudflared_asset_name("Windows", "x86") == "cloudflared-windows-386.exe"
     assert liveusb_tunnel.cloudflared_asset_name("Darwin", "arm64") == "cloudflared-darwin-arm64.tgz"
 
 

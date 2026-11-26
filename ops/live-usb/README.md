@@ -18,6 +18,24 @@ sudo apt-get install -y \
   curl jq git ca-certificates
 ```
 
+### Профили размера (`--profile`) и архитектуры (`--arch`)
+
+`build-iso.sh` поддерживает 3 профиля размера и 3 архитектуры:
+
+```bash
+# Компактный GUI (~750-950 МБ, лёгкий WebKit-киоск surf без Chromium/LXDE)
+sudo ops/live-usb/build-iso.sh --arch amd64 --profile compact --build
+
+# Минимальный TUI (~450-600 МБ, без X11, консольный firstboot_tui.py + QR + nmtui)
+sudo ops/live-usb/build-iso.sh --arch amd64 --profile lite --build
+
+# ARM64 (UEFI, cloudflared-linux-arm64)
+sudo ops/live-usb/build-iso.sh --arch arm64 --profile compact --build
+
+# 32-bit x86 (автоматически выбирает Debian 12 bookworm + 686-pae + cloudflared-linux-386 + lite)
+sudo ops/live-usb/build-iso.sh --arch i386 --build
+```
+
 ### Базовая сборка (без внешних скиллов)
 
 Флаг `--build` запускает `lb build` сразу после подготовки конфигурации `live-build`:

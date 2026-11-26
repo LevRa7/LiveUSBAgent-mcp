@@ -7,8 +7,9 @@
 #
 # Options:
 #   --work-dir PATH          live-build working directory (default: ${WORK_DIR:-/tmp/rhm-live-build})
-#   --distro NAME            Debian suite (default: ${DISTRO:-trixie})
-#   --arch ARCH              Target architecture (default: ${ARCH:-amd64})
+#   --distro NAME            Debian suite (default: trixie for amd64/arm64, bookworm for i386)
+#   --arch ARCH              Target architecture: amd64|x64, arm64|aarch64, i386|x86 (default: amd64)
+#   --profile MODE           Image profile: full (~1.7GB), compact (~850MB GUI), lite (~500MB TUI)
 #   --tunnel MODE            Tunnel mode: cloudflare (default) or gateway
 #   --gateway HOST           Optional mesh gateway domain (used only when --tunnel gateway)
 #   --with-external-skills   Run ops/live-usb/fetch-skills.sh before copying skills/
@@ -22,8 +23,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 WORK_DIR="${WORK_DIR:-/tmp/rhm-live-build}"
-DISTRO="${DISTRO:-trixie}"
+DISTRO="${DISTRO:-}"
+DISTRO_EXPLICIT="0"
 ARCH="${ARCH:-amd64}"
+PROFILE="${PROFILE:-}"
 MESH_LIVE_TUNNEL="${MESH_LIVE_TUNNEL:-cloudflare}"
 MESH_GATEWAY="${MESH_GATEWAY:-}"
 WITH_EXTERNAL_SKILLS="0"
@@ -316,10 +319,15 @@ while [[ $# -gt 0 ]]; do
             ;;
         --distro)
             DISTRO="$2"
+            DISTRO_EXPLICIT="1"
             shift 2
             ;;
         --arch)
             ARCH="$2"
+            shift 2
+            ;;
+        --profile)
+            PROFILE="$2"
             shift 2
             ;;
         --tunnel)
@@ -354,6 +362,47 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Normalize architecture aliases (x64->amd64, x86->i386, aarch64->arm64)
+case "${ARCH}" in
+    amd64|x64|x86_64) ARCH="amd64" ;;
+    arm64|aarch64)    ARCH="arm64" ;;
+    i386|x86|i686|386) ARCH="i386" ;;
+    *)
+        echo "ERROR: Unsupported --arch '${ARCH}'. Supported: amd64 (x64), arm64, i386 (x86)." >&2
+        exit 2
+        ;;
+esac
+
+# Resolve default distro per arch: Debian 13 (trixie) dropped the official i386 kernel,
+# so 32-bit x86 builds automatically use Debian 12 (bookworm) with 686-pae.
+if [[ -z "${DISTRO}" ]]; then
+    if [[ "${ARCH}" == "i386" ]]; then
+        DISTRO="bookworm"
+    else
+        DISTRO="trixie"
+    fi
+fi
+if [[ "${ARCH}" == "i386" && "${DISTRO}" == "trixie" ]]; then
+    echo "ERROR: Debian 13 (trixie) has no official i386 kernel. Use --distro bookworm --arch i386." >&2
+    exit 2
+fi
+
+# Resolve default profile: full for 64-bit, lite (TUI) for 32-bit i386.
+if [[ -z "${PROFILE}" ]]; then
+    if [[ "${ARCH}" == "i386" ]]; then
+        PROFILE="lite"
+    else
+        PROFILE="full"
+    fi
+fi
+case "${PROFILE}" in
+    full|compact|lite) ;;
+    *)
+        echo "ERROR: Unsupported --profile '${PROFILE}'. Supported: full, compact, lite." >&2
+        exit 2
+        ;;
+esac
+
 if [[ "${RUN_CHECK}" == "1" ]]; then
     # Validate before touching WORK_DIR or calling lb: a broken checkout must
     # fail here, on a developer machine, and not halfway through a build.
@@ -363,21 +412,33 @@ if [[ "${RUN_CHECK}" == "1" ]]; then
     exit 1
 fi
 
-echo "[1/7] Preparing Debian ${DISTRO} (${ARCH}) live-build workspace at ${WORK_DIR}..."
+echo "[1/7] Preparing Debian ${DISTRO} (${ARCH}, profile=${PROFILE}) live-build workspace at ${WORK_DIR}..."
 mkdir -p "${WORK_DIR}"
 cd "${WORK_DIR}"
+
+LB_BOOTLOADERS="grub-pc,grub-efi"
+LB_MEMTEST="memtest86+"
+LB_EXTRA_ARGS=()
+if [[ "${ARCH}" == "arm64" ]]; then
+    LB_BOOTLOADERS="grub-efi"
+    LB_MEMTEST="none"
+elif [[ "${ARCH}" == "i386" ]]; then
+    LB_BOOTLOADERS="grub-pc"
+    LB_EXTRA_ARGS+=(--linux-flavours "686-pae")
+fi
 
 lb config \
     --distribution "${DISTRO}" \
     --architectures "${ARCH}" \
     --archive-areas "main contrib non-free non-free-firmware" \
     --binary-images iso-hybrid \
-    --bootloaders "grub-pc,grub-efi" \
+    --bootloaders "${LB_BOOTLOADERS}" \
     --bootappend-live "boot=live components quiet toram MESH_SCENARIO=live_usb" \
     --debian-installer false \
     --iso-application "Remote-Harness LiveUSB Rescue" \
     --iso-volume "RHM_RESCUE" \
-    --memtest memtest86+
+    --memtest "${LB_MEMTEST}" \
+    ${LB_EXTRA_ARGS[@]+"${LB_EXTRA_ARGS[@]}"}
 
 echo "[2/7] Writing complete package list (config/package-lists/rhm-rescue.list.chroot)..."
 mkdir -p config/package-lists
@@ -566,6 +627,47 @@ ppp
 openvpn
 network-manager-openvpn
 EOF
+
+# Apply architecture and profile filtering to config/package-lists/rhm-rescue.list.chroot
+PKG_LIST="config/package-lists/rhm-rescue.list.chroot"
+drop_pkg() {
+    local pkg="$1"
+    sed -i -E "/^[[:space:]]*${pkg}[[:space:]]*$/d" "${PKG_LIST}"
+}
+if [[ "${ARCH}" == "arm64" ]]; then
+    for p in grub-pc-bin memtest86+ intel-microcode amd64-microcode cpuid msr-tools; do
+        drop_pkg "${p}"
+    done
+elif [[ "${ARCH}" == "i386" ]]; then
+    sed -i "s/^linux-headers-i386$/linux-headers-686-pae/" "${PKG_LIST}"
+    for p in zfsutils-linux zfs-dkms grub-efi-i386-bin shim-signed systemd-boot-efi chromium; do
+        drop_pkg "${p}"
+    done
+fi
+if [[ "${PROFILE}" == "compact" ]]; then
+    for p in chromium lxde xfe pcmanfm mousepad xserver-xorg-video-all \
+             firmware-linux-nonfree firmware-misc-nonfree firmware-qcom-soc \
+             firmware-marvell-prestera firmware-ti-connectivity; do
+        drop_pkg "${p}"
+    done
+    {
+        echo "surf"
+        echo "xserver-xorg-video-fbdev"
+        if [[ "${ARCH}" != "arm64" ]]; then
+            echo "xserver-xorg-video-vesa"
+        fi
+    } >> "${PKG_LIST}"
+elif [[ "${PROFILE}" == "lite" ]]; then
+    for p in xserver-xorg-core xserver-xorg-video-all xserver-xorg-input-all \
+             x11-xserver-utils xinit openbox xterm xfe xdotool chromium lxde \
+             pcmanfm mousepad fonts-dejavu-core zfsutils-linux zfs-dkms \
+             firmware-linux-nonfree firmware-misc-nonfree firmware-qcom-soc \
+             firmware-marvell-prestera firmware-ti-connectivity; do
+        drop_pkg "${p}"
+    done
+fi
+mkdir -p config/includes.chroot/etc
+printf '%s\n' "${PROFILE}" > config/includes.chroot/etc/rhm-live-profile
 
 if [[ "${WITH_EXTERNAL_SKILLS}" == "1" ]]; then
     echo "[2b/7] Fetching external skills via ops/live-usb/fetch-skills.sh..."
@@ -782,7 +884,7 @@ menuentry "Memtest86+" {
 EOF
 
 echo "[7/7] LiveUSB ISO workspace configured at ${WORK_DIR}."
-echo "      Distro=${DISTRO} Arch=${ARCH} Tunnel=${MESH_LIVE_TUNNEL} Gateway=${MESH_GATEWAY:-none} ExternalSkills=${WITH_EXTERNAL_SKILLS}"
+echo "      Distro=${DISTRO} Arch=${ARCH} Profile=${PROFILE} Tunnel=${MESH_LIVE_TUNNEL} Gateway=${MESH_GATEWAY:-none} ExternalSkills=${WITH_EXTERNAL_SKILLS}"
 
 if [[ "${RUN_BUILD}" == "1" ]]; then
     echo "Starting 'lb build' in ${WORK_DIR}..."

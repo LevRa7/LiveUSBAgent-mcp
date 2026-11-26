@@ -412,8 +412,9 @@ EOF
 log "Installing cloudflared binary to /usr/local/bin/cloudflared..."
 CF_ARCH="$(dpkg --print-architecture 2>/dev/null || uname -m)"
 case "${CF_ARCH}" in
-    arm64|aarch64) CF_ASSET="cloudflared-linux-arm64" ;;
-    *)             CF_ASSET="cloudflared-linux-amd64" ;;
+    arm64|aarch64)  CF_ASSET="cloudflared-linux-arm64" ;;
+    i386|i686|386)  CF_ASSET="cloudflared-linux-386" ;;
+    *)              CF_ASSET="cloudflared-linux-amd64" ;;
 esac
 CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/${CF_ASSET}"
 if curl -fsSL --retry 3 --connect-timeout 15 "${CF_URL}" -o /usr/local/bin/cloudflared.tmp; then

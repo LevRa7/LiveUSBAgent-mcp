@@ -38,6 +38,8 @@ build_only=(
     cmake
     git
     linux-headers-amd64
+    linux-headers-arm64
+    linux-headers-686-pae
     libfuse3-dev
     libbz2-dev
     libattr1-dev
@@ -46,9 +48,17 @@ build_only=(
     libelf-dev
     pkg-config
 )
-log "Purging build-only packages: ${build_only[*]}"
-if ! DEBIAN_FRONTEND=noninteractive apt-get purge -y --auto-remove "${build_only[@]}"; then
-    warn "apt-get purge returned non-zero; image may still contain build dependencies."
+installed_build_only=()
+for pkg in "${build_only[@]}"; do
+    if dpkg-query -W -f='${Status}' "${pkg}" 2>/dev/null | grep -q "install ok installed"; then
+        installed_build_only+=("${pkg}")
+    fi
+done
+if [[ ${#installed_build_only[@]} -gt 0 ]]; then
+    log "Purging build-only packages: ${installed_build_only[*]}"
+    if ! DEBIAN_FRONTEND=noninteractive apt-get purge -y --auto-remove "${installed_build_only[@]}"; then
+        warn "apt-get purge returned non-zero; image may still contain build dependencies."
+    fi
 fi
 
 # 3. Drop kernel header trees that apt left behind because of a metapackage pin.
@@ -68,6 +78,27 @@ if [[ -x /usr/local/bin/apfs-fuse ]] && command -v ldd >/dev/null 2>&1; then
     fi
 fi
 
-# 5. Trim package caches and finish.
+# 5. For compact/lite profiles, trim docs, manpages, info, and unused locales (keep en/ru).
+LIVE_PROFILE="full"
+if [[ -f /etc/rhm-live-profile ]]; then
+    LIVE_PROFILE="$(tr -d '\r\n' < /etc/rhm-live-profile)"
+fi
+if [[ "${LIVE_PROFILE}" == "compact" || "${LIVE_PROFILE}" == "lite" ]]; then
+    log "Profile=${LIVE_PROFILE}: trimming /usr/share/doc, /usr/share/man, /usr/share/info, and non-en/ru locales..."
+    find /usr/share/doc -depth -type f ! -name copyright -delete 2>/dev/null || true
+    rm -rf /usr/share/man/* /usr/share/info/* /usr/share/lintian/* /usr/share/linda/* 2>/dev/null || true
+    if [[ -d /usr/share/locale ]]; then
+        for loc in /usr/share/locale/*; do
+            base="$(basename "${loc}")"
+            case "${base}" in
+                en|en_*|ru|ru_*|locale.alias) ;;
+                *) rm -rf "${loc}" 2>/dev/null || true ;;
+            esac
+        done
+    fi
+    rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+fi
+
+# 6. Trim package caches and finish.
 apt-get clean || true
-log "Build-dependency purge complete."
+log "Build-dependency purge complete (profile=${LIVE_PROFILE})."

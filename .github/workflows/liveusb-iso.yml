@@ -1,27 +1,39 @@
-# LiveUSB ISO checks and (optional) ISO build.
+# LiveUSB ISO checks and multi-arch ISO build (amd64 / arm64 / i386).
 #
-# Two jobs, on purpose:
-#
-# * `checks` runs on every pull request and costs a couple of minutes: it is the
-#   gate that keeps the LiveUSB layer honest (rescue/kiosk/bootstrap tests plus
-#   `build-iso.sh --check`, which validates the assets the image is built from
-#   without needing root or live-build).
-# * `iso` produces a real ISO in a `debian:trixie` container. It is deliberately
-#   NOT triggered by a pull request: a live-build run debootstraps a whole Debian
-#   system, compiles DKMS modules and downloads a few hundred megabytes, which is
-#   minutes-to-an-hour of runner time and a network dependency on Debian mirrors.
-#   It runs only on `workflow_dispatch` or a `v*` tag, and it is
-#   `continue-on-error`, so a flaky mirror or an upstream package change cannot
-#   turn into a red build for an unrelated change.
-#
-# This workflow does not touch releases: release.yml owns versioning, payloads and
-# installer assets. Here the ISO is only an artifact for manual testing.
+# * `checks` runs on every pull request: LiveUSB unit/contract tests (including
+#   Cloudflare Quick Tunnel) plus `build-iso.sh --check` across all 3 arches
+#   and profiles (full / compact / lite).
+# * `iso` builds real hybrid ISOs in Debian containers on `workflow_dispatch`
+#   or a `v*` tag push:
+#     - amd64 -> debian:trixie on ubuntu-24.04 (BIOS + UEFI)
+#     - arm64 -> debian:trixie on ubuntu-24.04-arm (UEFI, native ARM64 runner)
+#     - i386  -> debian:bookworm on ubuntu-24.04 (BIOS 686-pae, lite TUI)
+# * On `v*` tag pushes, built ISOs and SHA-256 checksums are attached to the
+#   matching GitHub Release automatically.
 
 name: LiveUSB ISO
 
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      profile:
+        description: "Image profile for amd64/arm64 (i386 always uses lite)"
+        type: choice
+        default: compact
+        options:
+          - compact
+          - full
+          - lite
+      arch:
+        description: "Target architecture(s) to build"
+        type: choice
+        default: all
+        options:
+          - all
+          - amd64
+          - arm64
+          - i386
   push:
     tags:
       - "v*"
@@ -45,9 +57,6 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          # What the LiveUSB modules import (the kiosk server and the gateway
-          # contract tests pull in starlette/uvicorn/websockets; pydantic and
-          # httpx come from the shared test helpers).
           python -m pip install pytest pytest-asyncio pydantic uvicorn starlette websockets requests httpx
 
       - name: LiveUSB test modules
@@ -55,6 +64,7 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: >
           python -m pytest -q -p no:cacheprovider
+          tests/test_liveusb_cloudflare_tunnel.py
           tests/test_liveusb_iso_pipeline.py
           tests/test_liveusb_bootstrap.py
           tests/test_liveusb_gateway.py
@@ -63,59 +73,145 @@ jobs:
           tests/test_skills_loader.py
           tests/test_autoruns.py
 
-      - name: Validate the ISO assets (no root, no live-build)
-        run: bash ops/live-usb/build-iso.sh --check
+      - name: Validate ISO assets across all arches and profiles
+        run: |
+          bash ops/live-usb/build-iso.sh --arch amd64 --profile full --check
+          bash ops/live-usb/build-iso.sh --arch amd64 --profile compact --check
+          bash ops/live-usb/build-iso.sh --arch amd64 --profile lite --check
+          bash ops/live-usb/build-iso.sh --arch arm64 --profile compact --check
+          bash ops/live-usb/build-iso.sh --arch i386 --profile lite --check
 
       - name: ShellCheck the LiveUSB scripts (when installed)
         run: |
-          # Errors only: the scripts predate a strict style gate, and a warning
-          # about quoting is not a reason to block a pull request. `bash -n` is
-          # already enforced by `build-iso.sh --check`.
           if command -v shellcheck >/dev/null 2>&1; then
             shellcheck --severity=error -x \
               ops/live-usb/build-iso.sh \
               ops/live-usb/start-kiosk.sh \
               ops/live-usb/fetch-skills.sh \
               ops/live-usb/test-qemu.sh \
-              ops/live-usb/hooks/0100-build-apfs-and-drivers.hook.chroot
+              ops/live-usb/hooks/0100-build-apfs-and-drivers.hook.chroot \
+              ops/live-usb/hooks/0300-purge-build-deps.hook.chroot
           else
-            echo "shellcheck is not installed here; skipping (install it to enable)"
+            echo "shellcheck is not installed here; skipping"
           fi
 
   iso:
-    name: ISO build (manual or tag, debian:trixie)
-    # No pull requests, no pushes to main: this job is an artifact producer.
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    name: ISO build (${{ matrix.arch }}, ${{ matrix.distro }})
+    if: >-
+      (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
+      && (github.event_name != 'workflow_dispatch' || inputs.arch == 'all' || inputs.arch == matrix.arch)
+    runs-on: ${{ matrix.runner }}
     container:
-      image: debian:trixie
+      image: ${{ matrix.container }}
+      options: --privileged
     continue-on-error: true
-    timeout-minutes: 120
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            distro: trixie
+            runner: ubuntu-24.04
+            container: debian:trixie
+            grub_pkgs: "grub-efi-amd64-bin grub-pc-bin"
+          - arch: arm64
+            distro: trixie
+            runner: ubuntu-24.04-arm
+            container: debian:trixie
+            grub_pkgs: "grub-efi-arm64-bin"
+          - arch: i386
+            distro: bookworm
+            runner: ubuntu-24.04
+            container: debian:bookworm
+            grub_pkgs: "grub-pc-bin"
     steps:
-      - name: Install git and the live-build toolchain
-        # Before checkout on purpose: a bare debian:trixie image has no git, and
-        # actions/checkout needs it inside a container job.
+      - name: Install git and live-build toolchain
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             git ca-certificates python3 \
             live-build debootstrap squashfs-tools xorriso \
-            grub-efi-amd64-bin grub-pc-bin mtools dosfstools curl jq
+            ${{ matrix.grub_pkgs }} mtools dosfstools curl jq
 
       - uses: actions/checkout@v4
 
-      - name: Validate the checkout before building
-        run: bash ops/live-usb/build-iso.sh --check
+      - name: Resolve profile and version
+        id: meta
+        run: |
+          VERSION="$(tr -d '\r\n' < VERSION)"
+          if [[ "${{ matrix.arch }}" == "i386" ]]; then
+            PROFILE="lite"
+          else
+            PROFILE="${{ inputs.profile || 'compact' }}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "profile=${PROFILE}" >> "$GITHUB_OUTPUT"
+          echo "iso_name=LiveUSBAgent-${VERSION}-${{ matrix.arch }}-${PROFILE}.iso" >> "$GITHUB_OUTPUT"
 
-      - name: Build the hybrid ISO
+      - name: Validate checkout before building
+        run: >-
+          bash ops/live-usb/build-iso.sh
+          --arch "${{ matrix.arch }}"
+          --distro "${{ matrix.distro }}"
+          --profile "${{ steps.meta.outputs.profile }}"
+          --check
+
+      - name: Build hybrid ISO
         env:
           WORK_DIR: ${{ github.workspace }}/build
-        run: bash ops/live-usb/build-iso.sh --build
+        run: >-
+          bash ops/live-usb/build-iso.sh
+          --arch "${{ matrix.arch }}"
+          --distro "${{ matrix.distro }}"
+          --profile "${{ steps.meta.outputs.profile }}"
+          --tunnel cloudflare
+          --build
 
-      - name: Upload the ISO
+      - name: Package ISO and SHA-256
+        run: |
+          mkdir -p dist
+          ISO_SRC="$(ls -1 build/live-image-*.iso | head -n 1)"
+          OUT="dist/${{ steps.meta.outputs.iso_name }}"
+          mv "${ISO_SRC}" "${OUT}"
+          (cd dist && sha256sum "${{ steps.meta.outputs.iso_name }}" > "${{ steps.meta.outputs.iso_name }}.sha256")
+          ls -lh dist/
+
+      - name: Upload ISO artifact
         uses: actions/upload-artifact@v4
         with:
-          name: liveusb-iso
-          path: build/live-image-*.iso
+          name: liveusb-iso-${{ matrix.arch }}-${{ steps.meta.outputs.profile }}
+          path: dist/LiveUSBAgent-*.iso*
           if-no-files-found: warn
           retention-days: 14
+
+  attach-release:
+    name: Attach multi-arch ISOs to GitHub Release
+    needs: [iso]
+    if: startsWith(github.ref, 'refs/tags/v') && always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download built ISO artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: liveusb-iso-*
+          path: release-isos
+          merge-multiple: true
+
+      - name: Upload ISOs to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          shopt -s nullglob
+          files=(release-isos/LiveUSBAgent-*.iso release-isos/LiveUSBAgent-*.iso.sha256)
+          if [[ ${#files[@]} -eq 0 ]]; then
+            echo "No ISO artifacts were produced; skipping release upload."
+            exit 0
+          fi
+          if ! gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release create "${TAG}" --title "${TAG}" --generate-notes
+          fi
+          gh release upload "${TAG}" "${files[@]}" --clobber

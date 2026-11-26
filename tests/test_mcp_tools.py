@@ -74,10 +74,18 @@ def test_tools_surface_contains_all_tools():
         "list_dir",
         "bash_exec",
         "read_file",
+        # The media reader sits next to read_file: same subject (a file on the
+        # host), a different block type when the file is not text.
+        "read_media",
         "write_file",
         "edit_file",
         "grep_search",
         "glob_find",
+        "win_places",
+        "batch_read",
+        "batch_edit",
+        "run_script",
+        "fs_index",
         "run_job",
         "job_output",
         "job_kill",
@@ -88,7 +96,9 @@ def test_tools_surface_contains_all_tools():
         # The node's own switches (access mode, workspace, isolation, pause and
         # the remote-control lock). Sits next to self-update: both change the
         # node itself rather than the files on it.
-        "node_control",
+        # Chat-side approvals: the operator confirms in the conversation, so the
+        # client needs a way to turn that into a grant.
+            "node_control",
         # The persistent objective is opt-in (MESH_GOAL=1): one node-wide note
         # would leak between chats, so it is absent from tools/list by default.
         # Timers: long work continues after the chat's call budget ends.
@@ -670,10 +680,12 @@ def test_server_exposes_all_tools_and_jsonrpc_list():
     status, response = server.handle_jsonrpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     assert status == 200
     names = {tool["name"] for tool in response["result"]["tools"]}
-    # Compare against the single source of truth so adding a tool cannot silently
-    # desynchronise the HTTP surface from the handler registry.
-    assert names == {t["name"] for t in mcp_tools.TOOLS}
+    # Compare against the single source of truth (respecting MESH_TOOLSETS and
+    # platform auto-profile) so adding a tool cannot silently desynchronise the
+    # HTTP surface from the handler registry.
+    assert names == {t["name"] for t in mcp_tools.list_tools()}
     assert "mesh_status" in names
+    assert {"git_status", "git_diff", "fetch_url"} <= names
 
     status, response = server.handle_jsonrpc(
         {
@@ -697,6 +709,23 @@ def test_server_exposes_all_tools_and_jsonrpc_list():
     assert status == 200
     payload = json.loads(response["result"]["content"][0]["text"])
     assert isinstance(payload["jobs"], list)
+
+
+def test_server_tools_list_respects_mesh_toolsets(monkeypatch):
+    from core.server import create_mcp_server
+
+    server = create_mcp_server()
+    monkeypatch.setenv("MESH_TOOLSETS", "git")
+    status, response = server.handle_jsonrpc({"jsonrpc": "2.0", "id": 10, "method": "tools/list"})
+    assert status == 200
+    names = {tool["name"] for tool in response["result"]["tools"]}
+    assert names == {"git_status", "git_diff"}
+
+    monkeypatch.setenv("MESH_TOOLSETS", "all")
+    status, response = server.handle_jsonrpc({"jsonrpc": "2.0", "id": 11, "method": "tools/list"})
+    assert status == 200
+    names_all = {tool["name"] for tool in response["result"]["tools"]}
+    assert names_all == {t["name"] for t in mcp_tools.ALL_TOOLS}
 
 
 def test_glob_find_patterns_with_separators_are_deduplicated(tmp_path):

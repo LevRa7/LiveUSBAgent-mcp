@@ -408,6 +408,23 @@ cat <<'EOF' > /etc/systemd/system/systemd-modules-load.service.d/rhm-nonfatal.co
 SuccessExitStatus=1
 EOF
 
+# 6b. Install cloudflared binary for Cloudflare Quick Tunnel (default LiveUSB transport)
+log "Installing cloudflared binary to /usr/local/bin/cloudflared..."
+CF_ARCH="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+case "${CF_ARCH}" in
+    arm64|aarch64) CF_ASSET="cloudflared-linux-arm64" ;;
+    *)             CF_ASSET="cloudflared-linux-amd64" ;;
+esac
+CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/${CF_ASSET}"
+if curl -fsSL --retry 3 --connect-timeout 15 "${CF_URL}" -o /usr/local/bin/cloudflared.tmp; then
+    chmod 0755 /usr/local/bin/cloudflared.tmp
+    mv -f /usr/local/bin/cloudflared.tmp /usr/local/bin/cloudflared
+    log "Installed cloudflared: $(/usr/local/bin/cloudflared --version 2>&1 | head -n 1 || echo ok)"
+else
+    rm -f /usr/local/bin/cloudflared.tmp
+    log "WARN: Failed to pre-bundle cloudflared from ${CF_URL}; runtime fallback will download it on boot."
+fi
+
 # 7. Enable NetworkManager, usbmuxd, and rhm-live-agent services
 log "Enabling NetworkManager, usbmuxd, and rhm-live-agent.service..."
 systemctl enable NetworkManager.service || true

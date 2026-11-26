@@ -158,10 +158,11 @@ def test_build_iso_contract_runtime_and_no_legacy_entrypoint() -> None:
     # Zero references to legacy rhm_mcp_server.py
     assert "rhm_mcp_server.py" not in text
 
-    # Ephemeral LiveUSB runtime command and environment
+    # Ephemeral LiveUSB runtime command and environment (Cloudflare Quick Tunnel default)
     required_runtime_tokens = [
-        "python3 -m core.agent --ephemeral-liveusb",
+        "python3 -m core.server --liveusb --tunnel cloudflare",
         "MESH_SCENARIO=live_usb",
+        "MESH_LIVE_TUNNEL=",
         "MESH_ACCESS_MODE=full",
         "MESH_WORKSPACE=/",
         "MESH_LIVE_STATE_DIR=/run/rhm-live",

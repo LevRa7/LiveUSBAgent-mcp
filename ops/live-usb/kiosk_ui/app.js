@@ -314,7 +314,10 @@
       const connectUrl = session.connect_url || "";
       els.sessionUrl.textContent = connectUrl || "Ожидание ссылки подключения";
       els.sessionToken.textContent = session.token || "Ожидание токена";
-      els.sessionTunnel.textContent = session.tunnel_status || "offline";
+      const tunMode = session.tunnel_mode || "cloudflare";
+      const tunStatus = session.tunnel_status || "offline";
+      const tunErr = session.tunnel_error ? (" — " + session.tunnel_error) : "";
+      els.sessionTunnel.textContent = (tunMode === "cloudflare" ? "Cloudflare Quick Tunnel · " : "") + tunStatus + tunErr;
 
       if (sessionReady && connectUrl !== state.lastConnectUrl) {
         state.lastConnectUrl = connectUrl;

@@ -24,16 +24,17 @@
 Новичку не нужно гадать, какую команду ввести в чёрный терминал. Системному администратору не нужно вручную ставить пакеты, искать прошивки Wi-Fi и собирать драйверы APFS/ZFS на месте — всё уже запечено в образ.
 
 ```text
-  Gemini (/sse) · ChatGPT (/mcp) · Claude (/mcp, CLI или JSON)
-                          │  MCP поверх HTTPS
+  Gemini (/sse) · ChatGPT (/mcp/<token>) · Claude (/mcp/<token>, CLI или JSON)
+                          │  MCP поверх HTTPS (Streamable HTTP / SSE / OAuth 2.1)
                           ▼
-               Mesh Gateway (/connect/<session_code>)
-                          │  Исходящий WebSocket-туннель (без открытых портов)
+        Cloudflare Quick Tunnel (*.trycloudflare.com — по умолчанию, без аккаунта)
+                          │  Исходящий туннель cloudflared -> 127.0.0.1:8096
                           ▼
-   Загруженный LiveUSB (Debian 13 Trixie · python3 -m core.agent --ephemeral-liveusb)
+   Загруженный LiveUSB (Debian 13 Trixie · python3 -m core.server --liveusb --tunnel cloudflare)
    ├─ tty1: Графический Kiosk UI (127.0.0.1:8787) — Wi-Fi, USB-модем, SVG QR
    ├─ tty2: Консольный fallback (firstboot_tui.py + nmtui + [S] Shell (bash))
-   └─ Полные root MCP-инструменты + безопасные rescue_info / rescue_action + SKILL.md
+   └─ Полные root MCP-инструменты (ядро v0.7.2: batch_read/edit, fs_index, read_media, git, fetch_url)
+      + безопасные rescue_info / rescue_action + библиотека SKILL.md
 ```
 
 ---
@@ -53,13 +54,15 @@
   - на экране готовности (Ready view) — крупный **SVG QR-код**, короткая ссылка, статус туннеля, сводка по найденным дискам и кнопки **`Сменить Wi-Fi`** и **`Новый токен`**.
 - На `tty2` (переключение по `Ctrl+Alt+F2`, а также автоматически при отсутствии X11/видеовыхода) работает консольный fallback **`firstboot_tui.py`** с QR-кодом в терминале, доступом к `nmtui` и открытием локальной оболочки `bash` через `Ctrl+Alt+F2` → **`[S] Shell (bash)`**.
 
-### Нулевая настройка и быстрое подключение к ИИ
-Как только появляется интернет, сервис `rhm-live-agent.service` (`python3 -m core.agent --ephemeral-liveusb`) сам регистрирует временный узел (`live-*`) на шлюзе, получает эфемерный 24-часовой токен `lk_…` и выводит QR-код на мобильно-адаптивную страницу `/connect/<session_code>`.
+### Нулевая настройка через Cloudflare Quick Tunnel (по умолчанию)
+Как только появляется интернет, сервис `rhm-live-agent.service` (`python3 -m core.server --liveusb --tunnel cloudflare --port 8096`) поднимает локальный standalone MCP-сервер и публикует его через бесплатный **Cloudflare Quick Tunnel** (`cloudflared tunnel --url http://127.0.0.1:8096`) — без аккаунта Cloudflare/Tailscale и без собственного VPS-шлюза. Эфемерный токен хранится только в RAM (`/run/rhm-live/standalone.token`), а QR-код открывает встроенную страницу `/connect` прямо с LiveUSB.
+
+> **Важно:** URL вида `https://<slug>.trycloudflare.com` меняется при каждом перезапуске — после перезапуска ссылку MCP нужно вставить заново. Кроме того, серверы отдельных AI-провайдеров могут блокироваться защитой Cloudflare от ботов (при необходимости сохранён опциональный fallback `--tunnel gateway --gateway <host>`).
 
 На странице подключения одним нажатием копируются:
-- **Gemini (`/sse`)**: `https://<gateway>/sse?user=<live_node_id>&token=<lk_...>`
-- **ChatGPT (`/mcp`)**: `https://<gateway>/mcp?user=<live_node_id>&token=<lk_...>`
-- **Claude**: ссылка для Custom Connectors (`/mcp`), CLI-команда `claude mcp add --transport http ...` для Claude Code или готовый JSON-фрагмент `mcpServers` для Claude Desktop / Cursor.
+- **Gemini (`/sse`)**: `https://<slug>.trycloudflare.com/sse?token=<token>`
+- **ChatGPT (`/mcp`)**: `https://<slug>.trycloudflare.com/mcp/<token>`
+- **Claude**: ссылка `/mcp/<token>` для Custom Connectors, CLI-команда `claude mcp add --transport http ...` или JSON-фрагмент `mcpServers`.
 
 ### Поддержка всех файловых систем из коробки
 

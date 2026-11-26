@@ -9,7 +9,8 @@
 #   --work-dir PATH          live-build working directory (default: ${WORK_DIR:-/tmp/rhm-live-build})
 #   --distro NAME            Debian suite (default: ${DISTRO:-trixie})
 #   --arch ARCH              Target architecture (default: ${ARCH:-amd64})
-#   --gateway HOST           Mesh gateway domain (default: ${MESH_GATEWAY:-racknerd-5a24bf9.merino-carob.ts.net})
+#   --tunnel MODE            Tunnel mode: cloudflare (default) or gateway
+#   --gateway HOST           Optional mesh gateway domain (used only when --tunnel gateway)
 #   --with-external-skills   Run ops/live-usb/fetch-skills.sh before copying skills/
 #   --build                  Immediately run 'lb build' after configuring (requires root)
 #   --check                  Validate repository assets and exit; needs neither root nor live-build
@@ -23,7 +24,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 WORK_DIR="${WORK_DIR:-/tmp/rhm-live-build}"
 DISTRO="${DISTRO:-trixie}"
 ARCH="${ARCH:-amd64}"
-MESH_GATEWAY="${MESH_GATEWAY:-racknerd-5a24bf9.merino-carob.ts.net}"
+MESH_LIVE_TUNNEL="${MESH_LIVE_TUNNEL:-cloudflare}"
+MESH_GATEWAY="${MESH_GATEWAY:-}"
 WITH_EXTERNAL_SKILLS="0"
 RUN_BUILD="0"
 RUN_CHECK="0"
@@ -106,6 +108,8 @@ check_assets() {
     local hook_rel="ops/live-usb/hooks/0100-build-apfs-and-drivers.hook.chroot"
     local -a required_files=(
         "core/agent.py"
+        "core/server.py"
+        "core/liveusb_tunnel.py"
         "core/rescue.py"
         "core/skills_loader.py"
         "skills/orchestrator.md"
@@ -185,8 +189,9 @@ check_assets() {
         "Secure Boot"
     )
     local -a unit_tokens=(
-        "core.agent --ephemeral-liveusb"
+        "core.server --liveusb --tunnel cloudflare"
         "MESH_SCENARIO=live_usb"
+        "MESH_LIVE_TUNNEL="
     )
     local -a grub_tokens=(
         "toram"
@@ -315,6 +320,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --arch)
             ARCH="$2"
+            shift 2
+            ;;
+        --tunnel)
+            MESH_LIVE_TUNNEL="$2"
             shift 2
             ;;
         --gateway)
@@ -619,11 +628,12 @@ Environment="PYTHONPATH=/opt/remote-harness-mcp"
 Environment="MESH_SCENARIO=live_usb"
 Environment="MESH_ACCESS_MODE=full"
 Environment="MESH_WORKSPACE=/"
+Environment="MESH_LIVE_TUNNEL=${MESH_LIVE_TUNNEL}"
 Environment="MESH_GATEWAY=${MESH_GATEWAY}"
 Environment="MESH_LIVE_STATE_DIR=/run/rhm-live"
 RuntimeDirectory=rhm-live
 RuntimeDirectoryMode=0755
-ExecStart=/usr/bin/python3 -m core.agent --ephemeral-liveusb
+ExecStart=/usr/bin/python3 -m core.server --liveusb --tunnel cloudflare --port 8096
 Restart=always
 RestartSec=3
 
@@ -772,7 +782,7 @@ menuentry "Memtest86+" {
 EOF
 
 echo "[7/7] LiveUSB ISO workspace configured at ${WORK_DIR}."
-echo "      Distro=${DISTRO} Arch=${ARCH} Gateway=${MESH_GATEWAY} ExternalSkills=${WITH_EXTERNAL_SKILLS}"
+echo "      Distro=${DISTRO} Arch=${ARCH} Tunnel=${MESH_LIVE_TUNNEL} Gateway=${MESH_GATEWAY:-none} ExternalSkills=${WITH_EXTERNAL_SKILLS}"
 
 if [[ "${RUN_BUILD}" == "1" ]]; then
     echo "Starting 'lb build' in ${WORK_DIR}..."

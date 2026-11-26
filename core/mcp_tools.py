@@ -28,28 +28,38 @@ from __future__ import annotations
 import fnmatch
 import glob as _glob
 import hashlib
+import html.parser
+import ipaddress
 import json
 import locale
+import mimetypes
 import os
 import re
 import shutil
 import signal as _signal
 import socket
+import ssl
 import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
 #: The public domain is owned by core/domain.py; this module asks for it instead of
 #: keeping a fallback chain of its own. Standard library only, so importing it here
 #: costs nothing and cannot fail for a missing third-party package.
 from core import control
 from core import domain
+from core import fs_search
 from core import goal
 from core import paths
+from core import tls
 from core import platforms
 from core import sandbox
 from core import schedule as schedule_module
@@ -113,6 +123,12 @@ try:  # pragma: no cover - core/liveusb_bootstrap.py ships with Live USB nodes
     from core import liveusb_bootstrap as _liveusb_bootstrap  # type: ignore
 except Exception:  # pragma: no cover
     _liveusb_bootstrap = None  # type: ignore
+# Optional for the same reason: a checkout that predates read_media must still serve
+# every other tool instead of failing to import at all.
+try:  # pragma: no cover - the file ships with the node
+    from core import media as _media  # type: ignore
+except Exception:  # pragma: no cover
+    _media = None  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +262,7 @@ _SKIP_DIRS = frozenset((".git", ".hg", ".svn", "node_modules", "__pycache__", ".
 
 _WORKSPACE = os.path.realpath(os.getcwd())
 _READ_ONLY = False
+_SHELL_ENABLED = True
 _WRITE_ROOTS: Optional[List[str]] = None
 _JOBS_DIR = os.path.realpath(os.path.expanduser(_DEFAULT_JOBS_DIR))
 _MAX_OUTPUT_CHARS = _DEFAULT_MAX_OUTPUT_CHARS
@@ -308,7 +325,8 @@ def configure(**kwargs: Any) -> None:
     Recognised keys: ``workspace``, ``read_only``, ``allow_write``,
     ``write_roots``, ``jobs_dir``, ``max_output_chars``, ``public_url``,
     the web-share keys ``web_dir``, ``mesh_user``, ``max_share_bytes``,
-    ``max_shares``, ``web_listing``, and the device-branch keys ``device``
+    ``max_shares``, ``web_listing``, ``web_share_direct``, and the
+    device-branch keys ``device``
     (``auto``/``0``/``1``), ``device_actions``, ``capture_dir``, ``device_pim``
     and ``device_quick``.
 
@@ -316,7 +334,7 @@ def configure(**kwargs: Any) -> None:
     leaving it out keeps the value that :mod:`core.domain` resolves (environment,
     then the domain file, then the one default).
     """
-    global _WORKSPACE, _READ_ONLY, _WRITE_ROOTS, _JOBS_DIR, _MAX_OUTPUT_CHARS
+    global _WORKSPACE, _READ_ONLY, _SHELL_ENABLED, _WRITE_ROOTS, _JOBS_DIR, _MAX_OUTPUT_CHARS
     global _PUBLIC_URL, _DEVICE_ENABLED, _DEVICE_ACTIONS, _DEVICE_PIM, _DEVICE_QUICK
 
     if kwargs.get("workspace"):
@@ -325,6 +343,8 @@ def configure(**kwargs: Any) -> None:
         _READ_ONLY = _parse_bool(kwargs["read_only"])
     elif "allow_write" in kwargs and kwargs["allow_write"] is not None:
         _READ_ONLY = not _parse_bool(kwargs["allow_write"])
+    if "enable_shell" in kwargs and kwargs["enable_shell"] is not None:
+        _SHELL_ENABLED = _parse_bool(kwargs["enable_shell"])
     if "write_roots" in kwargs:
         _WRITE_ROOTS = _split_roots(kwargs["write_roots"])
     if kwargs.get("jobs_dir"):
@@ -390,6 +410,10 @@ def configure(**kwargs: Any) -> None:
                 max_bytes=kwargs.get("max_share_bytes"),
                 max_shares=kwargs.get("max_shares"),
                 listing=kwargs.get("web_listing"),
+                # A standalone/Funnel node is its own public endpoint, so its
+                # links carry no gateway node segment (see web_share._direct_links).
+                # None keeps whatever the previous configure() set.
+                direct=kwargs.get("web_share_direct"),
             )
         except Exception:
             pass
@@ -480,10 +504,63 @@ def _read_only_active() -> bool:
     return _READ_ONLY or control.access_mode() == "read_only"
 
 
-def _write_guard(target: str) -> Optional[str]:
+SHELL_DISABLED_ERROR = (
+    "shell_disabled: shell execution is disabled on this node "
+    "(MESH_ENABLE_SHELL=0 / --no-shell)."
+)
+
+
+def _shell_enabled() -> bool:
+    """Return False when shell execution is disabled via env or configure()."""
+    raw = os.environ.get("MESH_ENABLE_SHELL")
+    if raw is not None and str(raw).strip() != "":
+        return _parse_bool(raw)
+    return _SHELL_ENABLED
+
+
+def _local_is_protected_git_path(path: str) -> bool:
+    """Fallback guard blocking writes to .git/hooks/* and .git/config."""
+    if not path:
+        return False
+    candidates = []
+    try:
+        candidates.append(os.path.abspath(os.path.expanduser(str(path))))
+    except Exception:
+        candidates.append(str(path))
+    try:
+        candidates.append(os.path.realpath(os.path.expanduser(str(path))))
+    except Exception:
+        pass
+    for cand in candidates:
+        norm = cand.replace("\\", "/")
+        parts = [p.lower() for p in norm.split("/") if p]
+        for idx, part in enumerate(parts):
+            if part == ".git" and idx + 1 < len(parts):
+                nxt = parts[idx + 1]
+                if nxt == "hooks":
+                    return True
+                if nxt == "config" and idx + 2 == len(parts):
+                    return True
+    return False
+
+
+def _is_protected_git_path(path: str) -> bool:
+    """Delegate to core.policies.is_protected_git_path if available, else local fallback."""
+    try:
+        from core.policies import is_protected_git_path as _policy_git_guard  # type: ignore
+        if _policy_git_guard(path):
+            return True
+    except Exception:
+        pass
+    return _local_is_protected_git_path(path)
+
+
+def _write_guard(target: str, raw_path: Optional[str] = None) -> Optional[str]:
     """Return an error string when writing to *target* is not permitted."""
     if _read_only_active():
         return "server is in read-only mode"
+    if _is_protected_git_path(target) or (raw_path and _is_protected_git_path(raw_path)):
+        return "protected git path: writing to .git/hooks or .git/config is forbidden: %s" % target
     if not _within_write_roots(target):
         return "path is outside allowed write roots: %s" % target
     return None
@@ -499,8 +576,15 @@ _READ_ONLY_ALLOWED = frozenset({
     "get_orchestration_skill",
     "list_dir",
     "read_file",
+    # A media file is only observed: read_media writes nothing, it re-encodes in
+    # memory and hands the caller a block. Reading must stay possible in read-only
+    # mode, which is exactly when an operator wants to look at a screenshot.
+    "read_media",
     "grep_search",
     "glob_find",
+    "win_places",
+    "batch_read",
+    "win_places",
     "job_output",
     "job_list",
     "share_list",
@@ -512,10 +596,9 @@ _READ_ONLY_ALLOWED = frozenset({
     # command and touches no project file, so recording it stays available in
     # read-only mode (that is exactly when a goal is worth writing down).
     "goal",
-    # Live USB / rescue: inspection stays available in read-only mode;
-    # rescue_action is intentionally NOT here. Every recovery action mutates a
-    # disk, a guest OS or a SAM hive, so the central guard below refuses it with
-    # READ_ONLY_ERROR before it ever reaches core/rescue.
+    # Live USB / rescue (parallel workstream): inspection stays available in
+    # read-only mode; rescue_action is intentionally NOT here and is refused
+    # centrally until its own dry-run/confirmation gate is wired.
     "rescue_info",
     "list_skills",
     "load_skill",
@@ -528,6 +611,9 @@ _READ_ONLY_ALLOWED = frozenset({
 _READ_ONLY_SELF_GUARDED = frozenset({
     "write_file",
     "edit_file",
+    "batch_edit",
+    "run_script",
+    "fs_index",
     "share_file",
     "serve_dir",
     "unshare",
@@ -537,6 +623,14 @@ _READ_ONLY_SELF_GUARDED = frozenset({
     # implementation refuses every escalation while read-only is set, so it has
     # to reach that implementation instead of being refused as a whole.
     "node_control",
+})
+
+#: Extended read-only tools (git_status, git_diff, fetch_url) allowed in
+#: read-only mode without mutating _READ_ONLY_ALLOWED (pinned by test_policy.py).
+_EXTENDED_READ_ONLY_ALLOWED = frozenset({
+    "git_status",
+    "git_diff",
+    "fetch_url",
 })
 
 READ_ONLY_ERROR = (
@@ -578,14 +672,25 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+#: ANSI escape sequences (colours, cursor moves) and the C0/C1 controls that are
+#: not whitespace. Both are compiled once: the character-by-character version this
+#: replaced cost ~80 ms on a 650 KB file - about the whole read_file call - while
+#: a pre-compiled scan over the same text is under a millisecond.
+_ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
+
+
 def _sanitize_output(text: str) -> str:
     """Strip ANSI escapes and non-printable control characters."""
     if not text:
         return ""
-    text = re.sub(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", text)
-    return "".join(
-        ch for ch in text if ch in ("\n", "\r", "\t") or (ord(ch) >= 32 and ord(ch) != 127)
-    )
+    if "\x1b" in text:
+        text = _ANSI_ESCAPE_RE.sub("", text)
+    # Clean text - the common case for source files and command output - leaves
+    # here without a second allocation.
+    if _CONTROL_CHARS_RE.search(text) is None:
+        return text
+    return _CONTROL_CHARS_RE.sub("", text)
 
 
 # ---------------------------------------------------------------------------
@@ -1499,6 +1604,44 @@ def _screen_capture_path(args: Dict[str, Any]) -> str:
     return paths.cache_path("captures", "screen-%s.png" % stamp)
 
 
+def _no_screen_answer(backend: Any) -> Dict[str, Any]:
+    """Why a host that *has* a framebuffer still returned no image.
+
+    The generic wording ("no screen a node process may read") is true but not
+    actionable, and the most common Windows case deserves its own sentence: a node
+    installed as a service runs in **session 0**, the non-interactive session that
+    has no desktop at all. An operator who reads only "available: false" has no
+    way to know that the fix is a different install shape, not a missing package.
+
+    SESSIONNAME is "Services" in session 0 and "Console"/"RDP-Tcp#N" in a real
+    desktop session, so the check needs no Win32 call and no extra import.
+    """
+    reason = ("this platform has no screen a node process may read: a server has "
+              "no framebuffer and Android gives an app no access to the display")
+    fix = ("run the node in an interactive desktop session (Windows: the user's "
+           "own session, not a service)")
+    answer: Dict[str, Any] = {
+        "available": False,
+        "scenario": backend.scenario,
+        "reason": reason,
+        "fix": fix,
+    }
+    if os.name == "nt":
+        session_name = (os.environ.get("SESSIONNAME") or "").strip()
+        answer["session"] = session_name or "unknown"
+        if session_name.lower() == "services":
+            answer["reason"] = (
+                "the node runs as a Windows service in session 0 "
+                "(SESSIONNAME=Services): that session has no desktop, so there is no "
+                "framebuffer to capture and no screenshot can exist")
+            answer["fix"] = (
+                "run the node in the signed-in user's session instead of the machine "
+                "service: reinstall without -AdminService "
+                "(install.ps1 -Mode funnel -Autostart logon), and remove the service "
+                "task with: schtasks /Delete /TN RemoteHarnessMCPService /F")
+    return answer
+
+
 def _tool_screen_capture(args: Dict[str, Any]) -> Dict[str, Any]:
     """Capture the desktop and save it as a PNG the operator can open or share.
 
@@ -1514,14 +1657,7 @@ def _tool_screen_capture(args: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as exc:  # pragma: no cover - defensive
         return {"available": False, "scenario": backend.scenario, "reason": str(exc)}
     if not data:
-        return {
-            "available": False,
-            "scenario": backend.scenario,
-            "reason": ("this platform has no screen a node process may read: a server has "
-                       "no framebuffer and Android gives an app no access to the display"),
-            "fix": ("run the node in an interactive desktop session (Windows: the user's "
-                    "own session, not a service)"),
-        }
+        return _no_screen_answer(backend)
 
     target = _screen_capture_path(args)
     guard = _write_guard(target)
@@ -2207,6 +2343,8 @@ def _check_active_uplink_lock(command: str) -> Optional[str]:
 def _tool_bash_exec(args: Dict[str, Any]) -> Dict[str, Any]:
     if _read_only_active():
         return {"error": READ_ONLY_ERROR}
+    if not _shell_enabled():
+        return {"error": SHELL_DISABLED_ERROR}
     command = args.get("command")
     if not isinstance(command, str) or not command.strip():
         return {"error": "command is required and must be a non-empty string"}
@@ -2265,6 +2403,29 @@ def _tool_read_file(args: Dict[str, Any]) -> Dict[str, Any]:
         if os.path.isdir(target):
             return _tool_list_dir({"path": target})
 
+        with open(target, "rb") as bin_handle:
+            head = bin_handle.read(8192)
+        if b"\x00" in head:
+            try:
+                size_bytes = os.path.getsize(target)
+            except OSError:
+                size_bytes = len(head)
+            ext = os.path.splitext(target)[1].lower()
+            mime_type = mimetypes.guess_type(target)[0] or "application/octet-stream"
+            return {
+                "error": (
+                    "Binary file detected (%d bytes, ext=%s, mime=%s): "
+                    "cannot read as text. Use read_media instead of read_file."
+                    % (size_bytes, ext or "none", mime_type)
+                ),
+                "binary": True,
+                "path": target,
+                "size_bytes": size_bytes,
+                "extension": ext,
+                "mime_type": mime_type,
+                "suggested_tool": "read_media",
+            }
+
         with open(target, "r", encoding="utf-8", errors="replace") as handle:
             lines = handle.readlines()
 
@@ -2303,6 +2464,59 @@ def _tool_read_file(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Tool 5b: read_media
+# ---------------------------------------------------------------------------
+
+#: The block types an MCP client is expected to render. A media result carries
+#: these; anything else would be a protocol invention the client cannot show.
+MEDIA_BLOCK_TYPES = ("text", "image", "audio")
+
+
+def _tool_read_media(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Hand one file over in the block type the protocol has for it.
+
+    ``read_file`` answers with numbered text, which is right for source code and
+    wrong for everything a user actually drops on a node: a screenshot, a photo, a
+    PDF, a voice note, a clip. The protocol has an ``image`` block (base64 plus
+    ``mimeType``) and an ``audio`` block for exactly those, and a tool that returns
+    raw bytes or a bare path leaves the model with nothing it can look at.
+
+    The routing - and the budgets that keep the answer inside what a client
+    accepts - live in ``core/media.py``. This wrapper only resolves the path with
+    the same rules as every other file tool (workspace, isolated container) and
+    forwards the caller's budget options, so both transports stay thin.
+    """
+    if _media is None:  # pragma: no cover - the file ships with the node
+        return {"error": "read_media is unavailable: core/media.py is missing from this checkout"}
+    try:
+        path = args.get("path")
+        if not isinstance(path, str) or not path.strip():
+            return {"error": "path is required"}
+        target = _resolve(path)
+        options: Dict[str, Any] = {
+            "offset": max(0, _safe_int(args.get("offset"), 0)),
+            "max_chars": _clamp_int(args.get("max_chars"), 500, 200000,
+                                    _media.DEFAULT_MAX_CHARS),
+            "max_side": _clamp_int(args.get("max_side"), 320, 4096,
+                                   _media.DEFAULT_MAX_SIDE),
+            "max_frames": _clamp_int(args.get("max_frames"), 1, 12,
+                                     _media.DEFAULT_MAX_FRAMES),
+            "include_audio": _parse_flag(args.get("include_audio"), False),
+            "ocr": _parse_flag(args.get("ocr"), False),
+            "encoding": str(args.get("encoding") or "").strip(),
+        }
+        if args.get("page_start") is not None:
+            options["page_start"] = max(1, _safe_int(args.get("page_start"), 1))
+        if args.get("page_end") is not None:
+            options["page_end"] = max(1, _safe_int(args.get("page_end"), 1))
+        if args.get("render_pages") is not None:
+            options["render_pages"] = _parse_flag(args.get("render_pages"), False)
+        return _media.read_media(target, **options)
+    except Exception as exc:
+        return {"error": "read_media failed: %s" % exc}
+
+
+# ---------------------------------------------------------------------------
 # Tool 6: write_file
 # ---------------------------------------------------------------------------
 
@@ -2318,7 +2532,7 @@ def _tool_write_file(args: Dict[str, Any]) -> Dict[str, Any]:
             content = str(content)
 
         target = _resolve(path)
-        guard = _write_guard(target)
+        guard = _write_guard(target, raw_path=path)
         if guard:
             return {"error": guard}
 
@@ -2385,7 +2599,7 @@ def _tool_edit_file(args: Dict[str, Any]) -> Dict[str, Any]:
             return {"error": "new_string is required and must be a string"}
 
         target = _resolve(path)
-        guard = _write_guard(target)
+        guard = _write_guard(target, raw_path=path)
         if guard:
             return {"error": guard}
         if not os.path.isfile(target):
@@ -2454,6 +2668,16 @@ def _iter_files(base: str):
             yield os.path.join(root, name)
 
 
+def _parse_optional_depth(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        depth = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0, min(64, depth))
+
+
 def _tool_grep_search(args: Dict[str, Any]) -> Dict[str, Any]:
     try:
         pattern = args.get("pattern")
@@ -2474,57 +2698,67 @@ def _tool_grep_search(args: Dict[str, Any]) -> Dict[str, Any]:
         if glob_filter is not None and not isinstance(glob_filter, str):
             return {"error": "glob must be a string"}
 
-        flags = re.IGNORECASE if ignore_case else 0
-        if fixed:
-            needle = pattern.lower() if ignore_case else pattern
+        max_depth = _parse_optional_depth(args.get("max_depth"))
+        time_budget_ms = _clamp_int(
+            args.get("time_budget_ms"),
+            fs_search.MIN_TIME_BUDGET_MS,
+            fs_search.MAX_TIME_BUDGET_MS,
+            fs_search.DEFAULT_TIME_BUDGET_MS,
+        )
+        include_ignored = _parse_bool(args.get("include_ignored"))
+
+        fmt = str(args.get("format") or "json").strip().lower()
+        if fmt not in ("compact", "json"):
+            fmt = "json"
+
+        res = fs_search.grep_search(
+            base,
+            pattern,
+            glob_filter=glob_filter,
+            limit=limit,
+            ignore_case=ignore_case,
+            fixed=fixed,
+            context=context,
+            max_depth=max_depth,
+            time_budget_ms=time_budget_ms,
+            include_ignored=include_ignored,
+        )
+        if not isinstance(res, dict) or "error" in res:
+            return res
+
+        if fmt != "compact":
+            return res
+
+        ws = _current_workspace()
+        compact_root = ws if _within(base, ws) else base
+        matches = res.get("matches") or []
+        if hasattr(fs_search, "format_grep_compact"):
+            compact_text = fs_search.format_grep_compact(matches, compact_root)
         else:
-            try:
-                regex = re.compile(pattern, flags)
-            except re.error as exc:
-                return {"error": "invalid regular expression: %s" % exc}
+            lines_out: List[str] = []
+            for item in matches:
+                p = str(item.get("path", ""))
+                try:
+                    p = os.path.relpath(p, compact_root)
+                except ValueError:
+                    pass
+                p = p.replace("\\", "/")
+                lines_out.append("%s:%s: %s" % (p, item.get("line", 0), item.get("text", "")))
+            compact_text = "\n".join(lines_out)
 
-        matches: List[Dict[str, Any]] = []
-        truncated = False
-        for file_path in _iter_files(base):
-            if glob_filter and not fnmatch.fnmatch(os.path.basename(file_path), glob_filter):
-                continue
-            if _is_probably_binary(file_path):
-                continue
-            try:
-                with open(file_path, "r", encoding="utf-8", errors="replace") as handle:
-                    lines = handle.read().splitlines()
-            except Exception:
-                continue
-
-            hit_lines = []
-            for idx, line in enumerate(lines):
-                found = (needle in (line.lower() if ignore_case else line)) if fixed else bool(regex.search(line))
-                if found:
-                    hit_lines.append(idx)
-            if not hit_lines:
-                continue
-
-            emitted = set()
-            for idx in hit_lines:
-                first = max(0, idx - context)
-                last = min(len(lines) - 1, idx + context)
-                for lineno in range(first, last + 1):
-                    if lineno in emitted:
-                        continue
-                    if len(matches) >= limit:
-                        truncated = True
-                        break
-                    emitted.add(lineno)
-                    matches.append(
-                        {"path": os.path.realpath(file_path), "line": lineno + 1, "text": lines[lineno]}
-                    )
-                if truncated:
-                    break
-            if truncated:
-                break
-
-        return {"matches": matches, "count": len(matches), "truncated": truncated,
-                "note": "[VERIFIED BY TOOL] matches come from the real filesystem"}
+        out_dict: Dict[str, Any] = {
+            "output": compact_text,
+            "count": res.get("count", 0),
+            "truncated": res.get("truncated", False),
+            "partial": res.get("partial", False),
+            "format": "compact",
+            "elapsed_ms": res.get("elapsed_ms", 0),
+            "scanned_files": res.get("scanned_files", 0),
+            "note": res.get("note", ""),
+        }
+        if "next_hint" in res:
+            out_dict["next_hint"] = res["next_hint"]
+        return out_dict
     except Exception as exc:
         return {"error": "grep_search failed: %s" % exc}
 
@@ -2547,33 +2781,540 @@ def _tool_glob_find(args: Dict[str, Any]) -> Dict[str, Any]:
         if not os.path.exists(base):
             return {"error": "Path not found: %s" % base}
 
-        found: List[str] = []
-        if "/" in pattern or "**" in pattern:
-            # Patterns containing a path separator must be matched against the
-            # path relative to `base` (sub/*.py, */b.py, sub/b.py, **/b.py);
-            # matching a bare basename against them always returned nothing.
-            try:
-                found = _glob.glob(os.path.join(_glob.escape(base), pattern), recursive=True)
-            except Exception as exc:
-                return {"error": "glob_find failed: %s" % exc}
-            found = [p for p in found if os.path.isfile(p) and not _skip_path(p)]
-        else:
-            for root, dirs, files in os.walk(base):
-                dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
-                for name in files:
-                    if fnmatch.fnmatch(name, pattern):
-                        found.append(os.path.join(root, name))
+        max_depth = _parse_optional_depth(args.get("max_depth"))
+        max_results = _clamp_int(args.get("max_results"), 1, GLOB_MAX_RESULTS, GLOB_MAX_RESULTS)
+        time_budget_ms = _clamp_int(
+            args.get("time_budget_ms"),
+            fs_search.MIN_TIME_BUDGET_MS,
+            fs_search.MAX_TIME_BUDGET_MS,
+            fs_search.DEFAULT_TIME_BUDGET_MS,
+        )
+        include_ignored = _parse_bool(args.get("include_ignored"))
+        use_index = str(args.get("use_index") or "auto").strip().lower()
+        if use_index not in ("auto", "only", "off"):
+            use_index = "auto"
 
-        # Deduplicate: glob.glob itself returns duplicates for patterns such as
-        # "**/**/*.py", which would otherwise be reported several times.
-        files = sorted({os.path.realpath(p) for p in found})
-        truncated = len(files) > GLOB_MAX_RESULTS
-        if truncated:
-            files = files[:GLOB_MAX_RESULTS]
-        return {"files": files, "count": len(files), "truncated": truncated,
-                "note": "[VERIFIED BY TOOL] paths come from the real filesystem"}
+        if use_index in ("auto", "only") and not include_ignored:
+            try:
+                from core import fs_index as _fs_index
+                idx_res = _fs_index.default_index().query(
+                    base,
+                    pattern,
+                    max_depth=max_depth,
+                    max_results=max_results,
+                )
+                if idx_res is not None:
+                    return idx_res
+                if use_index == "only":
+                    return {
+                        "files": [],
+                        "count": 0,
+                        "truncated": False,
+                        "partial": False,
+                        "backend": "sqlite_fts5",
+                        "indexed": False,
+                        "note": "Path is not yet covered by the local file index; retry with use_index='auto' or 'off'.",
+                    }
+                if use_index == "auto" and os.path.isdir(base) and not _read_only_active():
+                    _fs_index.default_index().start_background_refresh([base])
+            except Exception:
+                if use_index == "only":
+                    return {"error": "local file index query failed"}
+
+        return fs_search.glob_find(
+            base,
+            pattern,
+            max_depth=max_depth,
+            max_results=max_results,
+            time_budget_ms=time_budget_ms,
+            include_ignored=include_ignored,
+        )
     except Exception as exc:
         return {"error": "glob_find failed: %s" % exc}
+
+
+# ---------------------------------------------------------------------------
+# Tool 9a: win_places (instant user-context snapshot: Known Folders, Recent, drives)
+# ---------------------------------------------------------------------------
+
+def _tool_win_places(args: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        from core.platforms.windows import places as _win_places
+        recent_limit = _clamp_int(args.get("recent_limit"), 1, 100, 30)
+        top_level_limit = _clamp_int(args.get("top_level_limit"), 0, 100, 30)
+        only_existing = _parse_bool(args.get("only_existing_recent")) if "only_existing_recent" in args else True
+        return _win_places.collect_places(
+            recent_limit=recent_limit,
+            top_level_limit=top_level_limit,
+            only_existing_recent=only_existing,
+        )
+    except Exception as exc:
+        return {"error": "win_places failed: %s" % exc}
+
+
+# ---------------------------------------------------------------------------
+# Tool 9b: batch_read (read-only multiplexer to cut tool-call rounds)
+# ---------------------------------------------------------------------------
+
+_BATCH_READ_ALLOWED = frozenset({
+    "mesh_status",
+    "system_vitals",
+    "list_dir",
+    "read_file",
+    "grep_search",
+    "glob_find",
+    "win_places",
+    "job_list",
+    "job_output",
+})
+_BATCH_READ_MAX_OPS = 16
+_BATCH_READ_DEFAULT_BUDGET_MS = 18000
+_BATCH_READ_MAX_BUDGET_MS = 20000
+_BATCH_READ_DEFAULT_MAX_CHARS = 40000
+_BATCH_READ_MAX_CHARS = 200000
+
+
+def _tool_batch_read(args: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        ops = args.get("ops")
+        if not isinstance(ops, list) or not ops:
+            return {"error": "ops must be a non-empty list of read-only operations"}
+        if len(ops) > _BATCH_READ_MAX_OPS:
+            return {"error": "ops exceeds maximum of %d items" % _BATCH_READ_MAX_OPS}
+
+        budget_ms = _clamp_int(
+            args.get("time_budget_ms"),
+            100,
+            _BATCH_READ_MAX_BUDGET_MS,
+            _BATCH_READ_DEFAULT_BUDGET_MS,
+        )
+        max_total_chars = _clamp_int(
+            args.get("max_total_chars"),
+            1000,
+            _BATCH_READ_MAX_CHARS,
+            _BATCH_READ_DEFAULT_MAX_CHARS,
+        )
+
+        t0 = time.monotonic()
+        deadline = t0 + (budget_ms / 1000.0)
+
+        # Validate every op up front so callers get immediate per-op errors for disallowed tools.
+        parsed_ops: List[Tuple[int, str, Optional[str], Optional[Dict[str, Any]], Optional[str]]] = []
+        for idx, raw in enumerate(ops):
+            if not isinstance(raw, dict):
+                parsed_ops.append((idx, str(idx), None, None, "op must be an object"))
+                continue
+            op_id = str(raw.get("id") if raw.get("id") is not None else idx)
+            tool_name = raw.get("tool")
+            op_args = raw.get("args")
+            if not isinstance(tool_name, str) or not tool_name:
+                parsed_ops.append((idx, op_id, None, None, "tool name is required"))
+                continue
+            if tool_name == "batch_read" or tool_name not in _BATCH_READ_ALLOWED:
+                parsed_ops.append((
+                    idx, op_id, tool_name, None,
+                    "tool '%s' is not allowed inside batch_read" % tool_name,
+                ))
+                continue
+            if op_args is None:
+                op_args = {}
+            elif not isinstance(op_args, dict):
+                parsed_ops.append((idx, op_id, tool_name, None, "args must be an object"))
+                continue
+            else:
+                op_args = dict(op_args)
+
+            # Never let one job_output stall the batch; cap search budgets to batch budget.
+            if tool_name == "job_output":
+                op_args["wait_ms"] = 0
+            elif tool_name in ("glob_find", "grep_search"):
+                rem_ms = max(50, int((deadline - time.monotonic()) * 1000))
+                req_ms = _clamp_int(op_args.get("time_budget_ms"), 50, budget_ms, min(8000, budget_ms))
+                op_args["time_budget_ms"] = min(req_ms, rem_ms)
+
+            parsed_ops.append((idx, op_id, tool_name, op_args, None))
+
+        slots: List[Optional[Dict[str, Any]]] = [None] * len(parsed_ops)
+        runnable: List[Tuple[int, str, str, Dict[str, Any]]] = []
+        for idx, op_id, tool_name, op_args, err in parsed_ops:
+            if err is not None:
+                slots[idx] = {"id": op_id, "tool": tool_name or "", "ok": False, "error": err}
+            else:
+                runnable.append((idx, op_id, tool_name, op_args))  # type: ignore[arg-type]
+
+        def _exec_one(tool_name: str, op_args: Dict[str, Any]) -> Any:
+            if time.monotonic() >= deadline:
+                return {"error": "time_budget_ms exceeded before start"}
+            handler = _HANDLERS.get(tool_name)
+            if handler is None:
+                return {"error": "Unknown tool: %s" % tool_name}
+            return handler(op_args)
+
+        if runnable:
+            workers = min(4, len(runnable))
+            pool = ThreadPoolExecutor(max_workers=workers)
+            try:
+                future_map = {
+                    pool.submit(_exec_one, tool_name, op_args): (idx, op_id, tool_name)
+                    for idx, op_id, tool_name, op_args in runnable
+                }
+                remaining = max(0.01, deadline - time.monotonic())
+                try:
+                    for fut in as_completed(future_map, timeout=remaining):
+                        idx, op_id, tool_name = future_map[fut]
+                        try:
+                            res = fut.result()
+                            if isinstance(res, dict) and "error" in res:
+                                slots[idx] = {"id": op_id, "tool": tool_name, "ok": False, "error": res["error"]}
+                            else:
+                                slots[idx] = {"id": op_id, "tool": tool_name, "ok": True, "data": res}
+                        except Exception as exc:
+                            slots[idx] = {"id": op_id, "tool": tool_name, "ok": False, "error": str(exc)}
+                except TimeoutError:
+                    pass
+                for fut, (idx, op_id, tool_name) in future_map.items():
+                    if slots[idx] is None:
+                        fut.cancel()
+                        slots[idx] = {
+                            "id": op_id,
+                            "tool": tool_name,
+                            "ok": False,
+                            "error": "time_budget_ms exceeded",
+                        }
+            finally:
+                pool.shutdown(wait=False)
+
+        # Enforce max_total_chars budget cleanly across ordered results.
+        results: List[Dict[str, Any]] = []
+        used_chars = 0
+        truncated = False
+        completed = 0
+        for item in slots:
+            entry = item or {"id": "?", "tool": "", "ok": False, "error": "internal batch error"}
+            serialized_len = len(json.dumps(entry, ensure_ascii=False, default=str))
+            if used_chars + serialized_len > max_total_chars and results:
+                truncated = True
+                results.append({
+                    "id": entry.get("id"),
+                    "tool": entry.get("tool"),
+                    "ok": False,
+                    "error": "max_total_chars budget exceeded (%d chars)" % max_total_chars,
+                })
+                continue
+            used_chars += serialized_len
+            if entry.get("ok"):
+                completed += 1
+            results.append(entry)
+
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        return {
+            "results": results,
+            "completed": completed,
+            "total": len(results),
+            "truncated": truncated,
+            "elapsed_ms": elapsed_ms,
+        }
+    except Exception as exc:
+        return {"error": "batch_read failed: %s" % exc}
+
+
+# ---------------------------------------------------------------------------
+# Tool 9c: batch_edit (multi-file write/edit in one MCP round-trip)
+# ---------------------------------------------------------------------------
+
+_BATCH_EDIT_MAX_OPS = 16
+
+
+def _dry_run_edit_op(op_type: str, item: Dict[str, Any]) -> Dict[str, Any]:
+    path_arg = item.get("path")
+    if not isinstance(path_arg, str) or not path_arg.strip():
+        return {"ok": False, "error": "path is required"}
+    target = _resolve(path_arg)
+    guard = _write_guard(target, raw_path=path_arg)
+    if guard:
+        return {"ok": False, "error": guard}
+    if op_type == "write":
+        if not isinstance(item.get("content"), str):
+            return {"ok": False, "error": "content must be a string"}
+        return {"ok": True, "data": {"dry_run": True, "op": "write", "path": target, "bytes": len(item["content"].encode("utf-8"))}}
+    if op_type == "edit":
+        old_string = item.get("old_string")
+        new_string = item.get("new_string")
+        if not isinstance(old_string, str) or not old_string:
+            return {"ok": False, "error": "old_string must be a non-empty string"}
+        if not isinstance(new_string, str):
+            return {"ok": False, "error": "new_string must be a string"}
+        if not os.path.isfile(target):
+            return {"ok": False, "error": "File not found: %s" % target}
+        with open(target, "rb") as handle:
+            raw = handle.read()
+        expected = item.get("expected_sha256")
+        if expected:
+            actual = hashlib.sha256(raw).hexdigest()
+            if actual != expected:
+                return {"ok": False, "error": "sha256 mismatch: expected %s, got %s" % (expected, actual)}
+        text = raw.decode("utf-8", errors="replace")
+        occurrences = text.count(old_string)
+        replace_all = _parse_bool(item.get("replace_all"))
+        if occurrences == 0:
+            return {"ok": False, "error": "old_string not found"}
+        if occurrences > 1 and not replace_all:
+            return {"ok": False, "error": "old_string is not unique (%d matches)" % occurrences}
+        return {"ok": True, "data": {"dry_run": True, "op": "edit", "path": target, "matches": occurrences}}
+    return {"ok": False, "error": "unsupported op '%s' (expected 'edit' or 'write')" % op_type}
+
+
+def _tool_batch_edit(args: Dict[str, Any]) -> Dict[str, Any]:
+    if _read_only_active():
+        return {"error": READ_ONLY_ERROR}
+    try:
+        t0 = time.monotonic()
+        ops = args.get("ops")
+        if not isinstance(ops, list) or not ops:
+            return {"error": "ops must be a non-empty list of edit/write operations"}
+        if len(ops) > _BATCH_EDIT_MAX_OPS:
+            return {"error": "ops exceeds maximum of %d items" % _BATCH_EDIT_MAX_OPS}
+
+        stop_on_error = True if args.get("stop_on_error") is None else _parse_bool(args.get("stop_on_error"))
+        dry_run = _parse_bool(args.get("dry_run"))
+
+        results: List[Dict[str, Any]] = []
+        completed = 0
+        failed = 0
+        stopped_early = False
+
+        for idx, item in enumerate(ops):
+            op_id = str(item.get("id") or idx) if isinstance(item, dict) else str(idx)
+            if not isinstance(item, dict):
+                results.append({"id": op_id, "ok": False, "error": "operation must be an object"})
+                failed += 1
+                if stop_on_error:
+                    stopped_early = idx + 1 < len(ops)
+                    break
+                continue
+            op_type = str(item.get("op") or "").strip().lower()
+            if op_type not in ("edit", "write"):
+                results.append({"id": op_id, "ok": False, "error": "op must be 'edit' or 'write'"})
+                failed += 1
+                if stop_on_error:
+                    stopped_early = idx + 1 < len(ops)
+                    break
+                continue
+
+            if dry_run:
+                res = _dry_run_edit_op(op_type, item)
+                entry = {"id": op_id, **res}
+                results.append(entry)
+                if res["ok"]:
+                    completed += 1
+                else:
+                    failed += 1
+                    if stop_on_error:
+                        stopped_early = idx + 1 < len(ops)
+                        break
+            else:
+                out = _tool_edit_file(item) if op_type == "edit" else _tool_write_file(item)
+                if isinstance(out, dict) and "error" in out:
+                    results.append({"id": op_id, "ok": False, "error": out["error"]})
+                    failed += 1
+                    if stop_on_error:
+                        stopped_early = idx + 1 < len(ops)
+                        break
+                else:
+                    results.append({"id": op_id, "ok": True, "data": out})
+                    completed += 1
+
+        return {
+            "results": results,
+            "completed": completed,
+            "failed": failed,
+            "total": len(ops),
+            "dry_run": dry_run,
+            "stopped_early": stopped_early,
+            "elapsed_ms": int((time.monotonic() - t0) * 1000),
+        }
+    except Exception as exc:
+        return {"error": "batch_edit failed: %s" % exc}
+
+
+# ---------------------------------------------------------------------------
+# Tool 9d: run_script (single-call multi-step script runner, fg or background)
+# ---------------------------------------------------------------------------
+
+_SCRIPT_EXT = {
+    "python": ".py",
+    "powershell": ".ps1",
+    "bash": ".sh",
+    "cmd": ".cmd",
+}
+
+
+def _script_argv(lang: str, script_path: str) -> List[str]:
+    import sys
+    if lang == "python":
+        return [sys.executable, "-u", script_path]
+    if lang == "powershell":
+        return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_path]
+    if lang == "cmd":
+        return ["cmd.exe", "/c", script_path]
+    return ["bash", script_path]
+
+
+def _tool_run_script(args: Dict[str, Any]) -> Dict[str, Any]:
+    if _read_only_active():
+        return {"error": READ_ONLY_ERROR}
+    if not _shell_enabled():
+        return {"error": SHELL_DISABLED_ERROR}
+    try:
+        code = args.get("code")
+        if not isinstance(code, str) or not code.strip():
+            return {"error": "code must be a non-empty string"}
+        lang = str(args.get("lang") or "python").strip().lower()
+        if lang not in _SCRIPT_EXT:
+            return {"error": "lang must be one of: python, powershell, bash, cmd"}
+
+        target_cwd = _resolve(args.get("cwd") or ".")
+        if not os.path.isdir(target_cwd):
+            return {"error": "cwd not found: %s" % target_cwd}
+
+        background = _parse_bool(args.get("background"))
+        timeout_sec = _clamp_int(args.get("timeout_sec"), 1, MAX_TIMEOUT_SEC, 25)
+        max_chars = _max_chars(args.get("max_chars"))
+
+        scripts_dir = paths.cache_path("scripts")
+        os.makedirs(scripts_dir, exist_ok=True)
+        script_path = os.path.join(scripts_dir, "rhm_script_%s%s" % (uuid.uuid4().hex[:12], _SCRIPT_EXT[lang]))
+        with open(script_path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(code)
+
+        if background:
+            import sys
+            ps_prefix = "& " if command_shell()[0] == "powershell" else ""
+            if lang == "python":
+                cmd = '%s"%s" -u "%s"' % (ps_prefix, sys.executable, script_path)
+            elif lang == "powershell":
+                cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -File "%s"' % script_path
+            elif lang == "cmd":
+                cmd = 'cmd.exe /c "%s"' % script_path
+            else:
+                cmd = 'bash "%s"' % script_path
+            job_res = _tool_run_job({"command": cmd, "cwd": target_cwd})
+            if isinstance(job_res, dict) and "error" not in job_res:
+                job_res["script_path"] = script_path
+                job_res["lang"] = lang
+                job_res["background"] = True
+            return job_res
+
+        t0 = time.monotonic()
+        argv = _script_argv(lang, script_path)
+        popen_kwargs: Dict[str, Any] = {
+            "cwd": target_cwd,
+            "env": _child_env(),
+            "stdin": subprocess.DEVNULL,
+            "capture_output": True,
+            "timeout": timeout_sec,
+        }
+        if _IS_WINDOWS:
+            popen_kwargs["creationflags"] = _POPEN_FLAGS
+        try:
+            proc = subprocess.run(argv, **popen_kwargs)
+            stdout_text = _decode_output(proc.stdout)
+            stderr_text = _decode_output(proc.stderr)
+            truncated = False
+            if len(stdout_text) > max_chars:
+                stdout_text = stdout_text[:max_chars]
+                truncated = True
+            if len(stderr_text) > max_chars:
+                stderr_text = stderr_text[:max_chars]
+                truncated = True
+            return {
+                "stdout": stdout_text,
+                "stderr": stderr_text,
+                "exit_code": int(proc.returncode),
+                "duration": round(time.monotonic() - t0, 3),
+                "lang": lang,
+                "truncated": truncated,
+            }
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "error": "run_script timed out after %ds (use background=true for long scripts)" % timeout_sec,
+                "stdout": _decode_output(exc.stdout or b"")[:max_chars],
+                "stderr": _decode_output(exc.stderr or b"")[:max_chars],
+                "exit_code": 124,
+                "duration": round(time.monotonic() - t0, 3),
+                "lang": lang,
+            }
+        finally:
+            try:
+                os.remove(script_path)
+            except OSError:
+                pass
+    except Exception as exc:
+        return {"error": "run_script failed: %s" % exc}
+
+
+# ---------------------------------------------------------------------------
+# Tool 9e: fs_index (background SQLite FTS5 file index control & scheduling)
+# ---------------------------------------------------------------------------
+
+def _tool_fs_index(args: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        from core import fs_index as _fs_index
+        action = str(args.get("action") or "status").strip().lower()
+        idx = _fs_index.default_index()
+        if action == "status":
+            return idx.status()
+        if _read_only_active():
+            return {"error": READ_ONLY_ERROR}
+
+        raw_roots = args.get("roots")
+        if isinstance(raw_roots, list) and raw_roots:
+            roots = [_resolve(str(r)) for r in raw_roots if str(r).strip()]
+        else:
+            roots = [_WORKSPACE]
+
+        if action == "refresh":
+            background = True if args.get("background") is None else _parse_bool(args.get("background"))
+            if background:
+                started = idx.start_background_refresh(roots)
+                return {
+                    "ok": True,
+                    "action": "refresh",
+                    "background": True,
+                    "started": started,
+                    "roots": roots,
+                    "note": "Background index refresh started" if started else "Background index refresh is already running",
+                }
+            budget_ms = _clamp_int(
+                args.get("time_budget_ms"),
+                fs_search.MIN_TIME_BUDGET_MS,
+                fs_search.MAX_TIME_BUDGET_MS,
+                fs_search.DEFAULT_TIME_BUDGET_MS,
+            )
+            per_root = max(50, budget_ms // max(1, len(roots)))
+            results = [idx.refresh_root(r, time_budget_ms=per_root) for r in roots]
+            return {"ok": all(r.get("ok") for r in results), "action": "refresh", "background": False, "results": results}
+
+        if action == "schedule":
+            import sys
+            every_sec = _clamp_int(args.get("every_sec"), 60, 86400, 1800)
+            label = str(args.get("label") or "fs-index-refresh").strip()
+            roots_literal = json.dumps(roots)
+            cmd = '"%s" -c "import json; from core.fs_index import default_index; idx = default_index(); [idx.refresh_root(r) for r in %s]"' % (
+                sys.executable,
+                roots_literal.replace('"', '\"'),
+            )
+            return _tool_schedule({
+                "action": "set",
+                "label": label,
+                "every_sec": every_sec,
+                "command": cmd,
+                "note": "Periodic SQLite FTS5 file index refresh for %s" % ", ".join(roots),
+            })
+
+        return {"error": "action must be one of: status, refresh, schedule"}
+    except Exception as exc:
+        return {"error": "fs_index failed: %s" % exc}
 
 
 # ---------------------------------------------------------------------------
@@ -2882,6 +3623,8 @@ def _reap(job_id: str, proc: "subprocess.Popen", started_mono: float) -> None:
 def _tool_run_job(args: Dict[str, Any]) -> Dict[str, Any]:
     if _read_only_active():
         return {"error": READ_ONLY_ERROR}
+    if not _shell_enabled():
+        return {"error": SHELL_DISABLED_ERROR}
     try:
         command = args.get("command")
         if not isinstance(command, str) or not command.strip():
@@ -3274,6 +4017,412 @@ def _tool_load_skill(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Tool 15: git_status & git_diff (read-only, shell=False, hooks disabled)
+# ---------------------------------------------------------------------------
+
+_GIT_SAFE_PREFIX = ("git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=")
+_GIT_DEFAULT_TIMEOUT = 15
+_GIT_MAX_TIMEOUT = 60
+
+
+def _run_git(
+    git_args: List[str],
+    cwd: str,
+    timeout_sec: int = _GIT_DEFAULT_TIMEOUT,
+    max_chars: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Run git directly with shell=False and fsmonitor/hooks disabled."""
+    argv = list(_GIT_SAFE_PREFIX) + list(git_args)
+    cap = _max_chars(max_chars)
+    popen_kwargs: Dict[str, Any] = {
+        "cwd": cwd,
+        "env": _child_env(),
+        "stdin": subprocess.DEVNULL,
+        "capture_output": True,
+        "timeout": _clamp_int(timeout_sec, 1, _GIT_MAX_TIMEOUT, _GIT_DEFAULT_TIMEOUT),
+        "shell": False,
+    }
+    if _IS_WINDOWS:
+        popen_kwargs["creationflags"] = _POPEN_FLAGS
+    try:
+        proc = subprocess.run(argv, **popen_kwargs)
+    except FileNotFoundError:
+        return {"error": "git is not installed or not in PATH"}
+    except subprocess.TimeoutExpired:
+        return {"error": "git command timed out after %ds" % popen_kwargs["timeout"]}
+    except Exception as exc:
+        return {"error": "git execution failed: %s" % exc}
+
+    stdout_text = _sanitize_output(_decode_output(proc.stdout))
+    stderr_text = _sanitize_output(_decode_output(proc.stderr))
+    truncated = False
+    if len(stdout_text) > cap:
+        stdout_text = stdout_text[:cap]
+        truncated = True
+    if len(stderr_text) > cap:
+        stderr_text = stderr_text[:cap]
+        truncated = True
+
+    return {
+        "stdout": stdout_text,
+        "stderr": stderr_text,
+        "exit_code": int(proc.returncode),
+        "truncated": truncated,
+        "cwd": cwd,
+    }
+
+
+def _tool_git_status(args: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        target = _resolve(args.get("path") or ".")
+        if os.path.isfile(target):
+            target = os.path.dirname(target) or "."
+        if not os.path.isdir(target):
+            return {"error": "directory not found: %s" % target}
+        short = True if args.get("short") is None else _parse_bool(args.get("short"))
+        untracked = True if args.get("untracked") is None else _parse_bool(args.get("untracked"))
+        git_args = ["status"]
+        if short:
+            git_args.extend(["--short", "--branch"])
+        if not untracked:
+            git_args.append("--untracked-files=no")
+        return _run_git(git_args, cwd=target, max_chars=args.get("max_chars"))
+    except Exception as exc:
+        return {"error": "git_status failed: %s" % exc}
+
+
+def _tool_git_diff(args: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        raw_path = args.get("path") or "."
+        target = _resolve(raw_path)
+        file_filter = args.get("file")
+        if os.path.isfile(target):
+            if not file_filter:
+                file_filter = os.path.basename(target)
+            target = os.path.dirname(target) or "."
+        if not os.path.isdir(target):
+            return {"error": "directory not found: %s" % target}
+
+        staged = _parse_bool(args.get("staged"))
+        stat = _parse_bool(args.get("stat"))
+        ref = args.get("ref")
+        if ref is not None:
+            if not isinstance(ref, str) or not ref.strip():
+                return {"error": "ref must be a non-empty string"}
+            ref = ref.strip()
+            if ref.startswith("-"):
+                return {"error": "invalid git ref (cannot start with '-'): %s" % ref}
+
+        git_args = ["diff"]
+        if staged:
+            git_args.append("--staged")
+        if stat:
+            git_args.append("--stat")
+        if ref:
+            git_args.append(ref)
+        if file_filter is not None:
+            if not isinstance(file_filter, str) or not file_filter.strip():
+                return {"error": "file must be a non-empty string"}
+            git_args.extend(["--", file_filter.strip()])
+
+        return _run_git(git_args, cwd=target, max_chars=args.get("max_chars"))
+    except Exception as exc:
+        return {"error": "git_diff failed: %s" % exc}
+
+
+# ---------------------------------------------------------------------------
+# Tool 16: fetch_url (read-only HTTPS fetch with SSRF protection)
+# ---------------------------------------------------------------------------
+
+FETCH_URL_MAX_BYTES = 300 * 1024  # 300 KiB
+FETCH_URL_MAX_REDIRECTS = 5
+FETCH_URL_DEFAULT_TIMEOUT = 15
+FETCH_URL_MAX_TIMEOUT = 30
+
+
+class _HTMLTextExtractor(html.parser.HTMLParser):
+    """Lightweight stdlib HTML-to-text extractor skipping script/style blocks."""
+
+    _SKIP_TAGS = frozenset({"script", "style", "noscript", "template"})
+    _BLOCK_TAGS = frozenset({
+        "p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
+        "section", "article", "header", "footer", "blockquote", "pre",
+    })
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._skip_depth = 0
+        self._parts: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        t = tag.lower()
+        if t in self._SKIP_TAGS:
+            self._skip_depth += 1
+        elif self._skip_depth == 0 and t in self._BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        t = tag.lower()
+        if t in self._SKIP_TAGS and self._skip_depth > 0:
+            self._skip_depth -= 1
+        elif self._skip_depth == 0 and t in self._BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth == 0 and data:
+            self._parts.append(data)
+
+    def get_text(self) -> str:
+        raw = "".join(self._parts)
+        lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in raw.splitlines()]
+        compact = "\n".join(ln for ln in lines if ln)
+        return compact
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Disable automatic redirect following so each hop is SSRF-validated."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _is_blocked_ip(ip_str: str) -> bool:
+    """Return True if *ip_str* is private, loopback, link-local, multicast, reserved, or unspecified."""
+    try:
+        addr = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return True
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    return bool(
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_reserved
+        or addr.is_unspecified
+        or not addr.is_global
+    )
+
+
+def _validate_fetch_url(url: str) -> str:
+    """Validate HTTPS scheme and ensure every resolved IP is globally routable."""
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("url is required and must be a non-empty string")
+    cleaned = url.strip()
+    parsed = urllib.parse.urlsplit(cleaned)
+    if parsed.scheme.lower() != "https":
+        raise ValueError("only https:// URLs are allowed (got %r)" % (parsed.scheme or "none",))
+    if parsed.username or parsed.password:
+        raise ValueError("embedded URL credentials are not allowed")
+    host = parsed.hostname
+    if not host:
+        raise ValueError("URL must include a hostname")
+    port = parsed.port or 443
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ValueError("DNS resolution failed for %s: %s" % (host, exc))
+    if not infos:
+        raise ValueError("DNS resolution returned no addresses for %s" % host)
+    for info in infos:
+        ip_str = info[4][0]
+        if _is_blocked_ip(ip_str):
+            raise ValueError("SSRF blocked: %s resolved to restricted IP %s" % (host, ip_str))
+    return cleaned
+
+
+def _strip_html_to_text(html_text: str) -> str:
+    parser = _HTMLTextExtractor()
+    parser.feed(html_text)
+    parser.close()
+    return parser.get_text()
+
+
+#: Explicit CA bundle for fetch_url. An operator behind a TLS-inspecting proxy
+#: points this at the proxy PEM; it is tried before every built-in store.
+FETCH_URL_CA_ENV = tls.CA_BUNDLE_ENV
+#: Opt-in escape hatch for a host whose trust store cannot verify anything.
+#: Never the default: the SSRF guard decides where a request goes, while this
+#: switch decides whom it believes, and trusting everyone on every node would
+#: turn a reviewed guard into a formality.
+FETCH_URL_INSECURE_ENV = "MESH_TLS_INSECURE"
+
+_ssl_context_lock = threading.Lock()
+_ssl_store_cache: Optional[Tuple[str, "ssl.SSLContext"]] = None
+
+
+def _fetch_url_ssl_stores() -> List[Tuple[str, "ssl.SSLContext"]]:
+    """TLS trust stores to try, the one that worked last time first.
+
+    The choice itself - operator bundle, then certifi, then the platform store -
+    lives in :mod:`core.tls`, so the updater and every other HTTPS client make
+    the same decision. This wrapper adds what only this tool has: the store that
+    verified last time is tried first, and ``MESH_TLS_INSECURE`` may append an
+    unverified context as an explicit last resort.
+    """
+    global _ssl_store_cache
+    stores: List[Tuple[str, "ssl.SSLContext"]] = []
+    with _ssl_context_lock:
+        cached = _ssl_store_cache
+    if cached is not None:
+        stores.append(cached)
+
+    for label, context in tls.stores():
+        if any(context is existing for _, existing in stores):
+            continue
+        stores.append((label, context))
+
+    if _parse_bool(os.environ.get(FETCH_URL_INSECURE_ENV)):
+        try:
+            stores.append(("insecure", ssl._create_unverified_context()))
+        except Exception:
+            pass
+    return stores
+
+
+def _remember_fetch_url_store(label: str, context: "ssl.SSLContext") -> None:
+    """Keep the store that verified, so later fetches do not retry dead ones."""
+    global _ssl_store_cache
+    with _ssl_context_lock:
+        _ssl_store_cache = (label, context)
+
+
+def _fetch_url_attempt(
+    url: str,
+    context: "ssl.SSLContext",
+    max_bytes: int,
+    timeout_sec: int,
+) -> Tuple[str, int, str, bytes, bool, int]:
+    """One fetch, redirects included, over one TLS context.
+
+    Every hop is re-validated by :func:`_validate_fetch_url` before it is opened,
+    so a redirect cannot walk the request into a private address.
+    """
+    opener = urllib.request.build_opener(
+        _NoRedirectHandler(),
+        urllib.request.HTTPSHandler(context=context),
+    )
+    headers = {"User-Agent": "remote-harness-mcp/fetch_url"}
+    current_url = url
+    redirects = 0
+    status = 0
+    content_type = ""
+    raw = b""
+    truncated = False
+
+    while True:
+        req = urllib.request.Request(current_url, headers=headers, method="GET")
+        try:
+            resp = opener.open(req, timeout=timeout_sec)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (301, 302, 303, 307, 308):
+                location = exc.headers.get("Location") if exc.headers else None
+                exc.close()
+                if not location:
+                    raise ValueError("redirect (%d) without Location header" % exc.code)
+                redirects += 1
+                if redirects > FETCH_URL_MAX_REDIRECTS:
+                    raise ValueError("too many redirects (max %d)" % FETCH_URL_MAX_REDIRECTS)
+                current_url = _validate_fetch_url(urllib.parse.urljoin(current_url, location))
+                continue
+            status = exc.code
+            content_type = (exc.headers.get("Content-Type") or "") if exc.headers else ""
+            try:
+                raw = exc.read(max_bytes + 1)
+            except Exception:
+                raw = b""
+            finally:
+                exc.close()
+            break
+        else:
+            with resp:
+                status = int(getattr(resp, "status", 200) or 200)
+                content_type = resp.headers.get("Content-Type") or ""
+                if status in (301, 302, 303, 307, 308):
+                    location = resp.headers.get("Location")
+                    if not location:
+                        raise ValueError("redirect (%d) without Location header" % status)
+                    redirects += 1
+                    if redirects > FETCH_URL_MAX_REDIRECTS:
+                        raise ValueError("too many redirects (max %d)" % FETCH_URL_MAX_REDIRECTS)
+                    current_url = _validate_fetch_url(urllib.parse.urljoin(current_url, location))
+                    continue
+                raw = resp.read(max_bytes + 1)
+            break
+
+    if len(raw) > max_bytes:
+        raw = raw[:max_bytes]
+        truncated = True
+    return current_url, status, content_type, raw, truncated, redirects
+
+
+def _tool_fetch_url(args: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        url = args.get("url")
+        start_url = _validate_fetch_url(url)
+        max_bytes = _clamp_int(args.get("max_bytes"), 1, FETCH_URL_MAX_BYTES, FETCH_URL_MAX_BYTES)
+        timeout_sec = _clamp_int(
+            args.get("timeout_sec"), 1, FETCH_URL_MAX_TIMEOUT, FETCH_URL_DEFAULT_TIMEOUT
+        )
+        strip_html = True if args.get("strip_html") is None else _parse_bool(args.get("strip_html"))
+
+        stores = _fetch_url_ssl_stores()
+        attempt: Optional[Tuple[str, int, str, bytes, bool, int]] = None
+        tls_error: Optional[BaseException] = None
+        for store_label, context in stores:
+            try:
+                attempt = _fetch_url_attempt(start_url, context, max_bytes, timeout_sec)
+            except (urllib.error.URLError, ssl.SSLError) as exc:
+                reason = getattr(exc, "reason", exc)
+                if isinstance(reason, ssl.SSLError):
+                    tls_error = reason
+                    continue
+                raise
+            _remember_fetch_url_store(store_label, context)
+            break
+
+        if attempt is None:
+            host = urllib.parse.urlsplit(start_url).hostname
+            tried = ", ".join(label for label, _ in stores) or "none"
+            return {
+                "error": (
+                    "fetch_url failed: TLS certificate verification failed for %s (%s); "
+                    "trust stores tried: %s. Point %s at a CA bundle (PEM) or install certifi."
+                ) % (host, tls_error, tried, FETCH_URL_CA_ENV),
+                "tls_error": str(tls_error or ""),
+            }
+
+        current_url, status, content_type, raw, truncated, redirects = attempt
+
+        charset = "utf-8"
+        m = re.search(r"charset=([A-Za-z0-9._-]+)", content_type, re.IGNORECASE)
+        if m:
+            charset = m.group(1)
+        try:
+            text = raw.decode(charset, errors="replace")
+        except LookupError:
+            text = raw.decode("utf-8", errors="replace")
+
+        is_html = "html" in content_type.lower() or text.lstrip()[:64].lower().startswith(("<!doctype html", "<html"))
+        if strip_html and is_html:
+            text = _strip_html_to_text(text)
+
+        return {
+            "url": current_url,
+            "status": status,
+            "content_type": content_type,
+            "bytes": len(raw),
+            "truncated": truncated,
+            "redirects": redirects,
+            "content": _sanitize_output(text),
+        }
+    except ValueError as exc:
+        return {"error": str(exc)}
+    except Exception as exc:
+        return {"error": "fetch_url failed: %s" % exc}
+
+# ---------------------------------------------------------------------------
 # Tool definitions (MCP schemas)
 # ---------------------------------------------------------------------------
 
@@ -3354,8 +4503,12 @@ TOOL_ANNOTATIONS: Dict[str, Dict[str, Any]] = {
     "get_orchestration_skill": _ANNOTATIONS_READ_ONLY,
     "list_dir": _ANNOTATIONS_READ_ONLY,
     "read_file": _ANNOTATIONS_READ_ONLY,
+    # Same reasoning as read_file: the file is read, nothing on the host changes.
+    "read_media": _ANNOTATIONS_READ_ONLY,
     "grep_search": _ANNOTATIONS_READ_ONLY,
     "glob_find": _ANNOTATIONS_READ_ONLY,
+    "win_places": _ANNOTATIONS_READ_ONLY,
+    "batch_read": _ANNOTATIONS_READ_ONLY,
     "job_output": _ANNOTATIONS_READ_ONLY,
     "job_list": _ANNOTATIONS_READ_ONLY,
     "share_list": _ANNOTATIONS_READ_ONLY,
@@ -3370,7 +4523,7 @@ TOOL_ANNOTATIONS: Dict[str, Dict[str, Any]] = {
     # starts nothing; the client may still ask, so the hint stays honest.
     "goal": _ANNOTATIONS_LOCAL_WRITE,
     # A timer may run a command later, without a client dialog at that moment:
-    # honest local write, and in approval mode creating it needs one approval.
+    # honest local write.
     "schedule": _ANNOTATIONS_LOCAL_WRITE,
     # Stopping a background job is not an install and not a delete, and
     # bash_exec can terminate the same process anyway; a prompt here would only
@@ -3378,6 +4531,9 @@ TOOL_ANNOTATIONS: Dict[str, Dict[str, Any]] = {
     "job_kill": _ANNOTATIONS_LOCAL_WRITE,
     "write_file": _ANNOTATIONS_LOCAL_WRITE,
     "edit_file": _ANNOTATIONS_LOCAL_WRITE,
+    "batch_edit": _ANNOTATIONS_LOCAL_WRITE,
+    "run_script": _ANNOTATIONS_LOCAL_WRITE,
+    "fs_index": _ANNOTATIONS_LOCAL_WRITE,
     # A screenshot writes one PNG (in the node's cache unless a path is given) and
     # changes nothing else on the host: ordinary local work, never destructive.
     "screen_capture": _ANNOTATIONS_LOCAL_WRITE,
@@ -3405,80 +4561,60 @@ TOOL_ANNOTATIONS: Dict[str, Dict[str, Any]] = {
     "mesh_update": _ANNOTATIONS_DESTRUCTIVE,
 }
 
+_ANNOTATIONS_READ_ONLY_OPEN_WORLD: Dict[str, Any] = {
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": True,
+}
+
 TOOLS: List[Dict[str, Any]] = [
     {
         "name": "mesh_status",
         "title": "Mesh Status",
-        "description": ("Confirm this node is reachable. Call this first if you think the host is "
-                        "offline; it reports live evidence from the host itself, plus what kind "
-                        "of machine answered (device_class, scenario) and its battery level."),
+        "description": "Node reachability, device class, scenario, battery.",
         "inputSchema": _schema({}),
     },
     {
         "name": "system_info",
         "title": "System Info",
-        "description": ("One-call host summary: OS, desktop, user, home, disks, memory, load, "
-                        "top processes, the current wallpaper, and the device blocks - "
-                        "battery and charging, network and signal, language, time, timezone, "
-                        "CPU, RAM, storage, cameras, microphones and sensors. On a phone it "
-                        "reads Android through the termux-api commands; on a laptop it reads "
-                        "the local system. Every device block carries available/source, and a "
-                        "block the platform cannot answer says why instead of showing a zero."),
+        "description": "Host OS, user, disks, RAM, processes, telemetry.",
         "inputSchema": _schema({}),
     },
     {
         "name": "system_vitals",
         "title": "System Vitals",
-        "description": ("Retrieve CPU, RAM and disk metrics of the local host, plus the "
-                        "battery block (and thermal sensors where the platform exposes them)."),
+        "description": "CPU, RAM, disk, battery, thermal metrics.",
         "inputSchema": _schema({}),
     },
     {
         "name": "screen_capture",
         "title": "Screen Capture",
-        "description": (
-            "Take a PNG screenshot of the host's desktop and save it on the host. "
-            "Windows captures through GDI (works on a clean install, no PowerShell "
-            "needed); a headless Linux server and an Android app session have no "
-            "accessible display, so they answer available=false with the reason "
-            "instead of returning a black image. Use share_file on the returned path "
-            "when the picture has to reach the chat."
-        ),
-        "inputSchema": _schema({
-            "path": {"type": "string",
-                     "description": ("Optional destination file (default: a timestamped "
-                                     "PNG in the node's cache directory).")},
-        }),
+        "description": "Save desktop PNG screenshot on host.",
+        "inputSchema": _schema({"path": {"type": "string"}}),
     },
     {
         "name": "get_orchestration_skill",
         "title": "Get Orchestration Skill",
-        "description": "Load the current Remote Harness orchestration skill and rules.",
+        "description": "Load Remote Harness orchestration rules.",
         "inputSchema": _schema({}),
     },
     {
         "name": "list_dir",
         "title": "List Directory",
-        "description": "List files and directories at the given path (workspace by default).",
-        "inputSchema": _schema({"path": {"type": "string", "description": "Directory or file path."}}),
+        "description": "List directory entries (default workspace).",
+        "inputSchema": _schema({"path": {"type": "string"}}),
     },
     {
         "name": "bash_exec",
         "title": "Execute Bash Command",
-        "description": (
-            "Execute a shell command on the local host. The shell matches the host, not this "
-            "tool's name: run system_info and read command_shell first (bash on Linux/macOS, "
-            "PowerShell or cmd.exe on Windows) and write the command for that shell. "
-            "Output is paginated: when the result is "
-            "cut, call again with cursor=next_cursor to continue (nothing is dropped). Large "
-            "outputs (above 2 MB) are spooled to a file returned in saved_to."
-        ),
+        "description": "Run host shell command; paginated, >2MB spooled.",
         "inputSchema": _schema(
             {
-                "command": {"type": "string", "description": "Shell command to execute."},
-                "timeout_sec": {"type": "integer", "description": "Timeout in seconds (1-120, default 25)."},
-                "max_chars": {"type": "integer", "description": "Maximum characters per response."},
-                "cursor": {"type": "integer", "description": "Character offset to continue from."},
+                "command": {"type": "string"},
+                "timeout_sec": {"type": "integer", "description": "1-120s (25)."},
+                "max_chars": {"type": "integer"},
+                "cursor": {"type": "integer"},
             },
             ["command"],
         ),
@@ -3486,17 +4622,35 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "read_file",
         "title": "Read File",
-        "description": (
-            "Read a text file with %4d | line numbers, optionally restricted to a line range. "
-            "Supports max_chars/cursor pagination."
-        ),
+        "description": "Read numbered text lines; rejects binaries (use read_media).",
         "inputSchema": _schema(
             {
-                "path": {"type": "string", "description": "File path to read."},
-                "start_line": {"type": "integer", "description": "First line (1-based)."},
-                "end_line": {"type": "integer", "description": "Last line (inclusive)."},
-                "max_chars": {"type": "integer", "description": "Maximum characters per response."},
-                "cursor": {"type": "integer", "description": "Character offset to continue from."},
+                "path": {"type": "string"},
+                "start_line": {"type": "integer"},
+                "end_line": {"type": "integer"},
+                "max_chars": {"type": "integer"},
+                "cursor": {"type": "integer"},
+            },
+            ["path"],
+        ),
+    },
+    {
+        "name": "read_media",
+        "title": "Read Media",
+        "description": "Read image/PDF/audio/video/text as MCP blocks.",
+        "inputSchema": _schema(
+            {
+                "path": {"type": "string"},
+                "offset": {"type": "integer"},
+                "max_chars": {"type": "integer"},
+                "max_side": {"type": "integer"},
+                "max_frames": {"type": "integer"},
+                "include_audio": {"type": "boolean"},
+                "ocr": {"type": "boolean"},
+                "page_start": {"type": "integer"},
+                "page_end": {"type": "integer"},
+                "render_pages": {"type": "boolean"},
+                "encoding": {"type": "string"},
             },
             ["path"],
         ),
@@ -3504,17 +4658,13 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "write_file",
         "title": "Write File",
-        "description": (
-            "Atomically create or overwrite a file (tmp file + os.replace). On Windows the "
-            "optional mode is not honoured (no POSIX permission bits) and the result says so."
-        ),
+        "description": "Atomically write file (blocks .git/hooks & .git/config).",
         "inputSchema": _schema(
             {
-                "path": {"type": "string", "description": "File path to write."},
-                "content": {"type": "string", "description": "Full file content."},
-                "create_dirs": {"type": "boolean", "description": "Create parent directories (default true)."},
-                "mode": {"type": "string",
-                         "description": "Octal file mode, e.g. \"0644\". POSIX only; ignored on Windows."},
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+                "create_dirs": {"type": "boolean"},
+                "mode": {"type": "string"},
             },
             ["path", "content"],
         ),
@@ -3522,18 +4672,14 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "edit_file",
         "title": "Edit File",
-        "description": (
-            "Replace an exact substring in a file. old_string must match exactly once unless "
-            "replace_all is set. Optional expected_sha256 guards against overwriting a file "
-            "that changed since it was read."
-        ),
+        "description": "Replace exact substring (optional expected_sha256).",
         "inputSchema": _schema(
             {
-                "path": {"type": "string", "description": "File path to edit."},
-                "old_string": {"type": "string", "description": "Exact text to replace."},
-                "new_string": {"type": "string", "description": "Replacement text."},
-                "expected_sha256": {"type": "string", "description": "Expected current sha256 of the file."},
-                "replace_all": {"type": "boolean", "description": "Replace every occurrence."},
+                "path": {"type": "string"},
+                "old_string": {"type": "string"},
+                "new_string": {"type": "string"},
+                "expected_sha256": {"type": "string"},
+                "replace_all": {"type": "boolean"},
             },
             ["path", "old_string", "new_string"],
         ),
@@ -3541,16 +4687,20 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "grep_search",
         "title": "Grep Search",
-        "description": "Recursively search file contents; skips binary files and heavy directories.",
+        "description": "Search file contents; json or compact (path:line: text).",
         "inputSchema": _schema(
             {
-                "pattern": {"type": "string", "description": "Regular expression (or literal text with fixed)."},
-                "path": {"type": "string", "description": "Root directory or file (default workspace)."},
-                "glob": {"type": "string", "description": "File name filter, e.g. *.py."},
-                "limit": {"type": "integer", "description": "Maximum matches (1-1000, default 200)."},
-                "ignore_case": {"type": "boolean", "description": "Case-insensitive search."},
-                "fixed": {"type": "boolean", "description": "Treat pattern as literal text."},
-                "context": {"type": "integer", "description": "Context lines around each match."},
+                "pattern": {"type": "string"},
+                "path": {"type": "string"},
+                "glob": {"type": "string"},
+                "limit": {"type": "integer"},
+                "ignore_case": {"type": "boolean"},
+                "fixed": {"type": "boolean"},
+                "context": {"type": "integer"},
+                "max_depth": {"type": "integer"},
+                "time_budget_ms": {"type": "integer"},
+                "include_ignored": {"type": "boolean"},
+                "format": {"type": "string", "enum": ["compact", "json"]},
             },
             ["pattern"],
         ),
@@ -3558,25 +4708,123 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "glob_find",
         "title": "Glob Find",
-        "description": "Find files by glob pattern (* and **).",
+        "description": "Find files by glob with pruning and optional FTS5 index.",
         "inputSchema": _schema(
             {
-                "pattern": {"type": "string", "description": "Glob pattern, e.g. **/*.py."},
-                "path": {"type": "string", "description": "Root directory (default workspace)."},
+                "pattern": {"type": "string"},
+                "path": {"type": "string"},
+                "max_depth": {"type": "integer"},
+                "max_results": {"type": "integer"},
+                "time_budget_ms": {"type": "integer"},
+                "include_ignored": {"type": "boolean"},
+                "use_index": {"type": "string", "enum": ["auto", "only", "off"]},
             },
             ["pattern"],
         ),
     },
     {
-        "name": "run_job",
-        "title": "Run Background Job",
-        "description": "Start a command in the background; returns a job_id for job_output/job_kill. "
-                       "On an Android/Termux node the job's wake lock is taken automatically so "
-                       "Android does not freeze it while the screen is off.",
+        "name": "win_places",
+        "title": "Windows Places & Recent Files",
+        "description": "Known Folders, recent files, and top-level drive dirs.",
+        "inputSchema": _schema({
+            "recent_limit": {"type": "integer"},
+            "top_level_limit": {"type": "integer"},
+            "only_existing_recent": {"type": "boolean"},
+        }),
+    },
+    {
+        "name": "batch_read",
+        "title": "Batch Read",
+        "description": "Run up to 16 read-only tool calls in one call.",
         "inputSchema": _schema(
             {
-                "command": {"type": "string", "description": "Shell command to run in the background."},
-                "cwd": {"type": "string", "description": "Working directory (default workspace)."},
+                "ops": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "tool": {"type": "string"},
+                            "args": {"type": "object"},
+                        },
+                        "required": ["tool"],
+                    },
+                },
+                "time_budget_ms": {"type": "integer"},
+                "max_total_chars": {"type": "integer"},
+            },
+            ["ops"],
+        ),
+    },
+    {
+        "name": "batch_edit",
+        "title": "Batch Edit / Write",
+        "description": "Apply up to 16 edit/write ops (supports dry_run).",
+        "inputSchema": _schema(
+            {
+                "ops": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "op": {"type": "string", "enum": ["edit", "write"]},
+                            "path": {"type": "string"},
+                            "content": {"type": "string"},
+                            "old_string": {"type": "string"},
+                            "new_string": {"type": "string"},
+                            "expected_sha256": {"type": "string"},
+                            "replace_all": {"type": "boolean"},
+                            "create_dirs": {"type": "boolean"},
+                        },
+                        "required": ["op", "path"],
+                    },
+                },
+                "stop_on_error": {"type": "boolean"},
+                "dry_run": {"type": "boolean"},
+            },
+            ["ops"],
+        ),
+    },
+    {
+        "name": "run_script",
+        "title": "Run Multi-Step Script",
+        "description": "Run temp python/powershell/bash/cmd script.",
+        "inputSchema": _schema(
+            {
+                "code": {"type": "string"},
+                "lang": {"type": "string", "enum": ["python", "powershell", "bash", "cmd"]},
+                "cwd": {"type": "string"},
+                "timeout_sec": {"type": "integer"},
+                "background": {"type": "boolean"},
+                "max_chars": {"type": "integer"},
+            },
+            ["code"],
+        ),
+    },
+    {
+        "name": "fs_index",
+        "title": "Local File Index",
+        "description": "Manage local SQLite FTS5 index (status/refresh/schedule).",
+        "inputSchema": _schema(
+            {
+                "action": {"type": "string", "enum": ["status", "refresh", "schedule"]},
+                "roots": {"type": "array", "items": {"type": "string"}},
+                "background": {"type": "boolean"},
+                "time_budget_ms": {"type": "integer"},
+                "every_sec": {"type": "integer"},
+                "label": {"type": "string"},
+            }
+        ),
+    },
+    {
+        "name": "run_job",
+        "title": "Run Background Job",
+        "description": "Start background command; returns job_id.",
+        "inputSchema": _schema(
+            {
+                "command": {"type": "string"},
+                "cwd": {"type": "string"},
             },
             ["command"],
         ),
@@ -3584,13 +4832,13 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "job_output",
         "title": "Job Output",
-        "description": "Read a background job's output, optionally waiting up to 20 s for completion.",
+        "description": "Read background job output (wait up to 20s).",
         "inputSchema": _schema(
             {
-                "job_id": {"type": "string", "description": "Job id returned by run_job."},
-                "wait_ms": {"type": "integer", "description": "Milliseconds to wait (0-20000)."},
-                "max_chars": {"type": "integer", "description": "Maximum stdout characters per response."},
-                "cursor": {"type": "integer", "description": "stdout character offset to continue from."},
+                "job_id": {"type": "string"},
+                "wait_ms": {"type": "integer"},
+                "max_chars": {"type": "integer"},
+                "cursor": {"type": "integer"},
             },
             ["job_id"],
         ),
@@ -3598,11 +4846,11 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "job_kill",
         "title": "Job Kill",
-        "description": "Terminate a running background job.",
+        "description": "Terminate a background job.",
         "inputSchema": _schema(
             {
-                "job_id": {"type": "string", "description": "Job id returned by run_job."},
-                "signal": {"type": "string", "description": "TERM (default), KILL, INT, HUP or QUIT."},
+                "job_id": {"type": "string"},
+                "signal": {"type": "string"},
             },
             ["job_id"],
         ),
@@ -3610,68 +4858,33 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "job_list",
         "title": "Job List",
-        "description": "List recent background jobs, newest first (20 by default, max 50).",
-        "inputSchema": _schema({
-            "limit": {"type": "integer", "description": "How many jobs to return (1-50, default 20)."},
-        }),
+        "description": "List recent background jobs (max 50).",
+        "inputSchema": _schema({"limit": {"type": "integer"}}),
     },
     {
         "name": "mesh_update",
         "title": "Mesh Update (self-update)",
-        "description": (
-            "Report, check for, or install a newer release of this node's own code from "
-            "GitHub. action=status reads local state without network; action=check asks "
-            "GitHub Releases; action=apply downloads the release payload, verifies its "
-            "published SHA-256, installs it with a rollback backup and restarts the agent "
-            "(the tunnel drops for a few seconds; the tool result is still sent first). "
-            "Use status or check first, and apply only when the operator wants this node "
-            "updated now."
-        ),
+        "description": "Check or apply GitHub release update.",
         "inputSchema": _schema({
-            "action": {"type": "string", "enum": ["status", "check", "apply"],
-                       "description": "What to do (default: status)."},
-            "force": {"type": "boolean",
-                      "description": "Ignore the check interval and the failed-apply backoff."},
-            "offline": {"type": "boolean",
-                        "description": "check: report the cached answer without touching the network."},
-            "restart": {"type": "boolean",
-                        "description": "apply: restart the node afterwards (default true)."},
+            "action": {"type": "string", "enum": ["status", "check", "apply"]},
+            "force": {"type": "boolean"},
+            "offline": {"type": "boolean"},
+            "restart": {"type": "boolean"},
         }),
     },
     {
         "name": "node_control",
         "title": "Node Control (settings)",
-        "description": (
-            "Read or change this node's own switches: the access mode (read_only / "
-            "approval / full), pause and resume, the working directory (the `cd` of "
-            "every other tool - follow it with list_dir), the isolated container "
-            "(Docker/Podman with only the project mounted) and the remote-control "
-            "lock. Use action=status first: it answers the current mode, paused, "
-            "workspace, isolation and remote_control without changing anything. A "
-            "node in read-only mode cannot be lifted by a remote caller, and remote "
-            "control must be switched back on at the machine - both refusals say so."
-        ),
+        "description": "Read/change mode, pause, workspace (cd), sandbox, remote_control.",
         "inputSchema": _schema(
             {
                 "action": {"type": "string",
-                           "enum": ["status", "mode", "pause", "resume", "cd", "sandbox",
-                                    "remote_control"],
-                           "description": "What to do (status reports without changing anything)."},
-                "mode": {"type": "string", "enum": ["read_only", "approval", "full"],
-                         "description": "mode: the access mode to apply."},
-                "path": {"type": "string",
-                         "description": "cd: the directory that becomes the working directory."},
-                "workspace": {"type": "string",
-                              "description": "sandbox: project directory to mount (default: the "
-                                             "current working directory)."},
-                "enabled": {"type": "boolean",
-                            "description": "sandbox: start (true) or stop (false) the isolated "
-                                           "container; remote_control: allow or forbid remote "
-                                           "settings changes."},
-                "network": {"type": "boolean",
-                            "description": "sandbox: allow network access inside the container "
-                                           "(default false; in approval mode this asks the "
-                                           "operator first)."},
+                           "enum": ["status", "mode", "pause", "resume", "cd", "sandbox", "remote_control"]},
+                "mode": {"type": "string", "enum": ["read_only", "full"]},
+                "path": {"type": "string"},
+                "workspace": {"type": "string"},
+                "enabled": {"type": "boolean"},
+                "network": {"type": "boolean"},
             },
             ["action"],
         ),
@@ -3679,25 +4892,13 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "goal",
         "title": "Goal (persistent objective)",
-        "description": (
-            "Record the objective this chat is working on, so it survives a "
-            "reconnect, an agent restart or a new session: the node stores it and "
-            "the gateway puts it back into the session instructions (and into "
-            "mesh_status). action=set with text starts or replaces the objective; "
-            "get reads it; complete or blocked closes it (note optional); clear "
-            "forgets it. Use it when the user states a goal that outlives this "
-            "turn, not for every message. The note is metadata: it runs nothing "
-            "and works in read-only mode."
-        ),
+        "description": "Set/get/complete/block/clear persistent objective.",
         "inputSchema": _schema(
             {
                 "action": {"type": "string",
-                           "enum": ["set", "get", "complete", "blocked", "clear"],
-                           "description": "What to do (default: get)."},
-                "text": {"type": "string",
-                         "description": "set: the objective, as one sentence."},
-                "note": {"type": "string",
-                         "description": "complete/blocked: what was achieved, or what stops it."},
+                           "enum": ["set", "get", "complete", "blocked", "clear"]},
+                "text": {"type": "string"},
+                "note": {"type": "string"},
             },
             ["action"],
         ),
@@ -3705,37 +4906,17 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "schedule",
         "title": "Schedule (timer / cron on the node)",
-        "description": (
-            "Set a timer on the node and continue when it fires - the way to survive "
-            "a long task, because a tool call must answer within ~30 s and the chat "
-            "cannot be woken by the server. action=set needs a label and exactly one "
-            "of after_sec (once), every_sec (repeat, >=10) or at (\"HH:MM\" daily); "
-            "an optional command runs as a background job at that moment (job id is "
-            "kept in the continuation), a note-only timer is a reminder. When it "
-            "fires, the firing appears in mesh_status and in the session "
-            "instructions as a pending continuation: read it, collect the job with "
-            "job_output if there is one, and acknowledge it with action=ack. "
-            "action=list shows timers and pending continuations, action=cancel "
-            "stops one by id."
-        ),
+        "description": "Set/list/cancel/ack node timers.",
         "inputSchema": _schema(
             {
-                "action": {"type": "string",
-                           "enum": ["set", "list", "cancel", "ack"],
-                           "description": "What to do (default: list)."},
-                "label": {"type": "string", "description": "set: short name for the timer."},
-                "command": {"type": "string",
-                            "description": "set: optional shell command to run when it fires."},
-                "note": {"type": "string",
-                         "description": "set: what to remember/continue with."},
-                "after_sec": {"type": "integer",
-                              "description": "set: fire once after this many seconds."},
-                "every_sec": {"type": "integer",
-                              "description": "set: repeat every this many seconds (>=10)."},
-                "at": {"type": "string",
-                       "description": "set: fire every day at this local time, e.g. 09:30."},
-                "id": {"type": "string",
-                       "description": "cancel/ack: the timer id, or the continuation id."},
+                "action": {"type": "string", "enum": ["set", "list", "cancel", "ack"]},
+                "label": {"type": "string"},
+                "command": {"type": "string"},
+                "note": {"type": "string"},
+                "after_sec": {"type": "integer"},
+                "every_sec": {"type": "integer"},
+                "at": {"type": "string"},
+                "id": {"type": "string"},
             },
             ["action"],
         ),
@@ -3743,147 +4924,72 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "device_info",
         "title": "Device Info",
-        "description": (
-            "One-call report for the device this node runs on: battery and charging, "
-            "network interfaces with Wi-Fi and cellular signal strength, language, time and "
-            "timezone, CPU, RAM, storage, cameras, microphones, sensors and what the platform "
-            "can actually reach. On an Android/Termux node it reads the phone through the "
-            "termux-api commands; on a laptop or desktop it reads the local system. Every "
-            "section carries available/source, so 'not exposed here' is never reported as a "
-            "zero - and on a non-phone the phone-only sections explain themselves instead of "
-            "failing. Use device_control, device_capture or device_messages to act."
-        ),
+        "description": "Device telemetry: battery, network, hardware, sensors.",
         "inputSchema": _schema({
             "section": {"type": "string",
                         "enum": ["summary", "all", "device", "battery", "network", "locale",
                                  "time", "hardware", "storage", "cameras", "microphones",
-                                 "sensors", "capabilities"],
-                        "description": "Which blocks to return (default: all)."},
-            "sensor": {"type": "string",
-                       "description": "Name one sensor to take a single live sample from "
-                                      "(Android only; needs a name from the sensors block)."},
-            "fresh": {"type": "boolean",
-                      "description": "Bypass the short-lived cache (default false)."},
-            "quick": {"type": "boolean",
-                      "description": "Skip the slow sections: network, cameras, microphones, "
-                                     "sensors (default false)."},
+                                 "sensors", "capabilities"]},
+            "sensor": {"type": "string"},
+            "fresh": {"type": "boolean"},
+            "quick": {"type": "boolean"},
         }),
     },
     {
         "name": "device_control",
         "title": "Device Control",
-        "description": (
-            "Reversible actions on the node's own device: torch, vibrate, volume, screen "
-            "brightness, text-to-speech, toast, notifications, clipboard, media playback, "
-            "media scan, wake lock, download, opening or sharing a file, a text dialog and "
-            "the wallpaper. Each action is a fixed termux-api command on Android and an "
-            "explained no-op elsewhere; the result names the command and its argv so nothing "
-            "is guessed. Nothing here is destructive, and all of it is refused when the node "
-            "runs with MESH_READ_ONLY=1."
-        ),
+        "description": "Reversible device actions (torch, volume, notify, clipboard, media).",
         "inputSchema": _schema({
-            "action": {"type": "string",
-                       "enum": list(DEVICE_CONTROL_ACTIONS),
-                       "description": "Action to perform."},
-            "on": {"type": "boolean", "description": "torch: true lights it, false puts it out."},
-            "value": {"type": "integer",
-                      "description": "vibrate: milliseconds; volume: level 0-15; brightness: 0-255."},
-            "stream": {"type": "string", "enum": list(_DEVICE_STREAMS),
-                       "description": "volume: which audio stream (default music)."},
-            "text": {"type": "string",
-                     "description": "tts_speak/toast/notify/clipboard_set/dialog body; media: "
-                                    "play|pause|stop|info."},
-            "title": {"type": "string", "description": "notify/dialog: heading text."},
-            "id": {"type": "string",
-                   "description": "notify_remove: the id the notification was posted with."},
-            "url": {"type": "string", "description": "download/open/wallpaper: URL to use."},
-            "path": {"type": "string",
-                     "description": "open/share/media/download/media_scan/wallpaper: file on the node."},
-            "state": {"type": "string", "enum": ["acquire", "release", "status"],
-                      "description": "wakelock: what to do (default status)."},
-            "timeout_sec": {"type": "integer",
-                            "description": "dialog: seconds to wait for the person (5-120, default 30)."},
+            "action": {"type": "string", "enum": list(DEVICE_CONTROL_ACTIONS)},
+            "on": {"type": "boolean"},
+            "value": {"type": "integer"},
+            "stream": {"type": "string", "enum": list(_DEVICE_STREAMS)},
+            "text": {"type": "string"},
+            "title": {"type": "string"},
+            "id": {"type": "string"},
+            "url": {"type": "string"},
+            "path": {"type": "string"},
+            "state": {"type": "string", "enum": ["acquire", "release", "status"]},
+            "timeout_sec": {"type": "integer"},
         }, ["action"]),
     },
     {
         "name": "device_capture",
         "title": "Device Capture",
-        "description": (
-            "Camera, microphone, location, fingerprint, USB and infrared actions. These "
-            "observe the physical world or authenticate the person holding the phone, but "
-            "they install and remove nothing, so they carry no confirmation prompt - the "
-            "guard is the node's own switch (MESH_DEVICE, MESH_DEVICE_ACTIONS, "
-            "MESH_READ_ONLY), which refuses a call before any command runs. A photo or a "
-            "recording is written to the node's capture directory and is never uploaded "
-            "anywhere by itself; "
-            "fingerprint returns only the verdict, never biometric data; USB access requests "
-            "permission and returns the descriptor but deliberately refuses to run a program "
-            "for you; and on Android 11+ the Termux:API app has to be in the foreground for a "
-            "recording."
-        ),
+        "description": "Phone capture: camera, mic, location, fingerprint, USB, IR.",
         "inputSchema": _schema({
-            "action": {"type": "string",
-                       "enum": list(DEVICE_CAPTURE_ACTIONS),
-                       "description": "Capture action to perform."},
-            "camera_id": {"type": "integer",
-                          "description": "camera_photo: id from camera_list (default 0)."},
-            "path": {"type": "string",
-                     "description": "camera_photo/mic_record_start: output file (default: the "
-                                    "node's capture directory); usb_access: device path from "
-                                    "usb_list."},
-            "seconds": {"type": "integer",
-                        "description": "mic_record_start: recording length limit in seconds."},
-            "provider": {"type": "string", "enum": ["gps", "network", "passive"],
-                         "description": "location: which Android provider to use (default gps)."},
-            "frequency": {"type": "integer",
-                          "description": "infrared_transmit: carrier frequency in Hz."},
-            "pattern": {"type": "string",
-                        "description": "infrared_transmit: durations in microseconds, e.g. "
-                                       "1000,2000,1000."},
+            "action": {"type": "string", "enum": list(DEVICE_CAPTURE_ACTIONS)},
+            "camera_id": {"type": "integer"},
+            "path": {"type": "string"},
+            "seconds": {"type": "integer"},
+            "provider": {"type": "string", "enum": ["gps", "network", "passive"]},
+            "frequency": {"type": "integer"},
+            "pattern": {"type": "string"},
         }, ["action"]),
     },
     {
         "name": "device_messages",
         "title": "Device Messages",
-        "description": (
-            "SMS, call log, contacts and placing a call. This is private data about the person "
-            "who owns the phone, so the node refuses "
-            "until its operator enables it with MESH_DEVICE_PIM=1. The refusal names the flag "
-            "and the Android permissions to grant, so the answer is an instruction rather than "
-            "a dead end. Sending an SMS and placing a call are also refused under "
-            "MESH_READ_ONLY=1."
-        ),
+        "description": "Phone PIM: SMS, call log, contacts, call (MESH_DEVICE_PIM=1).",
         "inputSchema": _schema({
-            "action": {"type": "string", "enum": list(DEVICE_MESSAGES_ACTIONS),
-                       "description": "Message or PIM action to perform."},
-            "number": {"type": "string", "description": "sms_send/call: recipient number."},
-            "text": {"type": "string", "description": "sms_send: message body."},
-            "limit": {"type": "integer", "description": "How many records (1-50, default 10)."},
-            "offset": {"type": "integer", "description": "Record offset, for paging."},
-            "type": {"type": "string",
-                     "description": "sms_list/call_log: filter, e.g. inbox/sent or "
-                                    "incoming/outgoing/missed."},
-            "query": {"type": "string", "description": "contacts: filter by name or number."},
+            "action": {"type": "string", "enum": list(DEVICE_MESSAGES_ACTIONS)},
+            "number": {"type": "string"},
+            "text": {"type": "string"},
+            "limit": {"type": "integer"},
+            "offset": {"type": "integer"},
+            "type": {"type": "string"},
+            "query": {"type": "string"},
         }, ["action"]),
     },
     {
         "name": "share_file",
         "title": "Share File (public URL)",
-        "description": (
-            "Publish ONE local file on the internet through the Mesh gateway. The file is copied "
-            "into the node's share root and a public HTTPS link is returned on the shared domain: "
-            "https://<shared-domain>/<node>/<name>-<random>/<filename>. Anyone who has the link can "
-            "read the file (the random part of the path is the credential), so treat the link like a "
-            "password. The node must be connected to the Mesh gateway for the link to work. Use "
-            "share_list to see active shares and unshare to revoke one."
-        ),
+        "description": "Publish one local file to a public HTTPS URL.",
         "inputSchema": _schema(
             {
-                "path": {"type": "string", "description": "Path of the local file to publish."},
-                "name": {"type": "string",
-                         "description": "Human name in the URL (default: the file name without extension)."},
-                "overwrite": {"type": "boolean",
-                              "description": "Replace an existing share with the same name (default false)."},
+                "path": {"type": "string"},
+                "name": {"type": "string"},
+                "overwrite": {"type": "boolean"},
             },
             ["path"],
         ),
@@ -3891,18 +4997,11 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "serve_dir",
         "title": "Serve Directory (public URL)",
-        "description": (
-            "Start a static web server for a local directory and return its public HTTPS link: "
-            "https://<shared-domain>/<node>/<name>-<random>/. The directory is served in place "
-            "(no copy): index.html is used when present, otherwise a directory listing is shown. "
-            "Serving is read-only (GET/HEAD only) and the random path segment is the credential. "
-            "Use unshare to stop the server; the directory itself is never deleted."
-        ),
+        "description": "Serve local directory read-only over public HTTPS URL.",
         "inputSchema": _schema(
             {
-                "path": {"type": "string", "description": "Local directory to serve."},
-                "name": {"type": "string",
-                         "description": "Human name in the URL (default: the directory name)."},
+                "path": {"type": "string"},
+                "name": {"type": "string"},
             },
             ["path"],
         ),
@@ -3910,20 +5009,61 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "share_list",
         "title": "Share List",
-        "description": "List active public shares with their URLs, roots and whether the local server is running.",
+        "description": "List active public shares.",
         "inputSchema": _schema({}),
     },
     {
         "name": "unshare",
         "title": "Unshare (revoke URL)",
-        "description": (
-            "Stop a public share and revoke its link. Accepts the share name, its slug or the full "
-            "URL. A file share also deletes the copy that was made in the share root; a served "
-            "directory is left untouched on disk."
-        ),
+        "description": "Stop public share and revoke URL.",
+        "inputSchema": _schema({"name": {"type": "string"}}, ["name"]),
+    },
+]
+
+
+EXTENDED_TOOL_ANNOTATIONS: Dict[str, Dict[str, Any]] = {
+    "git_status": _ANNOTATIONS_READ_ONLY,
+    "git_diff": _ANNOTATIONS_READ_ONLY,
+    "fetch_url": _ANNOTATIONS_READ_ONLY_OPEN_WORLD,
+}
+
+EXTENDED_TOOLS: List[Dict[str, Any]] = [
+    {
+        "name": "git_status",
+        "title": "Git Status",
+        "description": "Read-only git status without shell or hooks.",
+        "inputSchema": _schema({
+            "path": {"type": "string", "description": "Repo path (default workspace)."},
+            "short": {"type": "boolean", "description": "Short branch format (default true)."},
+            "untracked": {"type": "boolean", "description": "Show untracked files (default true)."},
+            "max_chars": {"type": "integer", "description": "Max output chars."},
+        }),
+    },
+    {
+        "name": "git_diff",
+        "title": "Git Diff",
+        "description": "Read-only git diff without shell or hooks.",
+        "inputSchema": _schema({
+            "path": {"type": "string", "description": "Repo or file path."},
+            "staged": {"type": "boolean", "description": "Show staged diff (--staged)."},
+            "stat": {"type": "boolean", "description": "Diffstat only (--stat)."},
+            "ref": {"type": "string", "description": "Git ref/range."},
+            "file": {"type": "string", "description": "Relative file filter."},
+            "max_chars": {"type": "integer", "description": "Max output chars."},
+        }),
+    },
+    {
+        "name": "fetch_url",
+        "title": "Fetch HTTPS URL",
+        "description": "Fetch an https:// URL with SSRF protection, 5-redirect cap, 300 KB limit.",
         "inputSchema": _schema(
-            {"name": {"type": "string", "description": "Share name, slug or public URL from share_list."}},
-            ["name"],
+            {
+                "url": {"type": "string", "description": "HTTPS URL."},
+                "strip_html": {"type": "boolean", "description": "Convert HTML to text (default true)."},
+                "max_bytes": {"type": "integer", "description": "Max response bytes (1-307200)."},
+                "timeout_sec": {"type": "integer", "description": "Timeout s (1-30, default 15)."},
+            },
+            ["url"],
         ),
     },
 ]
@@ -3938,14 +5078,100 @@ if not goal.enabled():
 
 # Attach the confirmation policy to the advertised specs. Kept out of the literal
 # above so the policy reads as one table instead of twenty scattered flags.
-def _attach_annotations(tools: List[Dict[str, Any]]) -> None:
+def _attach_annotations(tools: List[Dict[str, Any]], table: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
+    mapping = TOOL_ANNOTATIONS if table is None else table
     for spec in tools:
-        profile = TOOL_ANNOTATIONS.get(spec.get("name"))
+        profile = mapping.get(spec.get("name"))
         if profile is not None:
             spec["annotations"] = dict(profile)
 
 
 _attach_annotations(TOOLS)
+_attach_annotations(EXTENDED_TOOLS, EXTENDED_TOOL_ANNOTATIONS)
+
+ALL_TOOLS: List[Dict[str, Any]] = list(TOOLS) + list(EXTENDED_TOOLS)
+
+# ---------------------------------------------------------------------------
+# Toolsets & platform auto-profile (MESH_TOOLSETS)
+# ---------------------------------------------------------------------------
+
+VALID_TOOLSETS: FrozenSet[str] = frozenset({"all", "core", "git", "web", "device", "admin"})
+
+TOOLSET_GROUPS: Dict[str, FrozenSet[str]] = {
+    "core": frozenset({
+        "mesh_status", "system_info", "system_vitals", "screen_capture",
+        "get_orchestration_skill", "list_dir", "bash_exec", "read_file",
+        "read_media", "write_file", "edit_file", "grep_search", "glob_find",
+        "win_places", "batch_read", "batch_edit", "run_script", "fs_index",
+        "run_job", "job_output", "job_kill", "job_list",
+    }),
+    "git": frozenset({"git_status", "git_diff"}),
+    "web": frozenset({"fetch_url", "share_file", "serve_dir", "share_list", "unshare"}),
+    "device": frozenset({"device_info", "device_control", "device_capture", "device_messages"}),
+    "admin": frozenset({"mesh_update", "node_control", "schedule", "goal"}),
+}
+
+_PHONE_ONLY_TOOLS: FrozenSet[str] = frozenset({"device_messages", "device_capture"})
+
+
+def _is_android_platform() -> bool:
+    """Return True when running on an Android/Termux host."""
+    if os.environ.get("TERMUX_VERSION") or os.environ.get("ANDROID_ROOT"):
+        return True
+    try:
+        if os.path.isdir("/data/data/com.termux"):
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def parse_toolsets(raw: Any = None) -> Optional[FrozenSet[str]]:
+    """Parse MESH_TOOLSETS (or explicit value) into a normalized frozenset, or None for auto."""
+    if raw is None:
+        raw = os.environ.get("MESH_TOOLSETS", "")
+    if isinstance(raw, (list, tuple, set, frozenset)):
+        tokens = [str(x).strip().lower() for x in raw if str(x).strip()]
+    else:
+        text = str(raw).strip().lower()
+        if not text:
+            return None
+        tokens = [p.strip() for p in text.replace(";", ",").split(",") if p.strip()]
+    valid = frozenset(t for t in tokens if t in VALID_TOOLSETS)
+    return valid or None
+
+
+def list_tools(
+    toolsets: Any = None,
+    *,
+    is_android: Optional[bool] = None,
+    device_enabled: Optional[bool] = None,
+    include_extended: bool = True,
+) -> List[Dict[str, Any]]:
+    """Return MCP tool specs filtered by MESH_TOOLSETS and platform auto-profile."""
+    pool = ALL_TOOLS if include_extended else TOOLS
+    selected = parse_toolsets(toolsets)
+    if selected is not None:
+        if "all" in selected:
+            return list(pool)
+        allowed_names = set()
+        for group in selected:
+            allowed_names.update(TOOLSET_GROUPS.get(group, ()))
+        return [spec for spec in pool if spec.get("name") in allowed_names]
+
+    # Auto-profile: on non-Android nodes hide phone-only tools unless MESH_DEVICE=1.
+    android = _is_android_platform() if is_android is None else bool(is_android)
+    if device_enabled is None:
+        env_dev = os.environ.get("MESH_DEVICE")
+        dev_forced = (_DEVICE_ENABLED is True) or (
+            env_dev is not None and str(env_dev).strip() != "" and _parse_bool(env_dev)
+        )
+    else:
+        dev_forced = bool(device_enabled)
+
+    if android or dev_forced:
+        return list(pool)
+    return [spec for spec in pool if spec.get("name") not in _PHONE_ONLY_TOOLS]
 
 
 # ---------------------------------------------------------------------------
@@ -3969,10 +5195,16 @@ _HANDLERS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "list_dir": _tool_list_dir,
     "bash_exec": _tool_bash_exec,
     "read_file": _tool_read_file,
+    "read_media": _tool_read_media,
     "write_file": _tool_write_file,
     "edit_file": _tool_edit_file,
     "grep_search": _tool_grep_search,
     "glob_find": _tool_glob_find,
+    "win_places": _tool_win_places,
+    "batch_read": _tool_batch_read,
+    "batch_edit": _tool_batch_edit,
+    "run_script": _tool_run_script,
+    "fs_index": _tool_fs_index,
     "run_job": _tool_run_job,
     "job_output": _tool_job_output,
     "job_kill": _tool_job_kill,
@@ -3981,10 +5213,33 @@ _HANDLERS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "serve_dir": _tool_serve_dir,
     "share_list": _tool_share_list,
     "unshare": _tool_unshare,
+    "git_status": _tool_git_status,
+    "git_diff": _tool_git_diff,
+    "fetch_url": _tool_fetch_url,
     # Internal gateway relay (never advertised in TOOLS / tools/list). The deployed
     # gateway reaches a share by calling this tool over the tunnel.
     "_http_share": _tool_http_share,
 }
+
+
+def _usage_status(result: Any) -> Tuple[str, Optional[str]]:
+    """(status, error_code) for the local journal; never includes the error text."""
+    if not isinstance(result, dict) or "error" not in result:
+        return "ok", None
+    error = str(result.get("error") or "")
+    if error.startswith("node_paused"):
+        return "denied", "node_paused"
+    if error.startswith("remote_control_disabled"):
+        return "denied", "remote_control_disabled"
+    if error.startswith("shell_disabled"):
+        return "denied", "shell_disabled"
+    if error.startswith("MESH_READ_ONLY") or "read-only" in error.lower():
+        return "denied", "read_only"
+    if error.startswith("Unknown tool"):
+        return "error", "unknown_tool"
+    if "not found" in error.lower():
+        return "error", "not_found"
+    return "error", "tool_error"
 
 
 _RESCUE_TOOL_NAMES = ("rescue_info", "rescue_action")
@@ -4001,13 +5256,7 @@ def _is_live_usb_scenario() -> bool:
 
 
 def sync_scenario_tools() -> None:
-    """Register or unregister scenario-specific tools (such as Live USB rescue & skills).
-
-    On Windows, macOS, and standard Linux nodes, Live USB tools are omitted from
-    ``TOOLS`` and ``TOOL_ANNOTATIONS`` so the standard surface and annotation
-    policy stay unchanged. When ``scenario() == "live_usb"``, they are
-    registered with read-only / destructive annotations respectively.
-    """
+    """Register or unregister scenario-specific tools (such as Live USB rescue & skills)."""
     is_live = _is_live_usb_scenario()
     active_rescue = is_live and _rescue is not None
     active_skills = is_live and _skills_loader is not None
@@ -4044,40 +5293,10 @@ def sync_scenario_tools() -> None:
 
     if active_rescue or active_skills:
         _attach_annotations(TOOLS)
+    ALL_TOOLS[:] = list(TOOLS) + list(EXTENDED_TOOLS)
 
 
 sync_scenario_tools()
-
-
-def _approval_summary(name: str, args: Any) -> str:
-    """Short, human-readable request for the console menu (never the token)."""
-    if not isinstance(args, dict):
-        return str(name)
-    for key in ("command", "path", "name", "action"):
-        value = args.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()[:200]
-    return str(name)
-
-
-def _usage_status(result: Any) -> Tuple[str, Optional[str]]:
-    """(status, error_code) for the local journal; never includes the error text."""
-    if not isinstance(result, dict) or "error" not in result:
-        return "ok", None
-    error = str(result.get("error") or "")
-    if error.startswith("node_paused"):
-        return "denied", "node_paused"
-    if error.startswith("approval_required"):
-        return "denied", "approval_required"
-    if error.startswith("remote_control_disabled"):
-        return "denied", "remote_control_disabled"
-    if error.startswith("MESH_READ_ONLY") or "read-only" in error.lower():
-        return "denied", "read_only"
-    if error.startswith("Unknown tool"):
-        return "error", "unknown_tool"
-    if "not found" in error.lower():
-        return "error", "not_found"
-    return "error", "tool_error"
 
 
 def _dispatch_tool(name: str, args: Any) -> Any:
@@ -4101,74 +5320,6 @@ def _dispatch_tool(name: str, args: Any) -> Any:
     return result
 
 
-def _approval_wait_seconds() -> float:
-    """How long one call waits for the operator after being queued.
-
-    The MCP client gives a call roughly 30 s end to end, so the wait is bounded
-    well below that: the point is that an approval continues the SAME call
-    instead of turning it into "waiting, tell the user and stop".
-    """
-    raw = os.environ.get("MESH_APPROVAL_WAIT", "12")
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        value = 12.0
-    if value != value:                                  # NaN
-        value = 12.0
-    return max(0.0, min(20.0, value))
-
-
-def _clamp_timeout_after_wait(name: str, args: Any, waited: float) -> Any:
-    """Keep an approved call inside the client's ~30 s budget.
-
-    After an approval the command may still take its own timeout; if the badge
-    ate 8 s of a 25 s ``bash_exec``, the call would be cut by the gateway before
-    the node answers. Long work belongs in ``run_job`` anyway.
-    """
-    if name != "bash_exec" or not isinstance(args, dict) or waited <= 0:
-        return args
-    try:
-        current = int(args.get("timeout_sec") or 25)
-    except (TypeError, ValueError):
-        current = 25
-    limit = max(5, int(25 - waited))
-    if current <= limit:
-        return args
-    clamped = dict(args)
-    clamped["timeout_sec"] = limit
-    return clamped
-
-
-def _run_after_approval(name: str, args: Any, request: Dict[str, Any],
-                        summary: str) -> Any:
-    """Wait for the operator, then run the SAME call (or report it is pending)."""
-    wait = _approval_wait_seconds()
-    waited = 0.0
-    step = 0.2
-    while wait > 0 and waited < wait:
-        if control.approval_granted(name):
-            result = _dispatch_tool(name, _clamp_timeout_after_wait(name, args, waited))
-            if isinstance(result, dict) and "error" not in result:
-                result.setdefault("approved", True)
-                result.setdefault("approved_after_sec", round(waited, 1))
-            return result
-        time.sleep(step)
-        waited += step
-    if wait > 0 and control.approval_granted(name):
-        return _dispatch_tool(name, args)
-    return {
-        "error": (
-            "approval_required: %s was NOT executed; it is waiting for the operator "
-            "(request %s). Do not end the task: say you are waiting for the "
-            "confirmation and retry this exact call once it is approved in rhm "
-            "(a = once, A = always, or `rhm mode full`)."
-            % (summary or name, request.get("id", "?"))
-        ),
-        "pending_approval": True,
-        "approval_id": request.get("id"),
-    }
-
-
 _SCHEDULE_READ_ACTIONS = frozenset({
     "list", "status", "get", "ack", "done", "acknowledge", "cancel", "delete", "remove",
 })
@@ -4177,10 +5328,12 @@ _SCHEDULE_READ_ACTIONS = frozenset({
 def _is_ungated_read(name: Any, args: Dict[str, Any]) -> bool:
     """Reading or cancelling timers is observation; creating one is not.
 
-    ``schedule(set)`` may run a command later, so it goes through read-only and
-    approval like any other mutation; seeing what is pending or cancelling it
-    must never be blocked by the very gate it exists to describe.
+    ``schedule(set)`` may run a command later, so it is a mutation like any other
+    and read-only mode refuses it; seeing what is pending or cancelling it must
+    never be blocked by the very gate it exists to describe.
     """
+    if name in _EXTENDED_READ_ONLY_ALLOWED:
+        return True
     if name != "schedule" or not isinstance(args, dict):
         return False
     return str(args.get("action") or "list").strip().lower() in _SCHEDULE_READ_ACTIONS
@@ -4212,17 +5365,6 @@ def call_tool(name: str, args: Any = None) -> Any:
                 and name not in _READ_ONLY_SELF_GUARDED
                 and not _is_ungated_read(name, control_args)):
             result = {"error": READ_ONLY_ERROR}
-        elif (control.access_mode() == "approval" and actor == "mcp"
-                and isinstance(name, str)
-                and name not in _READ_ONLY_ALLOWED
-                and not _is_ungated_read(name, control_args)
-                and (name != "node_control"
-                     or node_settings.requires_approval(control_args))
-                and not control.approval_granted(name)):
-            summary = (node_settings.summary(control_args) if name == "node_control"
-                       else _approval_summary(name, args))
-            request = control.request_approval(name, summary)
-            result = _run_after_approval(name, args, request, summary)
         else:
             result = _dispatch_tool(name, args)
     except Exception as exc:  # pragma: no cover - defensive

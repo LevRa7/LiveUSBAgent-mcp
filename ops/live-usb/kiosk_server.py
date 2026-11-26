@@ -470,9 +470,14 @@ def read_session_state(state_dir: Optional[Path] = None) -> Dict[str, Any]:
     fallback: Dict[str, Any] = {
         "ready": False,
         "connect_url": "",
+        "mcp_url": "",
+        "sse_url": "",
+        "public_url": "",
         "token": "",
         "node_id": "",
+        "tunnel_mode": "cloudflare",
         "tunnel_status": "offline",
+        "tunnel_error": "",
         "source": str(session_file),
     }
     try:
@@ -497,9 +502,14 @@ def read_session_state(state_dir: Optional[Path] = None) -> Dict[str, Any]:
     merged.update(data)
     merged["ready"] = ready
     merged["connect_url"] = connect_url
+    merged["mcp_url"] = str(data.get("mcp_url") or "").strip()
+    merged["sse_url"] = str(data.get("sse_url") or "").strip()
+    merged["public_url"] = str(data.get("public_url") or "").strip()
     merged["token"] = token
     merged["node_id"] = node_id
+    merged["tunnel_mode"] = str(data.get("tunnel_mode") or "cloudflare").strip()
     merged["tunnel_status"] = tunnel_status
+    merged["tunnel_error"] = str(data.get("tunnel_error") or "").strip()
     merged["source"] = str(session_file)
     return merged
 
@@ -531,13 +541,18 @@ def trigger_session_regenerate(
                     messages.append("Текущая сессия отозвана на шлюзе")
             except Exception as exc:
                 messages.append(f"revoke_ephemeral_node: {exc}")
-        try:
-            env_file = base / "agent.env"
-            if env_file.exists():
-                env_file.unlink()
-                messages.append("Файл agent.env удалён")
-        except Exception as exc:
-            messages.append(f"Не удалось удалить agent.env: {exc}")
+        for fname, label in (
+            ("standalone.token", "Токен standalone.token сброшен"),
+            ("session.json", "Файл session.json удалён"),
+            ("agent.env", "Файл agent.env удалён"),
+        ):
+            try:
+                fpath = base / fname
+                if fpath.exists():
+                    fpath.unlink()
+                    messages.append(label)
+            except Exception as exc:
+                messages.append(f"Не удалось удалить {fname}: {exc}")
 
     # (b) If systemctl is available and rhm-live-agent.service is active/known,
     #     restart the service so it re-registers cleanly.

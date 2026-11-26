@@ -20,16 +20,17 @@ When a PC refuses to boot, a drive starts failing, BitLocker or LUKS locks you o
 - **For sysadmins & engineers:** Get an instant, zero-config Debian 13 (Trixie) rescue environment loaded with cross-OS filesystem drivers (NTFS/BitLocker, ext4/Btrfs/XFS/F2FS/ZFS/LVM/mdadm/LUKS, HFS+/APFS), hardware/RAM diagnostics, curated `SKILL.md` playbooks, and full root MCP access over an outbound TLS WebSocket tunnel — no SSH setup, no port forwarding, and no manual agent installation.
 
 ```text
-  Gemini (/sse) · ChatGPT (/mcp) · Claude (/mcp, CLI or JSON)
-                          │  MCP over HTTPS
+  Gemini (/sse) · ChatGPT (/mcp/<token>) · Claude (/mcp/<token>, CLI or JSON)
+                          │  MCP over HTTPS (Streamable HTTP / SSE / OAuth 2.1)
                           ▼
-               Mesh Gateway (/connect/<session_code>)
-                          │  Outbound WebSocket tunnel (no open ports)
+        Cloudflare Quick Tunnel (*.trycloudflare.com — default, no account)
+                          │  Outbound cloudflared tunnel -> 127.0.0.1:8096
                           ▼
-   Booted LiveUSB (Debian 13 Trixie · python3 -m core.agent --ephemeral-liveusb)
+   Booted LiveUSB (Debian 13 Trixie · python3 -m core.server --liveusb --tunnel cloudflare)
    ├─ tty1: Graphical Kiosk UI (127.0.0.1:8787) — Wi-Fi, USB tethering, SVG QR
    ├─ tty2: Fallback console dashboard (firstboot_tui.py + nmtui + [S] Shell (bash))
-   └─ Full root MCP tools + read-safe rescue_info / rescue_action + SKILL.md library
+   └─ Full root MCP tools (v0.7.2 core: batch_read/edit, fs_index, read_media, git, fetch_url)
+      + read-safe rescue_info / rescue_action + SKILL.md library
 ```
 
 ---
@@ -45,10 +46,10 @@ When a PC refuses to boot, a drive starts failing, BitLocker or LUKS locks you o
 - **Kiosk UI (`tty1`):** Boots directly into a clean fullscreen Chromium kiosk over `openbox` / Xorg served locally by `ops/live-usb/kiosk_server.py` on `127.0.0.1:8787`. Features an interactive Wi-Fi scanner (`nmcli`) with **`Обновить список`** (refresh list) and **`Скрытая сеть`** (hidden SSID) controls, a password modal with an on-screen keyboard (handy for touchscreens or broken laptop keyboards), live Ethernet & USB tethering status (including an iPhone Trust prompt when unpaired), and a Ready view with a large SVG QR code, a detected-disks summary, **`Сменить Wi-Fi`** (switch Wi-Fi), and **`Новый токен`** (regenerate token).
 - **Headless / GPU Fallback (`tty2`):** `ops/live-usb/firstboot_tui.py` runs on `tty2` (switch via `Ctrl+Alt+F2`; also takes over automatically if X11 cannot start), giving full status, QR code, `nmtui` network configuration, and a local `bash` shell via `Ctrl+Alt+F2` → **`[S] Shell (bash)`**.
 
-### 3. Zero-Config Ephemeral Onboarding
-- As soon as the LiveUSB gets internet access, `rhm-live-agent.service` (`python3 -m core.agent --ephemeral-liveusb`) automatically registers a temporary `live-*` node with the gateway (`POST /v1/liveusb/register`).
-- Generates an ephemeral 24-hour `lk_...` link key stored only in RAM (`/run/rhm-live/`) and displays a QR code pointing to `https://<gateway>/connect/<session_code>`.
-- Scanning the QR code on your phone or second computer opens a mobile-friendly pairing page with 1-click copy buttons for **Gemini (`/sse`)**, **ChatGPT (`/mcp`)**, and **Claude (`/mcp` URL, `claude mcp add --transport http ...` CLI command, and `mcpServers` JSON config)** plus live connection status.
+### 3. Zero-Account Cloudflare Quick Tunnel Onboarding (Default)
+- As soon as the LiveUSB gets internet access, `rhm-live-agent.service` (`python3 -m core.server --liveusb --tunnel cloudflare --port 8096`) starts the local standalone MCP HTTP server and publishes it via **Cloudflare Quick Tunnel** (`cloudflared tunnel --url http://127.0.0.1:8096`) — free, no Cloudflare or Tailscale account needed, and no external VPS gateway required.
+- Generates an ephemeral token stored only in RAM (`/run/rhm-live/standalone.token`, mode `0600`) and displays a QR code pointing directly to `https://<slug>.trycloudflare.com/connect?token=<token>` (with one-paste `/mcp/<token>` and `/sse?token=<token>` links, plus OAuth 2.1 support).
+- **Important notes:** The `trycloudflare.com` URL changes on every run/restart, so re-paste the MCP link after each restart. Note: some AI providers' servers get blocked by Cloudflare's bot protection (an optional `--tunnel gateway --gateway <host>` fallback remains available if you run your own gateway).
 
 ### 4. Out-of-the-Box Cross-OS Filesystem Support
 

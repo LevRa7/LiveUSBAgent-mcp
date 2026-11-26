@@ -28,12 +28,15 @@ def render_connect_page(
     public_base_url: str = "",
     online: bool = False,
     csp_nonce: str = "",
+    standalone: bool = False,
+    tunnel_mode: str = "",
 ) -> str:
     """Render the mobile-friendly Russian LiveUSB connect page.
 
     Uses Python 3.8+ stdlib only. Produces a self-contained HTML document
     with Gemini, ChatGPT, and Claude tabs, one-click copy controls, and
-    live status polling against /v1/liveusb/status/<session_code>.
+    live status polling against /v1/liveusb/status/<session_code> (or /health
+    in standalone Cloudflare Quick Tunnel mode).
     """
     base = (public_base_url or "").strip().rstrip("/")
     if not base:
@@ -45,8 +48,12 @@ def render_connect_page(
 
     enc_node = quote(node_id, safe="")
     enc_link_key = quote(link_key, safe="")
-    sse_url = f"{base}/sse?user={enc_node}&token={enc_link_key}"
-    mcp_url = f"{base}/mcp?user={enc_node}&token={enc_link_key}"
+    if standalone:
+        sse_url = f"{base}/sse?token={enc_link_key}"
+        mcp_url = f"{base}/mcp/{enc_link_key}"
+    else:
+        sse_url = f"{base}/sse?user={enc_node}&token={enc_link_key}"
+        mcp_url = f"{base}/mcp?user={enc_node}&token={enc_link_key}"
 
     claude_json = json.dumps(
         {
@@ -79,6 +86,8 @@ def render_connect_page(
             "nodeId": node_id,
             "expiresAt": expires_at,
             "online": bool(online),
+            "standalone": bool(standalone),
+            "tunnelMode": tunnel_mode or ("cloudflare" if standalone else "gateway"),
             "copyTargets": {
                 "gemini-sse": sse_url,
                 "chatgpt-mcp": mcp_url,
@@ -517,7 +526,9 @@ def render_connect_page(
       }}
 
       function pollStatus() {{
-        var url = "/v1/liveusb/status/" + encodeURIComponent(cfg.sessionCode);
+        var url = cfg.standalone
+          ? "/health"
+          : ("/v1/liveusb/status/" + encodeURIComponent(cfg.sessionCode));
         fetch(url, {{ cache: "no-store" }})
           .then(function (resp) {{
             if (resp.status === 404 || resp.status === 410) {{
@@ -529,6 +540,14 @@ def render_connect_page(
           }})
           .then(function (data) {{
             if (!data) return;
+            if (cfg.standalone) {{
+              if (data.status === "healthy") {{
+                applyStatus("online", "Туннель в сети", "");
+              }} else {{
+                applyStatus("offline", "Туннель не в сети", "");
+              }}
+              return;
+            }}
             if (data.revoked) {{
               applyStatus("error", "Сессия отозвана", data.expires_at);
             }} else if (data.online) {{

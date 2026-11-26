@@ -423,7 +423,6 @@ def scenario() -> str:
 
     The order is the contract, not a preference:
 
-    0. Explicit ``MESH_SCENARIO=live_usb`` override wins deterministically;
     1. ``os.name == "nt"`` wins outright. A phone is never Windows, and a
        Windows host that happens to export ``TERMUX_VERSION`` (a CI matrix, a
        wrapper script, a WSL environment leaking through) must still take the
@@ -431,19 +430,19 @@ def scenario() -> str:
     2. Termux is checked next, because a phone reports ``Linux`` from
        ``platform.system()`` and would otherwise be mistaken for a desktop;
     3. Darwin, because macOS is POSIX too but owns its tools;
-    4. Linux is the fallback, promoted to ``live_usb`` when ``/run/live/medium``
-       exists or ``boot=live`` is present in ``/proc/cmdline``.
+    4. Linux is the fallback, which is what a server, a container and an
+       unrecognised POSIX host all are.
 
     Nothing is cached: the answer costs a few environment reads and one
     ``os.path.isdir``, and a cached answer would make a node that was restarted
     with a changed environment - and every scenario test - lie.
     """
-    if os.environ.get("MESH_SCENARIO", "").strip().lower() == "live_usb":
-        return "live_usb"
     # The rule itself lives in core/platforms, which every other platform decision
     # already asks; this module only supplies the evidence it has already probed.
     # One decision point is the whole reason a Linux box cannot end up answering
     # like a phone.
+    if os.environ.get("MESH_SCENARIO", "").strip().lower() == "live_usb":
+        return "live_usb"
     from core import platforms
 
     detected = platforms.detect(termux_data_dir=_termux_data_dir(), system=platform.system())
@@ -2359,6 +2358,7 @@ def collect(sections: Optional[Iterable[str]] = None,
         return results
     pool = ThreadPoolExecutor(max_workers=min(6, len(names)),
                               thread_name_prefix="device-collect")
+    timed_out = False
     try:
         futures = {name: pool.submit(_collect_one, name, kwargs) for name in names}
         for name, future in futures.items():
@@ -2366,10 +2366,11 @@ def collect(sections: Optional[Iterable[str]] = None,
             try:
                 results[name] = future.result(timeout=max(0.05, remaining))
             except Exception:
+                timed_out = True
                 results[name] = _unavailable(
                     "timed out after %.1fs" % deadline, source=name)
     finally:
-        pool.shutdown(wait=False)
+        pool.shutdown(wait=not timed_out)
     return results
 
 

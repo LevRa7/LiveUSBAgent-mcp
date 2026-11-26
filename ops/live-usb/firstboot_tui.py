@@ -59,7 +59,7 @@ def _get_ipv4() -> str:
 
 def _render_qr(url: str) -> str:
     if not url:
-        return "  [Waiting for gateway registration — connect to the internet first]\n"
+        return "  [Waiting for Cloudflare Quick Tunnel — connect to the internet first]\n"
     if shutil.which("qrencode"):
         try:
             proc = subprocess.run(
@@ -85,6 +85,8 @@ def render_banner(state_dir: Optional[Path] = None) -> str:
         session.get("connect_url") or os.environ.get("MESH_PAIR_URL") or ""
     ).strip()
     link_key = str(session.get("link_key") or session.get("token") or "").strip()
+    mcp_url = str(session.get("mcp_url") or "").strip()
+    tunnel_mode = str(session.get("tunnel_mode") or "cloudflare").strip()
 
     lines = [
         "\033[2J\033[H",
@@ -93,8 +95,10 @@ def render_banner(state_dir: Optional[Path] = None) -> str:
         "======================================================================",
         f"  Node ID       : {node_id}",
         "  Access Mode   : FULL ACCESS (live_usb)",
+        f"  Tunnel Mode   : {tunnel_mode} (URL changes on every restart)",
         f"  Network IPv4  : {ip}",
-        f"  Connect URL   : {connect_url or 'WAITING FOR GATEWAY REGISTRATION...'}",
+        f"  Connect URL   : {connect_url or 'WAITING FOR CLOUDFLARE QUICK TUNNEL...'}",
+        f"  MCP URL       : {mcp_url or '(pending)'}",
         f"  Link Key      : {link_key or '(pending)'}",
         "----------------------------------------------------------------------",
         _render_qr(connect_url),

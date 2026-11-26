@@ -2424,3 +2424,264 @@ def test_malware_scan_execute_and_quarantine_writes_manifest(linux_rescue_env, t
     assert len(q_res["quarantined"][0]["sha256"]) == 64
     assert not infected_file.exists()
 
+
+# --- Stage 3: win_boot_repair, systemd_boot_repair & win_sam_reset backup ---
+
+def test_win_boot_repair_uefi_and_bios_dry_run_and_guards(linux_rescue_env):
+    uefi_plan = rescue.plan_or_run_rescue_action(
+        {
+            "action": "win_boot_repair",
+            "efi_partition": "/dev/nvme0n1p1",
+            "mountpoint": "/mnt/rescue/win_c",
+        }
+    )
+    assert uefi_plan["dry_run"] is True
+    assert uefi_plan["boot_mode"] == "uefi"
+    assert any(s[0] == "efibootmgr" and "-d" in s and "/dev/nvme0n1" in s for s in uefi_plan["planned_steps"])
+    assert any("bootmgfw.efi" in " ".join(s) for s in uefi_plan["planned_steps"])
+
+    bios_plan = rescue.plan_or_run_rescue_action(
+        {"action": "win_boot_repair", "boot_mode": "bios", "device": "/dev/sda"}
+    )
+    assert bios_plan["dry_run"] is True
+    assert bios_plan["boot_mode"] == "bios"
+    assert bios_plan["planned_steps"][0][0] == "dd"
+    assert bios_plan["planned_steps"][1] == ["install-mbr", "/dev/sda"]
+
+    bad_backup = rescue.plan_or_run_rescue_action(
+        {
+            "action": "win_boot_repair",
+            "boot_mode": "bios",
+            "device": "/dev/sda",
+            "backup_dir": "/tmp/boot",
+        }
+    )
+    assert "error" in bad_backup
+
+
+def test_win_boot_repair_uefi_execute_cleans_up_esp(linux_rescue_env):
+    calls: List[List[str]] = []
+
+    def fake_run(argv, timeout=30):
+        calls.append(list(argv))
+        return 0, "ok", ""
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+    linux_rescue_env.setattr(rescue.os, "makedirs", lambda p, exist_ok=True: None)
+    linux_rescue_env.setattr(rescue.os.path, "isfile", lambda p: False)
+    linux_rescue_env.setattr(rescue, "_is_volatile_path", lambda p: False)
+
+    res = rescue.plan_or_run_rescue_action(
+        {
+            "action": "win_boot_repair",
+            "efi_partition": "/dev/sda1",
+            "dry_run": False,
+        }
+    )
+    assert res["executed"] is True
+    assert res["exit_code"] == 0
+    assert calls[0] == ["mount", "/dev/sda1", "/mnt/rescue/win_esp"]
+    assert calls[-1] == ["umount", "/mnt/rescue/win_esp"]
+
+
+def test_systemd_boot_repair_dry_run_and_execute(linux_rescue_env):
+    plan = rescue.plan_or_run_rescue_action(
+        {
+            "action": "systemd_boot_repair",
+            "device": "/dev/nvme0n1p2",
+            "efi_partition": "/dev/nvme0n1p1",
+        }
+    )
+    assert plan["dry_run"] is True
+    assert any("bootctl" in s for s in plan["planned_steps"])
+
+    calls: List[List[str]] = []
+    linux_rescue_env.setattr(rescue, "_run_cmd", lambda argv, timeout=60: (calls.append(list(argv)) or (0, "", "")))
+    linux_rescue_env.setattr(rescue.os, "makedirs", lambda p, exist_ok=True: None)
+
+    res = rescue.plan_or_run_rescue_action(
+        {
+            "action": "systemd_boot_repair",
+            "device": "/dev/nvme0n1p2",
+            "efi_partition": "/dev/nvme0n1p1",
+            "dry_run": False,
+        }
+    )
+    assert res["executed"] is True
+    assert res["exit_code"] == 0
+    assert calls[-1] == ["umount", "/mnt/rescue/sysboot_root"]
+
+
+def test_win_sam_reset_create_backup_hashes_hive(linux_rescue_env, tmp_path):
+    win_root = tmp_path / "win_c"
+    sam_file = win_root / "Windows" / "System32" / "config" / "SAM"
+    sam_file.parent.mkdir(parents=True)
+    sam_file.write_bytes(b"regf-sam-bytes")
+    backup_dir = tmp_path / "sam_baks"
+
+    linux_rescue_env.setattr(rescue, "_valid_mountpoint", lambda p: True)
+    linux_rescue_env.setattr(rescue, "_is_volatile_path", lambda p: False)
+    linux_rescue_env.setattr(rescue.os, "makedirs", lambda p, exist_ok=True: backup_dir.mkdir(parents=True, exist_ok=True))
+
+    orig_copy2 = rescue.shutil.copy2
+    linux_rescue_env.setattr(
+        rescue.shutil,
+        "copy2",
+        lambda src, dst: orig_copy2(src, str(backup_dir / os.path.basename(dst))),
+    )
+    orig_open = open
+
+    def patched_open(path, mode="r", *a, **kw):
+        if str(path).startswith("/mnt/scratch/sam-backups"):
+            return orig_open(backup_dir / os.path.basename(str(path)), mode, *a, **kw)
+        return orig_open(path, mode, *a, **kw)
+
+    linux_rescue_env.setattr("builtins.open", patched_open)
+
+    res = rescue.plan_or_run_rescue_action(
+        {
+            "action": "win_sam_reset",
+            "mountpoint": str(win_root),
+            "sam_user": "Administrator",
+            "create_backup": True,
+            "dry_run": False,
+        }
+    )
+    assert res["status"] == "requires_interactive"
+    assert res["executed"] is False
+    assert "backup" in res
+    assert len(res["backup"]["sha256"]) == 64
+
+
+# --- Stage 4: partition_backup, partition_restore, backup_user_data, partition_ops, win_deploy ---
+
+def test_partition_backup_and_restore_dry_run_and_guards(linux_rescue_env):
+    plan = rescue.plan_or_run_rescue_action(
+        {
+            "action": "partition_backup",
+            "device": "/dev/nvme0n1p3",
+            "fstype": "ntfs",
+            "output_path": "/mnt/scratch/backups/win_c.pcl",
+        }
+    )
+    assert plan["dry_run"] is True
+    assert plan["partclone_bin"] == "partclone.ntfs"
+    assert plan["argv"] == ["partclone.ntfs", "-c", "-s", "/dev/nvme0n1p3", "-o", "/mnt/scratch/backups/win_c.pcl"]
+    assert plan["planned_steps"][0] == ["sfdisk", "-d", "/dev/nvme0n1"]
+
+    bad_out = rescue.plan_or_run_rescue_action(
+        {
+            "action": "partition_backup",
+            "device": "/dev/sda1",
+            "output_path": "/tmp/img.pcl",
+        }
+    )
+    assert "error" in bad_out
+
+    restore_plan = rescue.plan_or_run_rescue_action(
+        {
+            "action": "partition_restore",
+            "device": "/dev/nvme0n1p3",
+            "target_image": "/mnt/scratch/backups/win_c.pcl",
+        }
+    )
+    assert restore_plan["dry_run"] is True
+    assert restore_plan["argv"] == ["partclone.restore", "-s", "/mnt/scratch/backups/win_c.pcl", "-o", "/dev/nvme0n1p3"]
+
+
+def test_backup_user_data_rsync_and_restic_plans(linux_rescue_env):
+    rsync_plan = rescue.plan_or_run_rescue_action(
+        {
+            "action": "backup_user_data",
+            "mountpoint": "/mnt/rescue/win_c",
+            "output_path": "/mnt/scratch/user_bak",
+        }
+    )
+    assert rsync_plan["dry_run"] is True
+    assert rsync_plan["argv"][0] == "rsync"
+
+    restic_plan = rescue.plan_or_run_rescue_action(
+        {
+            "action": "backup_user_data",
+            "mountpoint": "/mnt/rescue/win_c",
+            "output_path": "/mnt/scratch/restic_repo",
+            "backup_tool": "restic",
+        }
+    )
+    assert restic_plan["dry_run"] is True
+    assert restic_plan["argv"] == ["restic", "-r", "/mnt/scratch/restic_repo", "backup", "/mnt/rescue/win_c"]
+
+
+def test_partition_ops_plans_mandatory_table_backup(linux_rescue_env):
+    gpt_plan = rescue.plan_or_run_rescue_action(
+        {"action": "partition_ops", "partition_op": "mbr_to_gpt", "device": "/dev/sda"}
+    )
+    assert gpt_plan["dry_run"] is True
+    assert gpt_plan["planned_steps"][0] == ["sfdisk", "-d", "/dev/sda"]
+    assert gpt_plan["planned_steps"][1] == ["sgdisk", "-g", "/dev/sda"]
+
+    ntfs_plan = rescue.plan_or_run_rescue_action(
+        {
+            "action": "partition_ops",
+            "partition_op": "resize_ntfs",
+            "device": "/dev/sda2",
+            "new_size": "80G",
+        }
+    )
+    assert ntfs_plan["dry_run"] is True
+    assert ntfs_plan["planned_steps"][1] == ["ntfsresize", "-f", "-s", "80G", "/dev/sda2"]
+
+    bad_size = rescue.plan_or_run_rescue_action(
+        {
+            "action": "partition_ops",
+            "partition_op": "resize_ntfs",
+            "device": "/dev/sda2",
+            "new_size": "80G; rm -rf /",
+        }
+    )
+    assert "error" in bad_size
+
+
+def test_win_deploy_dry_run_and_execute_with_efi(linux_rescue_env):
+    plan = rescue.plan_or_run_rescue_action(
+        {
+            "action": "win_deploy",
+            "wim_path": "/mnt/rescue/iso/sources/install.wim",
+            "wim_index": 6,
+            "device": "/dev/nvme0n1p3",
+            "efi_partition": "/dev/nvme0n1p1",
+        }
+    )
+    assert plan["dry_run"] is True
+    assert plan["planned_steps"][0] == [
+        "wimlib-imagex",
+        "apply",
+        "/mnt/rescue/iso/sources/install.wim",
+        "6",
+        "/dev/nvme0n1p3",
+    ]
+    assert plan["planned_steps"][-1] == ["umount", "/mnt/rescue/win_deployed"]
+
+    calls: List[List[str]] = []
+    linux_rescue_env.setattr(rescue, "_which", lambda name: "/usr/bin/wimlib-imagex" if name == "wimlib-imagex" else None)
+    linux_rescue_env.setattr(rescue.os.path, "isfile", lambda p: True)
+    linux_rescue_env.setattr(rescue.os, "makedirs", lambda p, exist_ok=True: None)
+    linux_rescue_env.setattr(rescue, "_run_cmd", lambda argv, timeout=120: (calls.append(list(argv)) or (0, "ok", "")))
+
+    res = rescue.plan_or_run_rescue_action(
+        {
+            "action": "win_deploy",
+            "wim_path": "/mnt/rescue/iso/sources/install.wim",
+            "wim_index": 1,
+            "device": "/dev/nvme0n1p3",
+            "efi_partition": "/dev/nvme0n1p1",
+            "dry_run": False,
+        }
+    )
+    assert res["executed"] is True
+    assert res["exit_code"] == 0
+    assert calls[0][0] == "wimlib-imagex"
+    assert calls[-1] == ["umount", "/mnt/rescue/win_deployed"]
+
+
+

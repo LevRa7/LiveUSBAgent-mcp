@@ -60,6 +60,13 @@ RESCUE_ACTIONS: Tuple[str, ...] = (
     "ram_test_plan",
     "ram_dump_plan",
     "malware_scan",
+    "win_boot_repair",
+    "systemd_boot_repair",
+    "partition_backup",
+    "partition_restore",
+    "backup_user_data",
+    "partition_ops",
+    "win_deploy",
 )
 
 #: Filesystem driver and binary probe matrix for ``collect_filesystems()``.
@@ -287,6 +294,45 @@ RESCUE_TOOLS_SPEC: List[Dict[str, Any]] = [
                 "quarantine_dir": {
                     "type": "string",
                     "description": "malware_scan: non-volatile quarantine directory under /mnt/scratch/ (default /mnt/scratch/quarantine).",
+                },
+                "boot_mode": {
+                    "type": "string",
+                    "enum": ["uefi", "bios"],
+                    "description": "win_boot_repair: target firmware mode (uefi or bios; defaults to uefi when efi_partition is provided).",
+                },
+                "backup_dir": {
+                    "type": "string",
+                    "description": "win_boot_repair / win_sam_reset: non-volatile backup directory under /mnt/scratch/.",
+                },
+                "create_backup": {
+                    "type": "boolean",
+                    "description": "win_sam_reset: when true with dry_run=false, copy SAM to backup_dir with SHA-256 before manual chntpw.",
+                },
+                "esp_mount": {
+                    "type": "string",
+                    "description": "systemd_boot_repair: ESP mount path inside guest root (default /boot/efi).",
+                },
+                "backup_tool": {
+                    "type": "string",
+                    "enum": ["rsync", "restic"],
+                    "description": "backup_user_data: tool to use (rsync or restic, default rsync).",
+                },
+                "partition_op": {
+                    "type": "string",
+                    "enum": ["backup_table", "mbr_to_gpt", "resize_ntfs", "resize_ext"],
+                    "description": "partition_ops: disk/partition operation to plan or run.",
+                },
+                "new_size": {
+                    "type": "string",
+                    "description": "partition_ops (resize_ntfs/resize_ext): target filesystem size (e.g. '80G').",
+                },
+                "wim_path": {
+                    "type": "string",
+                    "description": "win_deploy: path to Windows install.wim or install.esd.",
+                },
+                "wim_index": {
+                    "type": "integer",
+                    "description": "win_deploy: image edition index inside WIM/ESD (default 1).",
                 },
                 "dry_run": {
                     "type": "boolean",
@@ -2174,17 +2220,44 @@ def plan_or_run_rescue_action(args: Dict[str, Any]) -> Dict[str, Any]:
             return {"error": "win_sam_reset requires 'sam_user' (a Windows local account name)"}
         mount_root = mountpoint.rstrip("/")
         sam_path = f"{mount_root}/Windows/System32/config/SAM"
+        backup_dir = str(args.get("backup_dir") or "/mnt/scratch/sam-backups").strip()
+        create_backup = bool(args.get("create_backup", False))
+        if create_backup:
+            if not backup_dir.startswith("/mnt/scratch/") or ".." in backup_dir.split("/"):
+                return {"error": "win_sam_reset backup_dir must be under /mnt/scratch/"}
+            if _is_volatile_path(backup_dir):
+                return {"error": f"refusing to back up SAM to volatile RAM path: {backup_dir}"}
         argv = ["chntpw", "-u", sam_user, sam_path]
         plan = {
             "action": action,
             "mountpoint": mount_root,
             "sam_user": sam_user,
             "sam_path": sam_path,
+            "backup_dir": backup_dir,
             "argv": argv,
             "dry_run": dry_run,
+            "limitations": (
+                "Local SAM accounts only. BitLocker volumes must be unlocked first; "
+                "Microsoft Account (MSA) / Entra ID passwords cannot be reset offline."
+            ),
         }
         if dry_run:
             return plan
+        backup_result: Optional[Dict[str, Any]] = None
+        if create_backup:
+            if not os.path.isfile(sam_path):
+                return {"error": f"SAM hive not found at {sam_path}"}
+            try:
+                os.makedirs(backup_dir, exist_ok=True)
+                dst = os.path.join(backup_dir, f"SAM.bak.{int(time.time())}")
+                shutil.copy2(sam_path, dst)
+                h = hashlib.sha256()
+                with open(dst, "rb") as fh:
+                    for chunk in iter(lambda: fh.read(65536), b""):
+                        h.update(chunk)
+                backup_result = {"backup_path": dst, "sha256": h.hexdigest()}
+            except OSError as exc:
+                return {"error": f"failed to back up SAM hive: {exc}"}
         # chntpw is a full-screen interactive editor.  Running it through
         # subprocess pipes would hang or silently corrupt the hive, so the action
         # is honest about being a manual step instead of pretending to execute.
@@ -2196,6 +2269,8 @@ def plan_or_run_rescue_action(args: Dict[str, Any]) -> Dict[str, Any]:
                 "message": "run chntpw interactively; no silent SAM write",
             }
         )
+        if backup_result is not None:
+            plan["backup"] = backup_result
         return plan
 
     if action == "chroot_exec":
@@ -2535,6 +2610,540 @@ def plan_or_run_rescue_action(args: Dict[str, Any]) -> Dict[str, Any]:
         if quarantine_errors:
             res["quarantine_errors"] = quarantine_errors
         return res
+
+    if action == "win_boot_repair":
+        efi_part = str(args.get("efi_partition") or "").strip()
+        boot_mode = str(args.get("boot_mode") or "").strip().lower()
+        if not boot_mode:
+            boot_mode = "uefi" if efi_part else "bios"
+        if boot_mode not in ("uefi", "bios"):
+            return {"error": f"win_boot_repair boot_mode must be 'uefi' or 'bios', got: {boot_mode}"}
+
+        backup_dir = str(args.get("backup_dir") or "/mnt/scratch/boot-backups").strip()
+        if not backup_dir.startswith("/mnt/scratch/") or ".." in backup_dir.split("/"):
+            return {"error": "win_boot_repair backup_dir must be under /mnt/scratch/"}
+        if _is_volatile_path(backup_dir):
+            return {"error": f"refusing to write boot backup to volatile RAM path: {backup_dir}"}
+
+        ts = int(time.time())
+        if boot_mode == "uefi":
+            if not _valid_dev_path(efi_part):
+                return {"error": "win_boot_repair (uefi) requires a valid 'efi_partition' (e.g. /dev/nvme0n1p1)"}
+            win_mp = str(args.get("mountpoint") or "").strip()
+            if win_mp and not _valid_mountpoint(win_mp):
+                return {"error": f"Invalid mountpoint '{win_mp}': must be under /mnt/rescue/ or /mnt/scratch/"}
+            esp_mp = "/mnt/rescue/win_esp"
+            # Split disk + partition number for efibootmgr (e.g. /dev/nvme0n1p1 -> /dev/nvme0n1, 1)
+            m_nvme = re.match(r"^(/dev/(?:nvme\d+n\d+|mmcblk\d+|loop\d+))p(\d+)$", efi_part)
+            m_sd = re.match(r"^(/dev/[a-z]+)(\d+)$", efi_part)
+            if m_nvme:
+                esp_disk, esp_part_num = m_nvme.group(1), m_nvme.group(2)
+            elif m_sd:
+                esp_disk, esp_part_num = m_sd.group(1), m_sd.group(2)
+            else:
+                esp_disk, esp_part_num = efi_part, "1"
+
+            steps: List[List[str]] = [
+                ["mount", efi_part, esp_mp],
+                ["cp", "-a", f"{esp_mp}/EFI/Microsoft/Boot/BCD", f"{backup_dir}/BCD.bak.{ts}"],
+            ]
+            if win_mp:
+                steps.append(
+                    [
+                        "cp",
+                        "-f",
+                        f"{win_mp.rstrip('/')}/Windows/Boot/EFI/bootmgfw.efi",
+                        f"{esp_mp}/EFI/Microsoft/Boot/bootmgfw.efi",
+                    ]
+                )
+            steps.append(
+                [
+                    "efibootmgr",
+                    "-c",
+                    "-d",
+                    esp_disk,
+                    "-p",
+                    esp_part_num,
+                    "-L",
+                    "Windows Boot Manager",
+                    "-l",
+                    r"\EFI\Microsoft\Boot\bootmgfw.efi",
+                ]
+            )
+            unmount_steps: List[List[str]] = [["umount", esp_mp]]
+            if dry_run:
+                return {
+                    "action": action,
+                    "boot_mode": "uefi",
+                    "efi_partition": efi_part,
+                    "backup_dir": backup_dir,
+                    "dry_run": True,
+                    "planned_steps": steps + unmount_steps,
+                }
+            if _IS_WINDOWS:
+                return {"error": "win_boot_repair execution requires a Linux Live USB node"}
+            os.makedirs(esp_mp, exist_ok=True)
+            os.makedirs(backup_dir, exist_ok=True)
+            step_results: List[Dict[str, Any]] = []
+            exit_code = 0
+            try:
+                for idx, step in enumerate(steps):
+                    # Skip BCD backup gracefully if BCD does not exist yet on ESP
+                    if idx == 1 and not os.path.isfile(step[2]):
+                        step_results.append(
+                            {"argv": list(step), "exit_code": 0, "skipped": True, "reason": "BCD not present"}
+                        )
+                        continue
+                    rc, out, err = _run_cmd(step, timeout=30)
+                    step_results.append({"argv": list(step), "exit_code": rc, "stdout": out, "stderr": err})
+                    exit_code = rc
+                    if rc != 0:
+                        break
+            finally:
+                for step in unmount_steps:
+                    rc_c, out_c, err_c = _run_cmd(step, timeout=15)
+                    step_results.append(
+                        {"argv": list(step), "exit_code": rc_c, "stdout": out_c, "stderr": err_c, "phase": "cleanup"}
+                    )
+            return {
+                "action": action,
+                "boot_mode": "uefi",
+                "dry_run": False,
+                "executed": True,
+                "exit_code": exit_code,
+                "planned_steps": steps,
+                "step_results": step_results,
+            }
+
+        # Legacy BIOS (MBR)
+        if not _valid_dev_path(device):
+            return {"error": "win_boot_repair (bios) requires a valid disk 'device' (e.g. /dev/sda)"}
+        mbr_backup = f"{backup_dir}/mbr_{os.path.basename(device)}_{ts}.bin"
+        steps = [
+            ["dd", f"if={device}", f"of={mbr_backup}", "bs=512", "count=1"],
+            ["install-mbr", device],
+        ]
+        if dry_run:
+            return {
+                "action": action,
+                "boot_mode": "bios",
+                "device": device,
+                "backup_dir": backup_dir,
+                "dry_run": True,
+                "planned_steps": steps,
+                "note": "Installs a standard MBR; for NTFS PBR or BCD rebuilds, follow up with WinPE bootrec/bcdboot if needed.",
+            }
+        if _IS_WINDOWS:
+            return {"error": "win_boot_repair execution requires a Linux Live USB node"}
+        if not _which("install-mbr"):
+            return {"error": "install-mbr is not installed (install the 'mbr' package)"}
+        os.makedirs(backup_dir, exist_ok=True)
+        step_results = []
+        exit_code = 0
+        for step in steps:
+            rc, out, err = _run_cmd(step, timeout=30)
+            step_results.append({"argv": list(step), "exit_code": rc, "stdout": out, "stderr": err})
+            exit_code = rc
+            if rc != 0:
+                break
+        return {
+            "action": action,
+            "boot_mode": "bios",
+            "device": device,
+            "mbr_backup": mbr_backup,
+            "dry_run": False,
+            "executed": True,
+            "exit_code": exit_code,
+            "planned_steps": steps,
+            "step_results": step_results,
+        }
+
+    if action == "systemd_boot_repair":
+        efi_part = str(args.get("efi_partition") or "").strip()
+        if not _valid_dev_path(device) or not _valid_dev_path(efi_part):
+            return {
+                "error": "systemd_boot_repair requires valid 'device' (Linux root) and 'efi_partition'"
+            }
+        esp_mount = str(args.get("esp_mount") or "/boot/efi").strip()
+        if not esp_mount.startswith("/") or ".." in esp_mount.split("/"):
+            return {"error": f"Invalid esp_mount: {esp_mount}"}
+        root_mp = "/mnt/rescue/sysboot_root"
+        esp_target = f"{root_mp}{esp_mount}"
+        steps = [
+            ["mount", device, root_mp],
+            ["mount", efi_part, esp_target],
+            ["mount", "--bind", "/dev", f"{root_mp}/dev"],
+            ["mount", "--bind", "/proc", f"{root_mp}/proc"],
+            ["mount", "--bind", "/sys", f"{root_mp}/sys"],
+            ["mount", "--bind", "/run", f"{root_mp}/run"],
+            ["chroot", root_mp, "bootctl", f"--esp-path={esp_mount}", "install"],
+        ]
+        unmount_steps = [
+            ["umount", f"{root_mp}/run"],
+            ["umount", f"{root_mp}/sys"],
+            ["umount", f"{root_mp}/proc"],
+            ["umount", f"{root_mp}/dev"],
+            ["umount", esp_target],
+            ["umount", root_mp],
+        ]
+        if dry_run:
+            return {
+                "action": action,
+                "device": device,
+                "efi_partition": efi_part,
+                "esp_mount": esp_mount,
+                "dry_run": True,
+                "planned_steps": steps + unmount_steps,
+            }
+        if _IS_WINDOWS:
+            return {"error": "systemd_boot_repair execution requires a Linux Live USB node"}
+        os.makedirs(esp_target, exist_ok=True)
+        for sub in ("dev", "proc", "sys", "run"):
+            os.makedirs(f"{root_mp}/{sub}", exist_ok=True)
+        step_results = []
+        exit_code = 0
+        try:
+            for step in steps:
+                rc, out, err = _run_cmd(step, timeout=60)
+                step_results.append({"argv": list(step), "exit_code": rc, "stdout": out, "stderr": err})
+                exit_code = rc
+                if rc != 0:
+                    break
+        finally:
+            for step in unmount_steps:
+                rc_c, out_c, err_c = _run_cmd(step, timeout=15)
+                step_results.append(
+                    {"argv": list(step), "exit_code": rc_c, "stdout": out_c, "stderr": err_c, "phase": "cleanup"}
+                )
+        return {
+            "action": action,
+            "dry_run": False,
+            "executed": True,
+            "exit_code": exit_code,
+            "planned_steps": steps,
+            "step_results": step_results,
+        }
+
+    if action == "partition_backup":
+        output_path = str(args.get("output_path") or args.get("target_image") or "").strip()
+        if not _valid_dev_path(device) or not output_path:
+            return {"error": "partition_backup requires valid 'device' and 'output_path'"}
+        if not output_path.startswith("/mnt/scratch/") or ".." in output_path.split("/"):
+            return {"error": "partition_backup output_path must be under /mnt/scratch/"}
+        if _is_volatile_path(output_path):
+            return {"error": f"refusing to write partition backup to volatile RAM path: {output_path}"}
+
+        fstype = _normalize_fstype(str(args.get("fstype") or "")) or _detect_fstype(device)
+        pc_map = {
+            "ntfs": "partclone.ntfs",
+            "ext4": "partclone.ext4",
+            "ext3": "partclone.ext3",
+            "ext2": "partclone.ext2",
+            "btrfs": "partclone.btrfs",
+            "xfs": "partclone.xfs",
+            "vfat": "partclone.vfat",
+            "fat32": "partclone.vfat",
+            "exfat": "partclone.exfat",
+            "f2fs": "partclone.f2fs",
+        }
+        pc_bin = pc_map.get(fstype, "partclone.dd")
+        if pc_bin == "partclone.dd":
+            pc_argv = [pc_bin, "-s", device, "-o", output_path]
+        else:
+            pc_argv = [pc_bin, "-c", "-s", device, "-o", output_path]
+
+        m_nvme = re.match(r"^(/dev/(?:nvme\d+n\d+|mmcblk\d+|loop\d+))p\d+$", device)
+        m_sd = re.match(r"^(/dev/[a-z]+)\d+$", device)
+        parent_disk = m_nvme.group(1) if m_nvme else (m_sd.group(1) if m_sd else device)
+        table_path = f"{output_path}.sfdisk"
+        steps = [
+            ["sfdisk", "-d", parent_disk],
+            pc_argv,
+        ]
+        if dry_run:
+            return {
+                "action": action,
+                "device": device,
+                "fstype": fstype or None,
+                "partclone_bin": pc_bin,
+                "output_path": output_path,
+                "table_backup_path": table_path,
+                "dry_run": True,
+                "argv": pc_argv,
+                "planned_steps": steps,
+                "recommended_execution": "Pass shlex.join(argv) to run_job() for large partitions.",
+            }
+        if _IS_WINDOWS:
+            return {"error": "partition_backup execution requires a Linux Live USB node"}
+        if not _which(pc_bin):
+            return {"error": f"{pc_bin} is not installed (install partclone)"}
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        # Best-effort partition table dump alongside the image
+        tbl_rc, tbl_out, _ = _run_cmd(["sfdisk", "-d", parent_disk], timeout=15)
+        if tbl_rc == 0 and tbl_out:
+            try:
+                with open(table_path, "w", encoding="utf-8") as tf:
+                    tf.write(tbl_out)
+            except OSError:
+                pass
+        rc, out, err = _run_cmd(pc_argv, timeout=120)
+        sha256_hex = None
+        if rc == 0 and os.path.isfile(output_path):
+            try:
+                h = hashlib.sha256()
+                with open(output_path, "rb") as fh:
+                    for chunk in iter(lambda: fh.read(65536), b""):
+                        h.update(chunk)
+                sha256_hex = h.hexdigest()
+            except OSError:
+                pass
+        return {
+            "action": action,
+            "device": device,
+            "output_path": output_path,
+            "table_backup_path": table_path if tbl_rc == 0 else None,
+            "sha256": sha256_hex,
+            "dry_run": False,
+            "executed": True,
+            "argv": pc_argv,
+            "exit_code": rc,
+            "stdout": out,
+            "stderr": err,
+        }
+
+    if action == "partition_restore":
+        src_image = str(args.get("target_image") or args.get("output_path") or "").strip()
+        if not _valid_dev_path(device) or not src_image:
+            return {"error": "partition_restore requires valid 'device' and 'target_image'"}
+        if not src_image.startswith("/mnt/scratch/") or ".." in src_image.split("/"):
+            return {"error": "partition_restore target_image must be under /mnt/scratch/"}
+        argv = ["partclone.restore", "-s", src_image, "-o", device]
+        if dry_run:
+            return {
+                "action": action,
+                "device": device,
+                "target_image": src_image,
+                "dry_run": True,
+                "argv": argv,
+            }
+        if _IS_WINDOWS:
+            return {"error": "partition_restore execution requires a Linux Live USB node"}
+        if not _which("partclone.restore"):
+            return {"error": "partclone.restore is not installed (install partclone)"}
+        if not os.path.isfile(src_image):
+            return {"error": f"source image not found: {src_image}"}
+        rc, out, err = _run_cmd(argv, timeout=120)
+        return {
+            "action": action,
+            "device": device,
+            "target_image": src_image,
+            "dry_run": False,
+            "executed": True,
+            "argv": argv,
+            "exit_code": rc,
+            "stdout": out,
+            "stderr": err,
+        }
+
+    if action == "backup_user_data":
+        src_mp = str(args.get("mountpoint") or "").strip()
+        dst_path = str(args.get("output_path") or "").strip()
+        tool = str(args.get("backup_tool") or "rsync").strip().lower()
+        if not src_mp or not _valid_mountpoint(src_mp):
+            return {"error": "backup_user_data requires a valid 'mountpoint' under /mnt/rescue/ or /mnt/scratch/"}
+        if not dst_path or not dst_path.startswith("/mnt/scratch/") or ".." in dst_path.split("/"):
+            return {"error": "backup_user_data requires 'output_path' under /mnt/scratch/"}
+        if _is_volatile_path(dst_path):
+            return {"error": f"refusing to write user backup to volatile RAM path: {dst_path}"}
+        if tool not in ("rsync", "restic"):
+            return {"error": f"backup_user_data backup_tool must be 'rsync' or 'restic', got: {tool}"}
+
+        if tool == "rsync":
+            argv = ["rsync", "-aHAX", "--info=progress2", f"{src_mp.rstrip('/')}/", f"{dst_path.rstrip('/')}/"]
+        else:
+            argv = ["restic", "-r", dst_path, "backup", src_mp]
+
+        if dry_run:
+            return {
+                "action": action,
+                "backup_tool": tool,
+                "mountpoint": src_mp,
+                "output_path": dst_path,
+                "dry_run": True,
+                "argv": argv,
+            }
+        if _IS_WINDOWS:
+            return {"error": "backup_user_data execution requires a Linux Live USB node"}
+        if not _which(tool):
+            return {"error": f"{tool} is not installed"}
+        if not os.path.isdir(src_mp):
+            return {"error": f"source mountpoint does not exist: {src_mp}"}
+        os.makedirs(dst_path, exist_ok=True)
+        rc, out, err = _run_cmd(argv, timeout=120)
+        return {
+            "action": action,
+            "backup_tool": tool,
+            "dry_run": False,
+            "executed": True,
+            "argv": argv,
+            "exit_code": rc,
+            "stdout": out,
+            "stderr": err,
+        }
+
+    if action == "partition_ops":
+        op = str(args.get("partition_op") or "").strip().lower()
+        if op not in ("backup_table", "mbr_to_gpt", "resize_ntfs", "resize_ext"):
+            return {
+                "error": "partition_ops requires 'partition_op' in ('backup_table', 'mbr_to_gpt', 'resize_ntfs', 'resize_ext')"
+            }
+        if not _valid_dev_path(device):
+            return {"error": f"partition_ops ({op}) requires a valid 'device'"}
+        backup_dir = str(args.get("backup_dir") or "/mnt/scratch/part-backups").strip()
+        if not backup_dir.startswith("/mnt/scratch/") or ".." in backup_dir.split("/"):
+            return {"error": "partition_ops backup_dir must be under /mnt/scratch/"}
+        if _is_volatile_path(backup_dir):
+            return {"error": f"refusing to write partition table backup to volatile RAM path: {backup_dir}"}
+
+        ts = int(time.time())
+        dev_slug = os.path.basename(device)
+        m_nvme = re.match(r"^(/dev/(?:nvme\d+n\d+|mmcblk\d+|loop\d+))p\d+$", device)
+        m_sd = re.match(r"^(/dev/[a-z]+)\d+$", device)
+        parent_disk = m_nvme.group(1) if m_nvme else (m_sd.group(1) if m_sd else device)
+        new_size = str(args.get("new_size") or "").strip()
+        if new_size and not re.match(r"^[0-9]+(?:\.[0-9]+)?[KMGTPkmgtp]?[Bb]?$", new_size):
+            return {"error": f"invalid new_size format: {new_size}"}
+
+        backup_file = f"{backup_dir}/{dev_slug}_{ts}.sfdisk"
+        steps: List[List[str]] = [["sfdisk", "-d", parent_disk]]
+        if op == "mbr_to_gpt":
+            steps.append(["sgdisk", "-g", device])
+        elif op == "resize_ntfs":
+            if new_size:
+                steps.append(["ntfsresize", "-f", "-s", new_size, device])
+            else:
+                steps.append(["ntfsresize", "-i", device])
+        elif op == "resize_ext":
+            steps.append(["e2fsck", "-f", "-p", device])
+            resize_cmd = ["resize2fs", device] + ([new_size] if new_size else [])
+            steps.append(resize_cmd)
+
+        if dry_run:
+            return {
+                "action": action,
+                "partition_op": op,
+                "device": device,
+                "backup_file": backup_file,
+                "dry_run": True,
+                "planned_steps": steps,
+            }
+        if _IS_WINDOWS:
+            return {"error": "partition_ops execution requires a Linux Live USB node"}
+        os.makedirs(backup_dir, exist_ok=True)
+        step_results: List[Dict[str, Any]] = []
+        exit_code = 0
+        for idx, step in enumerate(steps):
+            rc, out, err = _run_cmd(step, timeout=60)
+            step_results.append({"argv": list(step), "exit_code": rc, "stdout": out, "stderr": err})
+            exit_code = rc
+            if idx == 0 and rc == 0 and out:
+                try:
+                    with open(backup_file, "w", encoding="utf-8") as bf:
+                        bf.write(out)
+                except OSError:
+                    pass
+            if rc != 0:
+                break
+        return {
+            "action": action,
+            "partition_op": op,
+            "device": device,
+            "backup_file": backup_file,
+            "dry_run": False,
+            "executed": True,
+            "exit_code": exit_code,
+            "planned_steps": steps,
+            "step_results": step_results,
+        }
+
+    if action == "win_deploy":
+        wim_path = str(args.get("wim_path") or "").strip()
+        if not wim_path or ".." in wim_path.split("/"):
+            return {"error": "win_deploy requires a valid 'wim_path' (install.wim or install.esd)"}
+        if not _valid_dev_path(device):
+            return {"error": "win_deploy requires a valid target NTFS partition 'device'"}
+        try:
+            wim_index = int(args.get("wim_index") or 1)
+        except (TypeError, ValueError):
+            return {"error": "win_deploy 'wim_index' must be a positive integer"}
+        if wim_index < 1:
+            return {"error": "win_deploy 'wim_index' must be >= 1"}
+
+        efi_part = str(args.get("efi_partition") or "").strip()
+        if efi_part and not _valid_dev_path(efi_part):
+            return {"error": f"Invalid efi_partition: {efi_part}"}
+
+        steps = [["wimlib-imagex", "apply", wim_path, str(wim_index), device]]
+        unmount_steps: List[List[str]] = []
+        if efi_part:
+            win_mp = "/mnt/rescue/win_deployed"
+            esp_mp = "/mnt/rescue/win_esp"
+            steps.extend(
+                [
+                    ["mount", "-t", "ntfs-3g", "-o", "ro", device, win_mp],
+                    ["mount", efi_part, esp_mp],
+                    [
+                        "cp",
+                        "-f",
+                        f"{win_mp}/Windows/Boot/EFI/bootmgfw.efi",
+                        f"{esp_mp}/EFI/Microsoft/Boot/bootmgfw.efi",
+                    ],
+                ]
+            )
+            unmount_steps = [["umount", esp_mp], ["umount", win_mp]]
+
+        if dry_run:
+            return {
+                "action": action,
+                "wim_path": wim_path,
+                "wim_index": wim_index,
+                "device": device,
+                "efi_partition": efi_part or None,
+                "dry_run": True,
+                "planned_steps": steps + unmount_steps,
+            }
+        if _IS_WINDOWS:
+            return {"error": "win_deploy execution requires a Linux Live USB node"}
+        if not _which("wimlib-imagex"):
+            return {"error": "wimlib-imagex is not installed (install wimtools)"}
+        if not os.path.isfile(wim_path):
+            return {"error": f"WIM/ESD image not found: {wim_path}"}
+        if efi_part:
+            os.makedirs("/mnt/rescue/win_deployed", exist_ok=True)
+            os.makedirs("/mnt/rescue/win_esp", exist_ok=True)
+        step_results = []
+        exit_code = 0
+        try:
+            for step in steps:
+                rc, out, err = _run_cmd(step, timeout=120)
+                step_results.append({"argv": list(step), "exit_code": rc, "stdout": out, "stderr": err})
+                exit_code = rc
+                if rc != 0:
+                    break
+        finally:
+            for step in unmount_steps:
+                rc_c, out_c, err_c = _run_cmd(step, timeout=15)
+                step_results.append(
+                    {"argv": list(step), "exit_code": rc_c, "stdout": out_c, "stderr": err_c, "phase": "cleanup"}
+                )
+        return {
+            "action": action,
+            "dry_run": False,
+            "executed": True,
+            "exit_code": exit_code,
+            "planned_steps": steps,
+            "step_results": step_results,
+        }
 
     return {"error": f"rescue action is not implemented in this build: {action}"}
 

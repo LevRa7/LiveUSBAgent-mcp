@@ -29,6 +29,41 @@ for lib in "${runtime_libs[@]}"; do
     fi
 done
 
+# 1b. Back up compiled DKMS kernel modules before purging build-only packages
+#     (removing linux-headers-* can trigger DKMS hooks that delete updates/dkms/*.ko*).
+DKMS_BACKUP_DIR="/tmp/rhm-dkms-ko-backup"
+rm -rf "${DKMS_BACKUP_DIR}"
+mkdir -p "${DKMS_BACKUP_DIR}"
+
+mod_roots=()
+if [[ -d /usr/lib/modules ]]; then
+    mod_roots+=(/usr/lib/modules)
+fi
+if [[ -d /lib/modules && ! -L /lib && ! -L /lib/modules ]]; then
+    if [[ "$(readlink -f /lib/modules 2>/dev/null || true)" != "$(readlink -f /usr/lib/modules 2>/dev/null || true)" ]]; then
+        mod_roots+=(/lib/modules)
+    fi
+fi
+
+backed_up_ko=0
+for mod_root in "${mod_roots[@]}"; do
+    for dkms_dir in "${mod_root}"/*/updates/dkms; do
+        [[ -d "${dkms_dir}" ]] || continue
+        kver="$(basename "$(dirname "$(dirname "${dkms_dir}")")")"
+        dst_dir="${DKMS_BACKUP_DIR}/${kver}/updates/dkms"
+        while IFS= read -r -d '' ko_file; do
+            rel_path="${ko_file#"${dkms_dir}"/}"
+            mkdir -p "${dst_dir}/$(dirname "${rel_path}")"
+            if cp -a "${ko_file}" "${dst_dir}/${rel_path}"; then
+                backed_up_ko=$((backed_up_ko + 1))
+            else
+                warn "could not back up DKMS module: ${ko_file}"
+            fi
+        done < <(find "${dkms_dir}" -type f \( -name '*.ko' -o -name '*.ko.xz' -o -name '*.ko.zst' \) -print0 2>/dev/null)
+    done
+done
+log "Backed up ${backed_up_ko} compiled DKMS module file(s) to ${DKMS_BACKUP_DIR}."
+
 # 2. Remove the build-only toolchain, headers and dev libraries.
 build_only=(
     build-essential
@@ -59,6 +94,67 @@ if [[ ${#installed_build_only[@]} -gt 0 ]]; then
     if ! DEBIAN_FRONTEND=noninteractive apt-get purge -y --auto-remove "${installed_build_only[@]}"; then
         warn "apt-get purge returned non-zero; image may still contain build dependencies."
     fi
+fi
+
+# 2b. Restore backed-up DKMS kernel modules, remove temp backup, and run depmod.
+primary_mod_root="/usr/lib/modules"
+if [[ ! -d "${primary_mod_root}" && -d /lib/modules ]]; then
+    primary_mod_root="/lib/modules"
+fi
+
+if [[ -d "${DKMS_BACKUP_DIR}" ]]; then
+    restored_ko=0
+    for kver_backup in "${DKMS_BACKUP_DIR}"/*; do
+        [[ -d "${kver_backup}/updates/dkms" ]] || continue
+        kver="$(basename "${kver_backup}")"
+        if [[ -d "/usr/lib/modules/${kver}" ]]; then
+            target_dkms="/usr/lib/modules/${kver}/updates/dkms"
+        elif [[ -d "/lib/modules/${kver}" ]]; then
+            target_dkms="/lib/modules/${kver}/updates/dkms"
+        else
+            target_dkms="${primary_mod_root}/${kver}/updates/dkms"
+        fi
+        mkdir -p "${target_dkms}"
+        while IFS= read -r -d '' ko_file; do
+            rel_path="${ko_file#"${kver_backup}/updates/dkms"/}"
+            mkdir -p "${target_dkms}/$(dirname "${rel_path}")"
+            if cp -a "${ko_file}" "${target_dkms}/${rel_path}"; then
+                restored_ko=$((restored_ko + 1))
+            else
+                warn "could not restore DKMS module: ${target_dkms}/${rel_path}"
+            fi
+        done < <(find "${kver_backup}/updates/dkms" -type f \( -name '*.ko' -o -name '*.ko.xz' -o -name '*.ko.zst' \) -print0 2>/dev/null)
+    done
+    rm -rf "${DKMS_BACKUP_DIR}" || warn "could not remove ${DKMS_BACKUP_DIR}"
+    log "Restored ${restored_ko} compiled DKMS module file(s)."
+fi
+
+if command -v depmod >/dev/null 2>&1 && [[ -d "${primary_mod_root}" ]]; then
+    for kdir in "${primary_mod_root}"/*; do
+        [[ -d "${kdir}" ]] || continue
+        kver="$(basename "${kdir}")"
+        if depmod -a "${kver}"; then
+            log "depmod -a ${kver} completed."
+        else
+            warn "depmod -a ${kver} returned non-zero."
+        fi
+    done
+fi
+
+# 2c. Diagnostic check: verify DKMS modules via modinfo after purge (non-fatal).
+if command -v modinfo >/dev/null 2>&1 && [[ -d "${primary_mod_root}" ]]; then
+    for kdir in "${primary_mod_root}"/*; do
+        [[ -d "${kdir}" ]] || continue
+        kver="$(basename "${kdir}")"
+        for mod in zfs apfs amneziawg; do
+            mod_path="$(modinfo -k "${kver}" -n "${mod}" 2>/dev/null || true)"
+            if [[ -n "${mod_path}" ]]; then
+                log "modinfo (${kver}): ${mod} -> ${mod_path}"
+            else
+                log "modinfo (${kver}): ${mod} not present (may not be built in this profile)"
+            fi
+        done
+    done
 fi
 
 # 3. Drop kernel header trees that apt left behind because of a metapackage pin.

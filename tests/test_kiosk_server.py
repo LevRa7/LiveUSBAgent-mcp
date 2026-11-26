@@ -123,6 +123,20 @@ def running_server(tmp_path: Path):
         if not cmd:
             return 1, "", "empty"
         exe = cmd[0]
+        if exe == "nmcli" and cmd[:3] == ["nmcli", "radio", "wifi"]:
+            return 0, "enabled\n", ""
+        if exe == "nmcli" and "rescan" in cmd:
+            return 0, "", ""
+        if exe == "nmcli" and cmd[:5] == ["nmcli", "-t", "-f", "NAME,TYPE", "con"]:
+            return 0, "", ""
+        if exe == "nmcli" and cmd[:5] == ["nmcli", "-t", "-f", "DEVICE,TYPE", "dev"]:
+            return 0, "wlan0:wifi\n", ""
+        if exe == "nmcli" and cmd[:3] == ["nmcli", "con", "add"]:
+            return 0, "Connection successfully added.", ""
+        if exe == "nmcli" and cmd[:3] == ["nmcli", "con", "up"]:
+            return 0, f"Connection successfully activated ({cmd[3]}).", ""
+        if exe == "nmcli" and cmd[:3] == ["nmcli", "con", "delete"]:
+            return 0, "Connection deleted.", ""
         if exe == "nmcli" and "list" in cmd:
             return 0, mock_state["nmcli_scan_output"], ""
         if exe == "nmcli" and "connect" in cmd:
@@ -347,29 +361,37 @@ def test_http_api_wifi_scan_and_connect(running_server):
     )
     assert st_conn == 200
     assert json.loads(body_conn.decode("utf-8"))["ok"] is True
-    assert ["nmcli", "dev", "wifi", "connect", "--", "Office:5G", "password", "secret-pass"] in calls
+    assert ["nmcli", "dev", "wifi", "connect", "Office:5G", "password", "secret-pass"] in calls
 
-    # Connect to hidden SSID
+    # Connect to hidden SSID (explicit NM profile + con up)
     st_hid, _, body_hid = _http_request(
         base,
         "/api/wifi/connect",
         method="POST",
-        payload={"ssid": "HiddenCorp", "password": "pw", "hidden": True},
+        payload={"ssid": "HiddenCorp", "password": "hidden-pass-123", "hidden": True},
     )
     assert st_hid == 200
     assert json.loads(body_hid.decode("utf-8"))["ok"] is True
     assert [
         "nmcli",
-        "dev",
+        "con",
+        "add",
+        "type",
         "wifi",
-        "connect",
-        "--",
+        "ifname",
+        "wlan0",
+        "con-name",
         "HiddenCorp",
-        "password",
-        "pw",
-        "hidden",
+        "ssid",
+        "HiddenCorp",
+        "wifi.hidden",
         "yes",
+        "wifi-sec.key-mgmt",
+        "wpa-psk",
+        "wifi-sec.psk",
+        "hidden-pass-123",
     ] in calls
+    assert ["nmcli", "con", "up", "HiddenCorp"] in calls
 
     # Missing SSID returns 400
     st_bad, _, _ = _http_request(
@@ -673,31 +695,38 @@ def _fake_popen(captured: Dict[str, Any], pid: int = 2468):
     return fake_popen
 
 
-APP_LABELS = ["Рабочий стол (LXDE)", "Терминал", "Файловый менеджер", "Текстовый редактор"]
+APP_LABELS = [
+    "Рабочий стол (LXDE)",
+    "Терминал",
+    "Файловый менеджер",
+    "Редактор разделов (GParted)",
+    "Текстовый редактор",
+]
 
 
 def test_list_local_apps_allowlist_and_availability(monkeypatch):
     _which_map(monkeypatch, {"rhm-open-desktop": "/usr/local/bin/rhm-open-desktop", "xterm": "/usr/bin/xterm", "pcmanfm": "/usr/bin/pcmanfm"})
 
     apps = kiosk.list_local_apps()
-    assert [a["id"] for a in apps] == ["desktop", "terminal", "files", "editor"]
+    assert [a["id"] for a in apps] == ["desktop", "terminal", "files", "partitions", "editor"]
     assert [a["label"] for a in apps] == APP_LABELS
-    assert [a["available"] for a in apps] == [True, True, True, False]
+    assert [a["available"] for a in apps] == [True, True, True, False, False]
     assert apps[1]["reason"] == ""
     assert apps[2]["reason"] == ""
-    assert "mousepad" in apps[3]["reason"]
+    assert "gparted" in apps[3]["reason"]
+    assert "mousepad" in apps[4]["reason"]
     # Stable shape: exactly the four contract keys.
     assert all(set(a) == {"id", "label", "available", "reason"} for a in apps)
 
     # Nothing installed -> all unavailable, each with a non-empty Russian reason.
     _which_map(monkeypatch, {})
     missing = kiosk.list_local_apps()
-    assert [a["available"] for a in missing] == [False, False, False, False]
+    assert [a["available"] for a in missing] == [False, False, False, False, False]
     assert all(a["reason"] for a in missing)
 
 
 def test_http_api_apps_returns_three_ids_and_availability(running_server, monkeypatch):
-    _which_map(monkeypatch, {"rhm-open-desktop": "/usr/local/bin/rhm-open-desktop", "xterm": "/usr/bin/xterm", "mousepad": "/usr/bin/mousepad"})
+    _which_map(monkeypatch, {"rhm-open-desktop": "/usr/local/bin/rhm-open-desktop", "xterm": "/usr/bin/xterm", "gparted": "/usr/sbin/gparted", "mousepad": "/usr/bin/mousepad"})
     base = running_server["base_url"]
 
     status, _, body = _http_request(base, "/api/apps")
@@ -705,9 +734,9 @@ def test_http_api_apps_returns_three_ids_and_availability(running_server, monkey
     data = json.loads(body.decode("utf-8"))
     assert data["ok"] is True
     apps = data["apps"]
-    assert [a["id"] for a in apps] == ["desktop", "terminal", "files", "editor"]
+    assert [a["id"] for a in apps] == ["desktop", "terminal", "files", "partitions", "editor"]
     assert [a["label"] for a in apps] == APP_LABELS
-    assert [a["available"] for a in apps] == [True, True, False, True]
+    assert [a["available"] for a in apps] == [True, True, False, True, True]
     assert "pcmanfm" in apps[2]["reason"]
 
     # The catalogue stays behind the existing Host/Origin/Sec-Fetch gate.
@@ -1117,7 +1146,7 @@ def test_default_run_cmd_timeout_redacts_password_args(monkeypatch):
 
     monkeypatch.setattr(kiosk.subprocess, "run", fake_timeout)
     rc, out, err = kiosk.default_run_cmd(
-        ["nmcli", "dev", "wifi", "connect", "--", "OfficeWifi", "password", "SuperSecretPass99"],
+        ["nmcli", "dev", "wifi", "connect", "OfficeWifi", "password", "SuperSecretPass99"],
         timeout=1.0,
     )
     assert rc == 124
@@ -2728,4 +2757,264 @@ def test_amnezia_posts_require_the_json_csrf_gate(amnezia_server):
         assert status == 403, path
     assert amnezia_server["calls"] == []
     assert amnezia_server["state"]["fetches"] == []
+
+
+# --- Bug 3 (Wi-Fi connect) & Bug 4 (Kiosk offline detection) tests -----------
+
+
+def test_connect_wifi_deletes_conflicting_profile_enables_radio_and_preserves_spaces():
+    calls: List[Tuple[List[str], float]] = []
+    ssid_with_space = "My Cafe "
+
+    def fake_runner(cmd: List[str], timeout: float = 5.0) -> Tuple[int, str, str]:
+        calls.append((list(cmd), timeout))
+        if cmd == ["nmcli", "radio", "wifi"]:
+            return 0, "disabled\n", ""
+        if cmd == ["nmcli", "radio", "wifi", "on"]:
+            return 0, "", ""
+        if cmd == ["nmcli", "dev", "wifi", "rescan"]:
+            return 1, "", "Scanning not allowed immediately"
+        if cmd == ["nmcli", "-t", "-f", "NAME,TYPE", "con", "show"]:
+            return (
+                0,
+                "My Cafe :802-11-wireless\nMy Cafe :802-3-ethernet\nOtherNet:802-11-wireless\n",
+                "",
+            )
+        if cmd == ["nmcli", "con", "delete", ssid_with_space]:
+            return 0, "Connection deleted", ""
+        if cmd == ["nmcli", "dev", "wifi", "connect", ssid_with_space, "password", "validpass123"]:
+            return 0, "Device 'wlan0' successfully activated.", ""
+        return 1, "", f"unexpected: {cmd}"
+
+    res = kiosk.connect_wifi(ssid_with_space, password="validpass123", run_cmd=fake_runner)
+    assert res["ok"] is True
+
+    cmds = [c for c, _ in calls]
+    assert ["nmcli", "radio", "wifi", "on"] in cmds
+    assert ["nmcli", "dev", "wifi", "rescan"] in cmds
+    assert ["nmcli", "con", "delete", ssid_with_space] in cmds
+    assert cmds.count(["nmcli", "con", "delete", ssid_with_space]) == 1
+
+    connect_entries = [(c, t) for c, t in calls if c[:4] == ["nmcli", "dev", "wifi", "connect"]]
+    assert len(connect_entries) == 1
+    assert connect_entries[0][0] == [
+        "nmcli",
+        "dev",
+        "wifi",
+        "connect",
+        ssid_with_space,
+        "password",
+        "validpass123",
+    ]
+    assert "--" not in connect_entries[0][0]
+    assert connect_entries[0][1] == 35.0
+
+    # parse_nmcli_wifi_list also preserves leading/trailing spaces in SSID
+    parsed = kiosk.parse_nmcli_wifi_list("My Cafe :75:WPA2:\n   :80:WPA2:\n")
+    assert [n["ssid"] for n in parsed] == ["My Cafe "]
+
+
+def test_connect_wifi_hidden_network_uses_explicit_profile_and_up():
+    calls: List[Tuple[List[str], float]] = []
+
+    def fake_runner(cmd: List[str], timeout: float = 5.0) -> Tuple[int, str, str]:
+        calls.append((list(cmd), timeout))
+        if cmd == ["nmcli", "radio", "wifi"]:
+            return 0, "enabled\n", ""
+        if cmd == ["nmcli", "dev", "wifi", "rescan"]:
+            return 0, "", ""
+        if cmd == ["nmcli", "-t", "-f", "NAME,TYPE", "con", "show"]:
+            return 0, "", ""
+        if cmd == ["nmcli", "-t", "-f", "DEVICE,TYPE", "dev", "status"]:
+            return 0, "eth0:ethernet\nwlp2s0:wifi\n", ""
+        if cmd[:3] == ["nmcli", "con", "add"]:
+            return 0, "Connection 'SecretLab' successfully added.", ""
+        if cmd == ["nmcli", "con", "up", "SecretLab"]:
+            return 0, "Connection successfully activated.", ""
+        return 1, "", f"unexpected: {cmd}"
+
+    res = kiosk.connect_wifi(
+        "SecretLab", password="super-secret-password", hidden=True, run_cmd=fake_runner
+    )
+    assert res["ok"] is True
+    cmds = [c for c, _ in calls]
+    assert [
+        "nmcli",
+        "con",
+        "add",
+        "type",
+        "wifi",
+        "ifname",
+        "wlp2s0",
+        "con-name",
+        "SecretLab",
+        "ssid",
+        "SecretLab",
+        "wifi.hidden",
+        "yes",
+        "wifi-sec.key-mgmt",
+        "wpa-psk",
+        "wifi-sec.psk",
+        "super-secret-password",
+    ] in cmds
+    up_entries = [(c, t) for c, t in calls if c == ["nmcli", "con", "up", "SecretLab"]]
+    assert len(up_entries) == 1
+    assert up_entries[0][1] == 35.0
+
+
+def test_connect_wifi_fallback_on_key_mgmt_missing():
+    calls: List[List[str]] = []
+
+    def fake_runner(cmd: List[str], timeout: float = 5.0) -> Tuple[int, str, str]:
+        calls.append(list(cmd))
+        if cmd == ["nmcli", "radio", "wifi"]:
+            return 0, "enabled\n", ""
+        if cmd == ["nmcli", "dev", "wifi", "rescan"]:
+            return 0, "", ""
+        if cmd == ["nmcli", "-t", "-f", "NAME,TYPE", "con", "show"]:
+            return 0, "", ""
+        if cmd == ["nmcli", "dev", "wifi", "connect", "HomeNet", "password", "password123"]:
+            return 4, "", "Error: Failed to add/activate new connection: key-mgmt: property is missing."
+        if cmd == ["nmcli", "-t", "-f", "DEVICE,TYPE", "dev", "status"]:
+            return 0, "wlan0:wifi\n", ""
+        if cmd[:3] == ["nmcli", "con", "add"]:
+            return 0, "Connection added.", ""
+        if cmd == ["nmcli", "con", "up", "HomeNet"]:
+            return 0, "Connection activated.", ""
+        return 1, "", f"unexpected: {cmd}"
+
+    res = kiosk.connect_wifi("HomeNet", password="password123", hidden=False, run_cmd=fake_runner)
+    assert res["ok"] is True
+    assert [
+        "nmcli",
+        "con",
+        "add",
+        "type",
+        "wifi",
+        "ifname",
+        "wlan0",
+        "con-name",
+        "HomeNet",
+        "ssid",
+        "HomeNet",
+        "wifi-sec.key-mgmt",
+        "wpa-psk",
+        "wifi-sec.psk",
+        "password123",
+    ] in calls
+    assert ["nmcli", "con", "up", "HomeNet"] in calls
+
+
+def test_connect_wifi_rejects_short_wpa_password_and_allows_64_hex():
+    called: List[List[str]] = []
+
+    def runner(cmd: List[str], timeout: float = 5.0) -> Tuple[int, str, str]:
+        called.append(list(cmd))
+        if cmd[:4] == ["nmcli", "dev", "wifi", "connect"]:
+            return 0, "Activated", ""
+        return 0, "", ""
+
+    res_short = kiosk.connect_wifi("HomeNet", password="short7!", run_cmd=runner)
+    assert res_short["ok"] is False
+    assert "8" in res_short["message"]
+    assert called == []
+
+    # 64-char hex PSK is allowed
+    hex_psk = "a1b2c3d4" * 8
+    res_hex = kiosk.connect_wifi("HomeNet", password=hex_psk, run_cmd=runner)
+    assert res_hex["ok"] is True
+    assert ["nmcli", "dev", "wifi", "connect", "HomeNet", "password", hex_psk] in called
+
+
+def test_wifi_connect_writes_tunnel_restart_trigger(running_server):
+    trigger_wifi = running_server["state_dir"] / "tunnel-restart.trigger"
+    assert not trigger_wifi.exists()
+
+    # Short password failure does NOT write trigger
+    st_fail, _, body_fail = _http_request(
+        running_server["base_url"],
+        "/api/wifi/connect",
+        method="POST",
+        payload={"ssid": "Office:5G", "password": "123", "hidden": False},
+    )
+    assert st_fail == 200
+    assert json.loads(body_fail.decode("utf-8"))["ok"] is False
+    assert not trigger_wifi.exists()
+
+    # Valid Wi-Fi connect writes trigger with timestamp
+    st_ok, _, body_ok = _http_request(
+        running_server["base_url"],
+        "/api/wifi/connect",
+        method="POST",
+        payload={"ssid": "Office:5G", "password": "valid-password", "hidden": False},
+    )
+    assert st_ok == 200
+    assert json.loads(body_ok.decode("utf-8"))["ok"] is True
+    assert trigger_wifi.is_file()
+    assert int(trigger_wifi.read_text(encoding="utf-8").strip()) > 0
+
+
+def test_network_action_writes_tunnel_restart_trigger(network_server):
+    # Successful network action (/api/network/ip) also writes tunnel-restart.trigger
+    trigger_net = network_server["tmp_path"] / "live-state" / "tunnel-restart.trigger"
+    assert not trigger_net.exists()
+    st_net, _, body_net = _http_request(
+        network_server["base_url"],
+        "/api/network/ip",
+        method="POST",
+        payload={"interface": "eth0", "mode": "auto", "dns": []},
+    )
+    assert st_net == 200
+    assert json.loads(body_net.decode("utf-8"))["ok"] is True
+    assert trigger_net.is_file()
+    assert int(trigger_net.read_text(encoding="utf-8").strip()) > 0
+
+
+def test_http_api_status_forces_offline_when_internet_unreachable(tmp_path: Path):
+    state_dir = tmp_path / "live-state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    # Stale session.json still claims ready=True and tunnel_status=connected
+    (state_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "ready": True,
+                "connect_url": "https://stale.trycloudflare.com/l/oldtoken",
+                "token": "old_token_123",
+                "node_id": "live-rescue-01",
+                "tunnel_status": "connected",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    srv = kiosk.KioskServer(
+        ("127.0.0.1", 0),
+        static_dir=KIOSK_UI_DIR,
+        state_dir=state_dir,
+        run_cmd=lambda cmd, timeout=5.0: (127, "", "not mocked"),
+        internet_checker=lambda: {"reachable": False, "ip": None, "target": None},
+    )
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        status, _, body = _http_request(f"http://127.0.0.1:{port}", "/api/status")
+        assert status == 200
+        data = json.loads(body.decode("utf-8"))
+        assert data["ok"] is True
+        assert data["internet"]["reachable"] is False
+        assert data["session"]["ready"] is False
+        assert data["session"]["tunnel_status"] == "offline"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        t.join(timeout=2)
+
+
+def test_kiosk_ui_handles_network_loss_and_resets_qr_cache():
+    js_text = (KIOSK_UI_DIR / "app.js").read_text(encoding="utf-8")
+    assert "const effectiveReady = Boolean(sessionReady && internetReachable);" in js_text
+    assert 'state.lastConnectUrl = "";' in js_text
+    assert '!sessionReady && state.activeView !== "network"' not in js_text
+
 

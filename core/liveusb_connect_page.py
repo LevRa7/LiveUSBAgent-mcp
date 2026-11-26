@@ -325,6 +325,37 @@ def render_connect_page(
     margin-bottom: 0;
   }}
 
+  .connector-actions {{
+    margin: 16px 0 0;
+  }}
+
+  .connector-link {{
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 36px;
+    padding: 6px 14px;
+    border: 1px solid #58a6ff;
+    border-radius: 6px;
+    background-color: #21262d;
+    color: #58a6ff;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    text-decoration: none;
+    transition: background-color 150ms ease-out, border-color 150ms ease-out, color 150ms ease-out;
+  }}
+
+  .connector-link:hover {{
+    background-color: #2b313a;
+    color: #f0f6fc;
+  }}
+
+  .connector-link:focus-visible {{
+    outline: 2px solid #58a6ff;
+    outline-offset: 2px;
+  }}
+
   .token-section {{
     margin: 24px 0 0;
     padding: 20px 0 0;
@@ -373,6 +404,9 @@ def render_connect_page(
           <li>Добавьте сервер и вставьте SSE URL выше.</li>
           <li>Сохраните подключение и проверьте список инструментов.</li>
         </ol>
+        <div class="connector-actions">
+          <a class="connector-link" href="https://gemini.google.com/customize/connectors" target="_blank" rel="noopener noreferrer">Открыть коннекторы Gemini &rarr;</a>
+        </div>
       </div>
 
       <div class="tab-panel" id="panel-chatgpt" role="tabpanel" aria-labelledby="tab-chatgpt">
@@ -388,6 +422,9 @@ def render_connect_page(
           <li>Вставьте MCP URL в поле адреса сервера.</li>
           <li>Выберите режим без дополнительной аутентификации (токен передаётся в URL) и сохраните.</li>
         </ol>
+        <div class="connector-actions">
+          <a class="connector-link" href="https://chatgpt.com/#settings/Connectors" target="_blank" rel="noopener noreferrer">Открыть коннекторы ChatGPT &rarr;</a>
+        </div>
       </div>
 
       <div class="tab-panel" id="panel-claude" role="tabpanel" aria-labelledby="tab-claude">
@@ -417,6 +454,9 @@ def render_connect_page(
           <li>В Claude Desktop добавьте блок mcpServers в файл claude_desktop_config.json.</li>
           <li>В Claude Code выполните команду claude mcp add в терминале.</li>
         </ol>
+        <div class="connector-actions">
+          <a class="connector-link" href="https://claude.ai/settings/connectors" target="_blank" rel="noopener noreferrer">Открыть коннекторы Claude &rarr;</a>
+        </div>
       </div>
 
       <div class="token-section">
@@ -529,13 +569,25 @@ def render_connect_page(
         var url = cfg.standalone
           ? "/health"
           : ("/v1/liveusb/status/" + encodeURIComponent(cfg.sessionCode));
-        fetch(url, {{ cache: "no-store" }})
+        var controller = typeof AbortController === "function" ? new AbortController() : null;
+        var timerId = controller
+          ? window.setTimeout(function () {{ controller.abort(); }}, 4000)
+          : null;
+        var fetchOpts = {{ cache: "no-store" }};
+        if (controller) {{
+          fetchOpts.signal = controller.signal;
+        }}
+        fetch(url, fetchOpts)
           .then(function (resp) {{
+            if (timerId !== null) window.clearTimeout(timerId);
             if (resp.status === 404 || resp.status === 410) {{
               applyStatus("error", "Сессия истекла", "");
               return null;
             }}
-            if (!resp.ok) return null;
+            if (!resp.ok) {{
+              applyStatus("offline", "Туннель не в сети — переподключение...", "");
+              return null;
+            }}
             return resp.json();
           }})
           .then(function (data) {{
@@ -556,7 +608,10 @@ def render_connect_page(
               applyStatus("offline", "Туннель не в сети", data.expires_at);
             }}
           }})
-          .catch(function () {{}});
+          .catch(function () {{
+            if (timerId !== null) window.clearTimeout(timerId);
+            applyStatus("offline", "Туннель не в сети — переподключение...", "");
+          }});
       }}
 
       pollStatus();

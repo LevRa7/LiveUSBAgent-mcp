@@ -65,9 +65,9 @@ def _write_domain_file(path: Path, text: str, bom: bool = False) -> str:
 
 def test_default_when_nothing_is_configured():
     assert domain.public_base_url() == domain.DEFAULT_PUBLIC_BASE_URL
-    assert domain.public_base_url() == "https://racknerd-5a24bf9.merino-carob.ts.net"
-    assert domain.public_host() == "racknerd-5a24bf9.merino-carob.ts.net"
-    assert domain.gateway_host() == "racknerd-5a24bf9.merino-carob.ts.net"
+    assert domain.public_base_url() == ""
+    assert domain.public_host() == ""
+    assert domain.gateway_host() == ""
     assert domain.source() == "default"
     assert domain.is_explicit() is False
 
@@ -304,9 +304,10 @@ def test_agent_read_env_file_delegates_to_the_shared_parser(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_the_domain_literal_lives_in_exactly_one_module():
-    """Every component must read the domain, not spell it out again."""
+    """No component (including core/domain.py) may hardcode a real deployment domain."""
     root = Path(__file__).resolve().parent.parent
     components = (
+        "core/domain.py",
         "gateway.py",
         "core/agent.py",
         "core/mcp_tools.py",
@@ -317,12 +318,11 @@ def test_the_domain_literal_lives_in_exactly_one_module():
     offenders = [
         name
         for name in components
-        if "racknerd-5a24bf9.merino-carob.ts.net" in (root / name).read_text(encoding="utf-8")
+        if "merino-carob.ts.net" in (root / name).read_text(encoding="utf-8")
     ]
     assert offenders == [], (
-        "the public domain must only be declared in core/domain.py, found in: %s" % offenders
+        "no component may hardcode a real deployment domain, found in: %s" % offenders
     )
-    assert "racknerd-5a24bf9.merino-carob.ts.net" in (root / "core" / "domain.py").read_text(encoding="utf-8")
 
 # ---------------------------------------------------------------------------
 # The gateway announces the domain; the node adopts it for its links

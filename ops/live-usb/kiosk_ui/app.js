@@ -151,10 +151,11 @@
 
   const PENDING_TITLE_INTERNET = "Интернет есть, получаем токен…";
   const PENDING_TITLE_OFFLINE =
-    "Интернет не обнаружен. Подключите Wi-Fi, кабель или USB-модем.";
+    "Потеряно соединение с интернетом. Ожидание восстановления сети…";
   const PENDING_TEXT_INTERNET =
     "QR-код и ссылка подключения появятся автоматически, как только сессия будет готова.";
-  const PENDING_TEXT_OFFLINE = "QR-код появится, когда появится интернет.";
+  const PENDING_TEXT_OFFLINE =
+    "Старые QR-код и ссылка скрыты. Как только интернет восстановится, туннель переподключится и появится новый QR-код.";
 
   function setView(viewName, explicit) {
     state.activeView = viewName;
@@ -260,8 +261,9 @@
   }
 
   function updateReadyPending(sessionReady, internetReachable) {
-    els.readyPending.classList.toggle("is-hidden", sessionReady);
-    els.readyContent.classList.toggle("is-hidden", !sessionReady);
+    const effectiveReady = Boolean(sessionReady && internetReachable);
+    els.readyPending.classList.toggle("is-hidden", effectiveReady);
+    els.readyContent.classList.toggle("is-hidden", !effectiveReady);
     els.readyPendingTitle.textContent = internetReachable
       ? PENDING_TITLE_INTERNET
       : PENDING_TITLE_OFFLINE;
@@ -281,7 +283,7 @@
       }
       return;
     }
-    if (!sessionReady && state.activeView !== "network") {
+    if (state.activeView !== "network") {
       setView("network", false);
     }
   }
@@ -307,19 +309,22 @@
       const internet = data.internet || {};
       const internetReachable = Boolean(internet.reachable);
       const sessionReady = Boolean(session.ready);
+      const effectiveReady = Boolean(sessionReady && internetReachable);
 
-      updateInternetBanner(internetReachable, sessionReady);
+      updateInternetBanner(internetReachable, effectiveReady);
       updateReadyPending(sessionReady, internetReachable);
 
       const connectUrl = session.connect_url || "";
-      els.sessionUrl.textContent = connectUrl || "Ожидание ссылки подключения";
-      els.sessionToken.textContent = session.token || "Ожидание токена";
+      els.sessionUrl.textContent = effectiveReady && connectUrl ? connectUrl : "Ожидание ссылки подключения";
+      els.sessionToken.textContent = effectiveReady && session.token ? session.token : "Ожидание токена";
       const tunMode = session.tunnel_mode || "cloudflare";
-      const tunStatus = session.tunnel_status || "offline";
+      const tunStatus = internetReachable ? (session.tunnel_status || "offline") : "offline";
       const tunErr = session.tunnel_error ? (" — " + session.tunnel_error) : "";
       els.sessionTunnel.textContent = (tunMode === "cloudflare" ? "Cloudflare Quick Tunnel · " : "") + tunStatus + tunErr;
 
-      if (sessionReady && connectUrl !== state.lastConnectUrl) {
+      if (!effectiveReady) {
+        state.lastConnectUrl = "";
+      } else if (connectUrl !== state.lastConnectUrl) {
         state.lastConnectUrl = connectUrl;
         refreshQrImage();
       }

@@ -501,3 +501,31 @@ def test_render_connect_page_escaping_and_quoting():
     assert "/mcp?user=live%20node%261&amp;token=lk_a%2Bb%2Fc%3Dd" in html_doc
     assert "claude mcp add --transport http &#x27;live node&amp;1&#x27;" in html_doc
 
+
+def test_liveusb_connect_page_mcp_connector_links_and_offline_polling():
+    html_doc = render_connect_page(
+        session_code="sess-links-1",
+        node_id="live-abcdef01",
+        link_key="lk_testkey123",
+        host="demo.trycloudflare.com",
+        expires_at="",
+        public_base_url="https://demo.trycloudflare.com",
+        online=True,
+        standalone=True,
+    )
+    expected_links = (
+        ("https://gemini.google.com/customize/connectors", "Открыть коннекторы Gemini"),
+        ("https://chatgpt.com/#settings/Connectors", "Открыть коннекторы ChatGPT"),
+        ("https://claude.ai/settings/connectors", "Открыть коннекторы Claude"),
+    )
+    for url, label in expected_links:
+        pattern = (
+            r'<a\b[^>]*href="' + re.escape(url) + r'"[^>]*target="_blank"[^>]*rel="noopener noreferrer"[^>]*>'
+            + re.escape(label)
+        )
+        assert re.search(pattern, html_doc) is not None, f"Missing connector link for {url}"
+
+    assert "AbortController" in html_doc
+    assert "Туннель не в сети — переподключение..." in html_doc
+
+

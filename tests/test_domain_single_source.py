@@ -71,10 +71,14 @@ needs_bash = pytest.mark.skipif(not BASH, reason="bash is required for the shell
 @pytest.mark.parametrize("relative", NO_LITERAL_FILES)
 def test_shipped_files_hold_no_domain_literal(relative):
     text = _read(relative)
-    assert DEFAULT_HOST not in text, (
-        "%s names the domain directly; it must come from MESH_PUBLIC_URL, the "
-        "domain file, or core/domain.py" % relative
+    assert "merino-carob.ts.net" not in text, (
+        "%s hardcodes a real deployment domain; it must come from MESH_PUBLIC_URL or domain.env" % relative
     )
+    if DEFAULT_HOST:
+        assert DEFAULT_HOST not in text, (
+            "%s names the domain directly; it must come from MESH_PUBLIC_URL, the "
+            "domain file, or core/domain.py" % relative
+        )
 
 
 @pytest.mark.parametrize("relative", PLACEHOLDER_FILES)
@@ -101,7 +105,8 @@ def test_the_default_is_declared_exactly_once_in_python():
                 continue
             try:
                 with open(path, "r", encoding="utf-8", errors="replace") as handle:
-                    if DEFAULT_HOST in handle.read():
+                    content = handle.read()
+                    if "merino-carob.ts.net" in content or (DEFAULT_HOST and DEFAULT_HOST in content):
                         offenders.append(os.path.relpath(path, REPO))
             except OSError:
                 continue
@@ -155,6 +160,19 @@ def test_shell_resolver_tolerates_a_bom_and_a_bare_host(tmp_path):
 
 @needs_bash
 def test_shell_resolver_falls_back_to_the_python_default(tmp_path):
+    if not DEFAULT_HOST:
+        script = (
+            '. "%s/ops/mesh-domain.sh" && ! mesh_resolve_domain "%s" && echo REFUSED'
+            % (REPO.replace("\\", "/"), REPO.replace("\\", "/"))
+        )
+        environment = dict(os.environ)
+        for key in ("MESH_PUBLIC_URL", "AGY_PUBLIC_BASE_URL", "MESH_DOMAIN_FILE"):
+            environment.pop(key, None)
+        environment["MESH_DOMAIN_FILE"] = str(tmp_path / "absent.env")
+        result = subprocess.run([BASH, "-c", script], capture_output=True, text=True,
+                                env=environment, timeout=60)
+        assert "REFUSED" in result.stdout
+        return
     url, host, source = _resolve({"MESH_DOMAIN_FILE": str(tmp_path / "absent.env")}).split("|")
     assert url == domain.DEFAULT_PUBLIC_BASE_URL
     assert host == DEFAULT_HOST

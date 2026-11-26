@@ -9,8 +9,19 @@ import pytest
 from core import control, menu
 
 
+@pytest.fixture(autouse=True)
+def isolated_menu_install_dir(tmp_path, monkeypatch):
+    """Prevent host Tailscale Funnel state from leaking into menu unit tests."""
+    monkeypatch.setattr(menu, "install_dir", lambda: str(tmp_path))
+    menu._TS_CACHE["at"] = 0.0
+    menu._TS_CACHE["value"] = None
+    yield
+    menu._TS_CACHE["at"] = 0.0
+    menu._TS_CACHE["value"] = None
+
+
 def test_build_url_from_agent_env(monkeypatch):
-    monkeypatch.setattr(menu, "read_agent_env", lambda: {
+    monkeypatch.setattr(menu, "read_agent_env", lambda directory=None: {
         "MESH_USER": "desktop-01",
         "MESH_LINK_KEY": "lk_" + "a" * 32,
     })
@@ -26,34 +37,33 @@ def test_qr_lines_render_when_encoder_is_available():
 
 
 def test_missing_link_key_has_no_url(monkeypatch):
-    monkeypatch.setattr(menu, "read_agent_env", lambda: {"MESH_USER": "desktop-01"})
+    monkeypatch.setattr(menu, "read_agent_env", lambda directory=None: {"MESH_USER": "desktop-01"})
     assert menu.build_mcp_url() == ""
 
 
-def test_mode_cycles_read_only_approval_full():
-    assert control.next_access_mode("read_only") == "approval"
-    assert control.next_access_mode("approval") == "full"
+def test_mode_cycles_read_only_and_full():
+    assert control.next_access_mode("read_only") == "full"
     assert control.next_access_mode("full") == "read_only"
 
 
 def test_render_contains_mode_endpoint_and_log(monkeypatch, tmp_path):
-    monkeypatch.setattr(menu, "read_agent_env", lambda: {
+    monkeypatch.setattr(menu, "read_agent_env", lambda directory=None: {
         "MESH_USER": "desktop-01",
         "MESH_LINK_KEY": "lk_" + "b" * 32,
     })
     monkeypatch.setattr(menu, "agent_log_path", lambda: str(tmp_path / "agent.log"))
     (tmp_path / "agent.log").write_text("agent line\n", encoding="utf-8")
-    control.set_access_mode("approval")
+    control.set_access_mode("full")
 
     text = menu.render(menu.read_agent_env())
     assert "MCP endpoint" in text
     assert "desktop-01" in text
-    assert "Access on request" in text
+    assert "Full access" in text
     assert "agent line" in text
 
 
 def test_json_snapshot_is_machine_readable(monkeypatch, capsys, tmp_path):
-    monkeypatch.setattr(menu, "read_agent_env", lambda: {"MESH_USER": "n", "MESH_LINK_KEY": "lk_x"})
+    monkeypatch.setattr(menu, "read_agent_env", lambda directory=None: {"MESH_USER": "n", "MESH_LINK_KEY": "lk_x"})
     monkeypatch.setattr(menu, "agent_log_path", lambda: str(tmp_path / "agent.log"))
     menu.main(["--json"])
     payload = json.loads(capsys.readouterr().out.strip())
@@ -82,7 +92,7 @@ def test_cd_subcommand_sets_the_workspace(tmp_path, capsys):
 def test_status_subcommand_prints_every_switch(capsys):
     assert menu.main(["status"]) == 0
     text = capsys.readouterr().out
-    for line in ("mode:", "workspace:", "isolation:", "remote:", "paused:", "approvals:"):
+    for line in ("mode:", "workspace:", "isolation:", "remote:", "paused:"):
         assert line in text
 
 
@@ -128,39 +138,24 @@ def test_goal_clear_still_works_when_disabled(capsys):
     assert "cleared" in capsys.readouterr().out
 
 
-def test_approvals_command_allows_and_revokes(capsys):
-    assert menu.main(["approvals"]) == 0
-    assert "ask on every" in capsys.readouterr().out
-
-    assert menu.main(["approvals", "allow"]) == 0
-    assert "ALL allowed" in capsys.readouterr().out
-    assert control.grant_status()["active"] is True
-
-    assert menu.main(["approvals", "off"]) == 0
-    assert control.grant_status()["active"] is False
-    assert "ask on every" in capsys.readouterr().out
+def test_approvals_subcommand_is_removed():
+    with pytest.raises(SystemExit) as exc:
+        menu.main(["approvals"])
+    assert exc.value.code == 2
 
 
-def test_approvals_allow_for_a_limited_time(capsys):
-    assert menu.main(["approvals", "allow", "30"]) == 0
-    status = control.grant_status()
-    assert status["active"] is True
-    assert 1500 < status["expires_in"] <= 1800
-    assert "min" in capsys.readouterr().out
-
-
-def test_render_shows_the_approval_state(monkeypatch, tmp_path):
-    monkeypatch.setattr(menu, "read_agent_env", lambda: {"MESH_USER": "n"})
+def test_render_shows_read_only_and_full_mode_labels(monkeypatch, tmp_path):
+    monkeypatch.setattr(menu, "read_agent_env", lambda directory=None: {"MESH_USER": "n"})
     monkeypatch.setattr(menu, "agent_log_path", lambda: str(tmp_path / "agent.log"))
-    menu.main(["approvals", "allow"])
-    text = menu.render(menu.read_agent_env())
-    assert "Approvals: ALL allowed" in text
-    menu.main(["approvals", "off"])
+    control.set_access_mode("read_only")
+    assert "Read-only" in menu.render(menu.read_agent_env())
+    control.set_access_mode("full")
+    assert "Full access" in menu.render(menu.read_agent_env())
 
 
 def test_render_hides_the_disabled_goal(monkeypatch, tmp_path):
     monkeypatch.delenv("MESH_GOAL", raising=False)
-    monkeypatch.setattr(menu, "read_agent_env", lambda: {"MESH_USER": "n"})
+    monkeypatch.setattr(menu, "read_agent_env", lambda directory=None: {"MESH_USER": "n"})
     monkeypatch.setattr(menu, "agent_log_path", lambda: str(tmp_path / "agent.log"))
     text = menu.render(menu.read_agent_env())
     assert "Goal:" not in text
@@ -183,7 +178,7 @@ def test_keys_is_a_context_manager(monkeypatch):
 
 
 def test_render_keeps_the_full_text_for_scripts(monkeypatch):
-    monkeypatch.setattr(menu, "read_agent_env", lambda: {
+    monkeypatch.setattr(menu, "read_agent_env", lambda directory=None: {
         "MESH_USER": "node-one", "MESH_LINK_KEY": "lk_" + "a" * 32})
     text = menu.render(menu.read_agent_env())
     assert "MCP endpoint:" in text
@@ -216,7 +211,7 @@ def test_cyrillic_character_maps_to_the_latin_key():
 
 
 def test_home_line_has_an_edit_button(monkeypatch):
-    monkeypatch.setattr(menu, "read_agent_env", lambda: {"MESH_USER": "n"})
+    monkeypatch.setattr(menu, "read_agent_env", lambda directory=None: {"MESH_USER": "n"})
     text = menu.render(menu.read_agent_env())
     assert "Home:" in text
     assert "[d] edit" in text

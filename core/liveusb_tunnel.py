@@ -58,6 +58,46 @@ CLOUDFLARE_BOT_PROTECTION_NOTE = (
     "Note: some AI providers' servers may be blocked by Cloudflare's bot protection."
 )
 
+RESTART_TRIGGER_FILENAME = "tunnel-restart.trigger"
+
+_CRITICAL_ERROR_MARKERS = (
+    "connection terminated",
+    "unable to establish connection",
+    "unregistered tunnel",
+    "failed to serve quic connection",
+    "failed to dial to edge",
+    "context deadline exceeded",
+    "no such host",
+)
+
+_RECOVERY_MARKERS = (
+    "registered tunnel connection",
+    "connection registered",
+)
+
+
+def _default_connectivity_check(
+    host: str = "1.1.1.1",
+    port: int = 443,
+    timeout: float = 3.0,
+) -> bool:
+    """Lightweight TCP reachability check to Cloudflare edge (1.1.1.1:443)."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _line_has_critical_error(line: str) -> bool:
+    low = (line or "").lower()
+    return any(marker in low for marker in _CRITICAL_ERROR_MARKERS)
+
+
+def _line_has_recovery(line: str) -> bool:
+    low = (line or "").lower()
+    return any(marker in low for marker in _RECOVERY_MARKERS)
+
 
 def parse_trycloudflare_url(text: str) -> Optional[str]:
     """Extract ``https://<slug>.trycloudflare.com`` from *text*, ignoring ``api.trycloudflare.com``."""
@@ -312,6 +352,13 @@ class CloudflareQuickTunnelSupervisor:
         auto_download: bool = True,
         restart_delay: float = 3.0,
         max_restart_delay: float = 15.0,
+        watchdog_interval: float = 6.0,
+        error_grace_sec: float = 15.0,
+        health_fail_threshold: int = 3,
+        network_wait_interval: float = 2.5,
+        uplink_probe: Optional[Callable[[], Optional[str]]] = None,
+        connectivity_check: Optional[Callable[[], bool]] = None,
+        health_check: Optional[Callable[[str], bool]] = None,
     ) -> None:
         self.port = int(port)
         self.token = str(token)
@@ -321,15 +368,173 @@ class CloudflareQuickTunnelSupervisor:
         self.cloudflared_bin = cloudflared_bin
         self.on_public_url = on_public_url
         self.auto_download = bool(auto_download)
-        self.restart_delay = max(0.5, float(restart_delay))
+        self.restart_delay = max(0.05, float(restart_delay))
         self.max_restart_delay = max(self.restart_delay, float(max_restart_delay))
+        self.watchdog_interval = max(0.02, float(watchdog_interval))
+        self.error_grace_sec = max(0.05, float(error_grace_sec))
+        self.health_fail_threshold = max(1, int(health_fail_threshold))
+        self.network_wait_interval = max(0.02, float(network_wait_interval))
+        self._uplink_probe_custom = uplink_probe is not None
+        self.uplink_probe = uplink_probe or liveusb_bootstrap.active_uplink_interface
+        self.connectivity_check = connectivity_check
+        self.health_check = health_check
 
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
         self._proc: Optional[subprocess.Popen] = None
+        self._proc_done: Optional[threading.Event] = None
         self._thread: Optional[threading.Thread] = None
+        self._error_since: Optional[float] = None
+        self._error_snippet: str = ""
+        self._restart_requested: bool = False
+        self._restart_status: str = "reconnecting"
+        self._restart_reason: str = ""
         self.public_url: str = ""
         self.last_error: str = ""
+
+    def _probe_uplink(self) -> Optional[str]:
+        try:
+            iface = self.uplink_probe()
+            return str(iface).strip() if iface else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _safe_call_bool(fn: Callable[[], Any]) -> bool:
+        try:
+            return bool(fn())
+        except Exception:
+            return False
+
+    def _has_network(self) -> bool:
+        if self._uplink_probe_custom and self.connectivity_check is not None:
+            return bool(self._probe_uplink()) and self._safe_call_bool(self.connectivity_check)
+        if self.connectivity_check is not None:
+            return self._safe_call_bool(self.connectivity_check)
+        if self._uplink_probe_custom:
+            return bool(self._probe_uplink())
+        if os.path.exists("/proc/net/route"):
+            return bool(self._probe_uplink())
+        return True
+
+    def _consume_restart_trigger(self) -> bool:
+        trigger_path = os.path.join(self.state_dir, RESTART_TRIGGER_FILENAME)
+        if not os.path.exists(trigger_path):
+            return False
+        try:
+            os.unlink(trigger_path)
+        except OSError:
+            pass
+        return True
+
+    @staticmethod
+    def _terminate_proc(proc: subprocess.Popen) -> None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=3.0)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def _trigger_restart(self, proc: subprocess.Popen, *, status: str, reason: str) -> None:
+        with self._lock:
+            if self._proc is not proc or self._restart_requested:
+                return
+            self._restart_requested = True
+            self._restart_status = status
+            self._restart_reason = reason
+            self.public_url = ""
+            self.last_error = reason
+        logger.warning("Cloudflare tunnel watchdog triggering restart (%s): %s", status, reason)
+        write_liveusb_session(
+            self.state_dir,
+            public_url="",
+            token=self.token,
+            node_id=self.node_id,
+            tunnel_mode="cloudflare",
+            tunnel_status=status,
+            tunnel_error=reason,
+        )
+        self._terminate_proc(proc)
+
+    def _watchdog_loop(self, proc: subprocess.Popen, proc_done: threading.Event) -> None:
+        initial_iface = self._probe_uplink()
+        consecutive_failures = 0
+
+        while not self._stop_event.is_set() and not proc_done.is_set():
+            if proc_done.wait(timeout=self.watchdog_interval):
+                return
+            if self._stop_event.is_set() or proc_done.is_set():
+                return
+
+            # (b) External restart trigger file
+            if self._consume_restart_trigger():
+                status = "offline" if not self._has_network() else "reconnecting"
+                self._trigger_restart(
+                    proc,
+                    status=status,
+                    reason="Tunnel restart requested via trigger file",
+                )
+                return
+
+            # (a) Uplink interface disappearance or switch
+            cur_iface = self._probe_uplink()
+            if initial_iface is None and cur_iface is not None:
+                initial_iface = cur_iface
+            elif initial_iface is not None and cur_iface != initial_iface:
+                if cur_iface is None:
+                    self._trigger_restart(
+                        proc,
+                        status="offline",
+                        reason=f"Network interface {initial_iface} lost",
+                    )
+                else:
+                    self._trigger_restart(
+                        proc,
+                        status="reconnecting",
+                        reason=f"Network interface changed ({initial_iface} -> {cur_iface})",
+                    )
+                return
+
+            # (c) Unrecovered critical errors in cloudflared output
+            with self._lock:
+                err_since = self._error_since
+                err_snippet = self._error_snippet
+                cur_url = self.public_url
+            if err_since is not None and (time.monotonic() - err_since) >= self.error_grace_sec:
+                status = "offline" if not self._has_network() else "reconnecting"
+                self._trigger_restart(
+                    proc,
+                    status=status,
+                    reason=f"cloudflared error unrecovered: {err_snippet}",
+                )
+                return
+
+            # (d) Periodic reachability / health probe
+            if self.health_check is not None and cur_url:
+                probe_ok = self._safe_call_bool(lambda: self.health_check(cur_url))
+            elif self.connectivity_check is not None:
+                probe_ok = self._safe_call_bool(self.connectivity_check)
+            else:
+                probe_ok = _default_connectivity_check()
+
+            if probe_ok:
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
+                if consecutive_failures >= self.health_fail_threshold:
+                    status = "offline" if not self._has_network() else "reconnecting"
+                    self._trigger_restart(
+                        proc,
+                        status=status,
+                        reason=(
+                            f"Tunnel connectivity check failed "
+                            f"({consecutive_failures} consecutive failures)"
+                        ),
+                    )
+                    return
 
     def start(self) -> None:
         """Start the background supervisor thread."""
@@ -355,15 +560,11 @@ class CloudflareQuickTunnelSupervisor:
         with self._lock:
             proc = self._proc
             self._proc = None
+            proc_done = self._proc_done
+        if proc_done is not None:
+            proc_done.set()
         if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=3.0)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+            self._terminate_proc(proc)
         write_liveusb_session(
             self.state_dir,
             public_url="",
@@ -379,6 +580,38 @@ class CloudflareQuickTunnelSupervisor:
         target_url = f"http://{self.host}:{self.port}"
 
         while not self._stop_event.is_set():
+            # Wait for network availability before launching cloudflared
+            if not self._has_network():
+                self.public_url = ""
+                self.last_error = "Waiting for network connection"
+                write_liveusb_session(
+                    self.state_dir,
+                    public_url="",
+                    token=self.token,
+                    node_id=self.node_id,
+                    tunnel_mode="cloudflare",
+                    tunnel_status="offline",
+                    tunnel_error=self.last_error,
+                )
+                while not self._stop_event.is_set() and not self._has_network():
+                    self._stop_event.wait(self.network_wait_interval)
+                if self._stop_event.is_set():
+                    break
+                # Network returned: reset backoff and reconnect immediately
+                backoff = self.restart_delay
+                write_liveusb_session(
+                    self.state_dir,
+                    public_url="",
+                    token=self.token,
+                    node_id=self.node_id,
+                    tunnel_mode="cloudflare",
+                    tunnel_status="reconnecting",
+                    tunnel_error="",
+                )
+
+            # Clear any stale trigger file before spawning a fresh tunnel
+            self._consume_restart_trigger()
+
             binary, err = ensure_cloudflared(
                 explicit_bin=self.cloudflared_bin,
                 cache_dir=os.path.join(self.state_dir, "bin"),
@@ -427,8 +660,23 @@ class CloudflareQuickTunnelSupervisor:
                 backoff = min(self.max_restart_delay, backoff * 1.5)
                 continue
 
+            proc_done = threading.Event()
             with self._lock:
                 self._proc = proc
+                self._proc_done = proc_done
+                self._error_since = None
+                self._error_snippet = ""
+                self._restart_requested = False
+                self._restart_status = "reconnecting"
+                self._restart_reason = ""
+
+            watchdog = threading.Thread(
+                target=self._watchdog_loop,
+                args=(proc, proc_done),
+                name="rhm-liveusb-watchdog",
+                daemon=True,
+            )
+            watchdog.start()
 
             found = False
             try:
@@ -441,14 +689,17 @@ class CloudflareQuickTunnelSupervisor:
                         if url and not found:
                             found = True
                             backoff = self.restart_delay
-                            self.public_url = url
-                            self.last_error = ""
+                            with self._lock:
+                                self.public_url = url
+                                self.last_error = ""
+                                self._error_since = None
+                                self._error_snippet = ""
                             if self.on_public_url is not None:
                                 try:
                                     self.on_public_url(url)
                                 except Exception as cb_exc:
                                     logger.warning("on_public_url callback error: %s", cb_exc)
-                            doc = write_liveusb_session(
+                            write_liveusb_session(
                                 self.state_dir,
                                 public_url=url,
                                 token=self.token,
@@ -462,18 +713,45 @@ class CloudflareQuickTunnelSupervisor:
                                 url,
                                 self.state_dir,
                             )
+                        elif _line_has_recovery(line):
+                            with self._lock:
+                                self._error_since = None
+                                self._error_snippet = ""
+                        elif _line_has_critical_error(line):
+                            with self._lock:
+                                if self._error_since is None:
+                                    self._error_since = time.monotonic()
+                                self._error_snippet = line.strip()[:160]
                 proc.wait(timeout=5.0)
             except Exception as exc:
                 self.last_error = str(exc)
             finally:
+                proc_done.set()
+                watchdog.join(timeout=1.0)
                 with self._lock:
+                    was_restarted = self._restart_requested
+                    restart_status = self._restart_status
+                    restart_reason = self._restart_reason
                     if self._proc is proc:
                         self._proc = None
+                    if self._proc_done is proc_done:
+                        self._proc_done = None
 
             if self._stop_event.is_set():
                 break
 
+            if was_restarted:
+                self.public_url = ""
+                self.last_error = restart_reason
+                if restart_status == "offline" or not self._has_network():
+                    # Top of loop will hold tunnel_status="offline" until network returns.
+                    continue
+                backoff = self.restart_delay
+                self._stop_event.wait(min(self.restart_delay, 1.0))
+                continue
+
             rc = proc.returncode
+            self.public_url = ""
             self.last_error = (
                 f"cloudflared exited with code {rc}"
                 if found
@@ -486,7 +764,7 @@ class CloudflareQuickTunnelSupervisor:
                 token=self.token,
                 node_id=self.node_id,
                 tunnel_mode="cloudflare",
-                tunnel_status="reconnecting",
+                tunnel_status="offline" if not self._has_network() else "reconnecting",
                 tunnel_error=self.last_error,
             )
             self._stop_event.wait(backoff)

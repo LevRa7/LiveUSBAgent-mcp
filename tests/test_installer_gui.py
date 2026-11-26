@@ -112,9 +112,14 @@ def test_gui_files_do_not_name_the_project_domain():
 
     default_host = domain.DEFAULT_PUBLIC_BASE_URL.split("//", 1)[-1].rstrip("/")
     for path in (GUI_SCRIPT, GUI_STRINGS, GUI_LAUNCHER):
-        assert default_host not in _read_text(path), (
-            "%s names the domain directly; it must be resolved at run time" % os.path.basename(path)
+        text = _read_text(path)
+        assert "merino-carob.ts.net" not in text, (
+            "%s hardcodes a real deployment domain; it must be resolved at run time" % os.path.basename(path)
         )
+        if default_host:
+            assert default_host not in text, (
+                "%s names the domain directly; it must be resolved at run time" % os.path.basename(path)
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +297,7 @@ def test_setup_exe_runs_the_wizard_self_test(setup_exe, tmp_path):
     # cmd.exe waits for a GUI application; PowerShell returns immediately.
     run = subprocess.run(
         [environment.get("ComSpec", "cmd.exe"), "/c", str(setup_exe), "-SelfTest"],
-        capture_output=True, text=True, env=environment, timeout=900,
+        capture_output=True, text=True, errors="replace", env=environment, timeout=900,
     )
     output = run.stdout or ""
     start = output.find("{")

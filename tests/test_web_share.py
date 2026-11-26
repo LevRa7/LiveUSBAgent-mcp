@@ -70,8 +70,32 @@ PRE_EXISTING_TOOLS = (
 DESKTOP_TOOLS = ("screen_capture",)
 
 #: The legacy block as it is advertised now: the pre-existing order with the
-#: desktop tool inserted at the position it was added to.
-LEGACY_ORDER = PRE_EXISTING_TOOLS[:3] + DESKTOP_TOOLS + PRE_EXISTING_TOOLS[3:]
+#: desktop tool and v0.7.2 productivity tools inserted at their positions.
+LEGACY_ORDER = (
+    "mesh_status",
+    "system_info",
+    "system_vitals",
+    "screen_capture",
+    "get_orchestration_skill",
+    "list_dir",
+    "bash_exec",
+    "read_file",
+    "read_media",
+    "write_file",
+    "edit_file",
+    "grep_search",
+    "glob_find",
+    "win_places",
+    "batch_read",
+    "batch_edit",
+    "run_script",
+    "fs_index",
+    "run_job",
+    "job_output",
+    "job_kill",
+    "job_list",
+    "mesh_update",
+)
 
 
 def _opener():
@@ -89,7 +113,7 @@ def isolated_shares(tmp_path, monkeypatch):
     """Point the share tools at a temporary web dir and a known node name."""
     for key in ("MESH_PUBLIC_URL", "AGY_PUBLIC_BASE_URL", "MESH_DOMAIN_FILE",
                 "MESH_WEB_DIR", "MESH_WEB_MAX_BYTES", "MESH_WEB_MAX_SHARES",
-                "MESH_WEB_LISTING"):
+                "MESH_WEB_LISTING", "MESH_WEB_DIRECT"):
         monkeypatch.delenv(key, raising=False)
     domain.reset()
 
@@ -105,6 +129,7 @@ def isolated_shares(tmp_path, monkeypatch):
         max_shares="",
         web_listing="",
         public_url="",
+        web_share_direct=False,
     )
     yield
     web_share.stop_all()
@@ -121,6 +146,7 @@ def isolated_shares(tmp_path, monkeypatch):
         max_shares="",
         web_listing="",
         public_url="",
+        web_share_direct="",
     )
 
 
@@ -139,8 +165,8 @@ def test_the_share_tools_are_the_last_four_and_do_not_disturb_the_rest():
     assert names[settings_at:device_at] == list(SETTINGS_TOOLS)
     assert names[device_at:shares_at] == list(DEVICE_TOOLS)
     assert tuple(names[shares_at:]) == SHARE_TOOLS
-    assert len(names) == 27, (
-        "the node must advertise 16 legacy tools, screen_capture, node_control, "
+    assert len(names) == 33, (
+        "the node must advertise 23 core/legacy tools, node_control, "
         "schedule, 4 device tools and 4 share tools")
 
 

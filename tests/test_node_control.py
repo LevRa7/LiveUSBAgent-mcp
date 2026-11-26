@@ -244,28 +244,30 @@ def test_isolation_reports_a_missing_runtime(tmp_path, monkeypatch):
 # Approval mode: escalation waits for the operator, the rest does not
 # ---------------------------------------------------------------------------
 
-def test_full_access_waits_for_approval_in_approval_mode():
-    settings.apply({"action": "mode", "mode": "approval"}, actor="cli")
+def test_model_can_throttle_but_cannot_escalate_from_read_only():
+    settings.apply({"action": "mode", "mode": "full"}, actor="cli")
 
-    queued = mcp_tools.call_tool("node_control", {"action": "mode", "mode": "full"})
-    assert "approval_required" in queued["error"]
-    assert control.access_mode() == "approval"
-    assert control.pending_approvals()
-
-    # Throttling does not need a second trip: read-only is the safe direction.
+    # Throttling is allowed: read-only is the safe direction.
     throttled = mcp_tools.call_tool("node_control", {"action": "mode", "mode": "read_only"})
     assert "error" not in throttled
+    assert control.access_mode() == "read_only"
+
+    # A remote model cannot lift read-only back to full.
+    refused = mcp_tools.call_tool("node_control", {"action": "mode", "mode": "full"})
+    assert "read_only" in refused["error"]
+    assert control.access_mode() == "read_only"
 
 
-def test_approving_once_lets_the_escalation_through():
-    settings.apply({"action": "mode", "mode": "approval"}, actor="cli")
-    queued = mcp_tools.call_tool("node_control", {"action": "mode", "mode": "full"})
-    request_id = (control.pending_approvals()[-1])["id"]
+def test_cabinet_can_escalate_from_read_only_and_legacy_approval_maps_to_full():
+    settings.apply({"action": "mode", "mode": "read_only"}, actor="cli")
 
-    assert "approval_required" in queued["error"]
-    assert control.approve(request_id, seconds=30)
-    granted = mcp_tools.call_tool("node_control", {"action": "mode", "mode": "full"})
+    granted = mcp_tools.call_tool(
+        "node_control", {"action": "mode", "mode": "full", "_origin": "web"})
     assert "error" not in granted
+    assert control.access_mode() == "full"
+
+    mapped = settings.apply({"action": "mode", "mode": "approval"}, actor="cli")
+    assert "error" not in mapped
     assert control.access_mode() == "full"
 
 

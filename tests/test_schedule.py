@@ -155,13 +155,12 @@ def test_read_only_can_list_but_cannot_create():
     assert "error" in refused
 
 
-def test_approval_mode_queues_creation_but_not_listing(monkeypatch):
-    monkeypatch.setenv("MESH_APPROVAL_WAIT", "0")
-    settings.apply({"action": "mode", "mode": "approval"}, actor="cli")
+def test_full_mode_allows_creation_and_listing():
+    settings.apply({"action": "mode", "mode": "full"}, actor="cli")
 
-    queued = mcp_tools.call_tool(
+    created = mcp_tools.call_tool(
         "schedule", {"action": "set", "label": "x", "after_sec": 10})
-    assert "approval_required" in queued["error"]
+    assert "error" not in created
     assert "error" not in mcp_tools.call_tool("schedule", {"action": "list"})
 
 

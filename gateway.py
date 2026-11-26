@@ -2715,39 +2715,36 @@ async def messages_endpoint(request: Request):
                 # tests/test_gateway_share_route.py pins the copy for these four.
                 {
                     "name": "device_info",
-                    "description": (
-                        "One-call report for the device this node runs on: battery and charging, "
-                        "network interfaces with Wi-Fi and cellular signal strength, language, time and "
-                        "timezone, CPU, RAM, storage, cameras, microphones, sensors and what the platform "
-                        "can actually reach. On an Android/Termux node it reads the phone through the "
-                        "termux-api commands; on a laptop or desktop it reads the local system. Every "
-                        "section carries available/source, so 'not exposed here' is never reported as a "
-                        "zero - and on a non-phone the phone-only sections explain themselves instead of "
-                        "failing. Use device_control, device_capture or device_messages to act."
-                    ),
+                    "description": "Device telemetry: battery, network, hardware, sensors.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "section": {
                                 "type": "string",
-                                "enum": ["summary", "all", "device", "battery", "network", "locale",
-                                         "time", "hardware", "storage", "cameras", "microphones",
-                                         "sensors", "capabilities"],
-                                "description": "Which blocks to return (default: all)."
+                                "enum": [
+                                    "summary",
+                                    "all",
+                                    "device",
+                                    "battery",
+                                    "network",
+                                    "locale",
+                                    "time",
+                                    "hardware",
+                                    "storage",
+                                    "cameras",
+                                    "microphones",
+                                    "sensors",
+                                    "capabilities"
+                                ]
                             },
                             "sensor": {
-                                "type": "string",
-                                "description": ("Name one sensor to take a single live sample from "
-                                                "(Android only; needs a name from the sensors block).")
+                                "type": "string"
                             },
                             "fresh": {
-                                "type": "boolean",
-                                "description": "Bypass the short-lived cache (default false)."
+                                "type": "boolean"
                             },
                             "quick": {
-                                "type": "boolean",
-                                "description": ("Skip the slow sections: network, cameras, microphones, "
-                                                "sensors (default false).")
+                                "type": "boolean"
                             }
                         },
                         "additionalProperties": False
@@ -2755,180 +2752,414 @@ async def messages_endpoint(request: Request):
                 },
                 {
                     "name": "device_control",
-                    "description": (
-                        "Reversible actions on the node's own device: torch, vibrate, volume, screen "
-                        "brightness, text-to-speech, toast, notifications, clipboard, media playback, "
-                        "media scan, wake lock, download, opening or sharing a file, a text dialog and "
-                        "the wallpaper. Each action is a fixed termux-api command on Android and an "
-                        "explained no-op elsewhere; the result names the command and its argv so nothing "
-                        "is guessed. Nothing here is destructive, and all of it is refused when the node "
-                        "runs with MESH_READ_ONLY=1."
-                    ),
+                    "description": "Reversible device actions (torch, volume, notify, clipboard, media).",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": ["torch", "vibrate", "volume", "volume_get", "brightness",
-                                         "tts_speak", "toast", "notify", "notify_list",
-                                         "notify_remove", "clipboard_get", "clipboard_set", "media",
-                                         "media_scan", "wakelock", "download", "open", "share",
-                                         "dialog", "wallpaper"],
-                                "description": "Action to perform."
+                                "enum": [
+                                    "torch",
+                                    "vibrate",
+                                    "volume",
+                                    "volume_get",
+                                    "brightness",
+                                    "tts_speak",
+                                    "toast",
+                                    "notify",
+                                    "notify_list",
+                                    "notify_remove",
+                                    "clipboard_get",
+                                    "clipboard_set",
+                                    "media",
+                                    "media_scan",
+                                    "wakelock",
+                                    "download",
+                                    "open",
+                                    "share",
+                                    "dialog",
+                                    "wallpaper"
+                                ]
                             },
                             "on": {
-                                "type": "boolean",
-                                "description": "torch: true lights it, false puts it out."
+                                "type": "boolean"
                             },
                             "value": {
-                                "type": "integer",
-                                "description": ("vibrate: milliseconds; volume: level 0-15; "
-                                                "brightness: 0-255.")
+                                "type": "integer"
                             },
                             "stream": {
                                 "type": "string",
-                                "enum": ["music", "call", "alarm", "notification", "ring", "system"],
-                                "description": "volume: which audio stream (default music)."
+                                "enum": [
+                                    "music",
+                                    "call",
+                                    "alarm",
+                                    "notification",
+                                    "ring",
+                                    "system"
+                                ]
                             },
                             "text": {
-                                "type": "string",
-                                "description": ("tts_speak/toast/notify/clipboard_set/dialog body; media: "
-                                                "play|pause|stop|info.")
+                                "type": "string"
                             },
                             "title": {
-                                "type": "string",
-                                "description": "notify/dialog: heading text."
+                                "type": "string"
                             },
                             "id": {
-                                "type": "string",
-                                "description": "notify_remove: the id the notification was posted with."
+                                "type": "string"
                             },
                             "url": {
-                                "type": "string",
-                                "description": "download/open/wallpaper: URL to use."
+                                "type": "string"
                             },
                             "path": {
-                                "type": "string",
-                                "description": "open/share/media/download/media_scan/wallpaper: file on the node."
+                                "type": "string"
                             },
                             "state": {
                                 "type": "string",
-                                "enum": ["acquire", "release", "status"],
-                                "description": "wakelock: what to do (default status)."
+                                "enum": [
+                                    "acquire",
+                                    "release",
+                                    "status"
+                                ]
                             },
                             "timeout_sec": {
-                                "type": "integer",
-                                "description": "dialog: seconds to wait for the person (5-120, default 30)."
+                                "type": "integer"
                             }
                         },
-                        "required": ["action"],
+                        "required": [
+                            "action"
+                        ],
                         "additionalProperties": False
                     }
                 },
                 {
                     "name": "device_capture",
-                    "description": (
-                        "Camera, microphone, location, fingerprint, USB and infrared actions. These "
-                        "observe the physical world or authenticate the person holding the phone, but "
-                        "they install and remove nothing, so they carry no confirmation prompt - the "
-                        "guard is the node's own switch (MESH_DEVICE, MESH_DEVICE_ACTIONS, "
-                        "MESH_READ_ONLY), which refuses a call before any command runs. A photo or a "
-                        "recording is written to the node's capture directory and is never uploaded "
-                        "anywhere by itself; "
-                        "fingerprint returns only the verdict, never biometric data; USB access requests "
-                        "permission and returns the descriptor but deliberately refuses to run a program "
-                        "for you; and on Android 11+ the Termux:API app has to be in the foreground for a "
-                        "recording."
-                    ),
+                    "description": "Phone capture: camera, mic, location, fingerprint, USB, IR.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": ["camera_list", "camera_photo", "mic_record_start",
-                                         "mic_record_stop", "mic_record_status", "location",
-                                         "fingerprint", "usb_list", "usb_access",
-                                         "infrared_frequencies", "infrared_transmit"],
-                                "description": "Capture action to perform."
+                                "enum": [
+                                    "camera_list",
+                                    "camera_photo",
+                                    "mic_record_start",
+                                    "mic_record_stop",
+                                    "mic_record_status",
+                                    "location",
+                                    "fingerprint",
+                                    "usb_list",
+                                    "usb_access",
+                                    "infrared_frequencies",
+                                    "infrared_transmit"
+                                ]
                             },
                             "camera_id": {
-                                "type": "integer",
-                                "description": "camera_photo: id from camera_list (default 0)."
+                                "type": "integer"
                             },
                             "path": {
-                                "type": "string",
-                                "description": ("camera_photo/mic_record_start: output file (default: the "
-                                                "node's capture directory); usb_access: device path from "
-                                                "usb_list.")
+                                "type": "string"
                             },
                             "seconds": {
-                                "type": "integer",
-                                "description": "mic_record_start: recording length limit in seconds."
+                                "type": "integer"
                             },
                             "provider": {
                                 "type": "string",
-                                "enum": ["gps", "network", "passive"],
-                                "description": "location: which Android provider to use (default gps)."
+                                "enum": [
+                                    "gps",
+                                    "network",
+                                    "passive"
+                                ]
                             },
                             "frequency": {
-                                "type": "integer",
-                                "description": "infrared_transmit: carrier frequency in Hz."
+                                "type": "integer"
                             },
                             "pattern": {
-                                "type": "string",
-                                "description": ("infrared_transmit: durations in microseconds, e.g. "
-                                                "1000,2000,1000.")
+                                "type": "string"
                             }
                         },
-                        "required": ["action"],
+                        "required": [
+                            "action"
+                        ],
                         "additionalProperties": False
                     }
                 },
                 {
                     "name": "device_messages",
-                    "description": (
-                        "SMS, call log, contacts and placing a call. This is private data about the person "
-                        "who owns the phone, so the node refuses "
-                        "until its operator enables it with MESH_DEVICE_PIM=1. The refusal names the flag "
-                        "and the Android permissions to grant, so the answer is an instruction rather than "
-                        "a dead end. Sending an SMS and placing a call are also refused under "
-                        "MESH_READ_ONLY=1."
-                    ),
+                    "description": "Phone PIM: SMS, call log, contacts, call (MESH_DEVICE_PIM=1).",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": ["sms_list", "sms_send", "call_log", "contacts", "call"],
-                                "description": "Message or PIM action to perform."
+                                "enum": [
+                                    "sms_list",
+                                    "sms_send",
+                                    "call_log",
+                                    "contacts",
+                                    "call"
+                                ]
                             },
                             "number": {
-                                "type": "string",
-                                "description": "sms_send/call: recipient number."
+                                "type": "string"
                             },
                             "text": {
-                                "type": "string",
-                                "description": "sms_send: message body."
+                                "type": "string"
                             },
                             "limit": {
-                                "type": "integer",
-                                "description": "How many records (1-50, default 10)."
+                                "type": "integer"
                             },
                             "offset": {
-                                "type": "integer",
-                                "description": "Record offset, for paging."
+                                "type": "integer"
                             },
                             "type": {
-                                "type": "string",
-                                "description": ("sms_list/call_log: filter, e.g. inbox/sent or "
-                                                "incoming/outgoing/missed.")
+                                "type": "string"
                             },
                             "query": {
-                                "type": "string",
-                                "description": "contacts: filter by name or number."
+                                "type": "string"
                             }
                         },
-                        "required": ["action"],
+                        "required": [
+                            "action"
+                        ],
+                        "additionalProperties": False
+                    }
+                },
+                {
+                    "name": "read_media",
+                    "description": "Read image/PDF/audio/video/text as MCP blocks.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string"
+                            },
+                            "offset": {
+                                "type": "integer"
+                            },
+                            "max_chars": {
+                                "type": "integer"
+                            },
+                            "max_side": {
+                                "type": "integer"
+                            },
+                            "max_frames": {
+                                "type": "integer"
+                            },
+                            "include_audio": {
+                                "type": "boolean"
+                            },
+                            "ocr": {
+                                "type": "boolean"
+                            },
+                            "page_start": {
+                                "type": "integer"
+                            },
+                            "page_end": {
+                                "type": "integer"
+                            },
+                            "render_pages": {
+                                "type": "boolean"
+                            },
+                            "encoding": {
+                                "type": "string"
+                            }
+                        },
+                        "required": [
+                            "path"
+                        ],
+                        "additionalProperties": False
+                    }
+                },
+                {
+                    "name": "win_places",
+                    "description": "Known Folders, recent files, and top-level drive dirs.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "recent_limit": {
+                                "type": "integer"
+                            },
+                            "top_level_limit": {
+                                "type": "integer"
+                            },
+                            "only_existing_recent": {
+                                "type": "boolean"
+                            }
+                        },
+                        "additionalProperties": False
+                    }
+                },
+                {
+                    "name": "batch_read",
+                    "description": "Run up to 16 read-only tool calls in one call.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "ops": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {
+                                            "type": "string"
+                                        },
+                                        "tool": {
+                                            "type": "string"
+                                        },
+                                        "args": {
+                                            "type": "object"
+                                        }
+                                    },
+                                    "required": [
+                                        "tool"
+                                    ]
+                                }
+                            },
+                            "time_budget_ms": {
+                                "type": "integer"
+                            },
+                            "max_total_chars": {
+                                "type": "integer"
+                            }
+                        },
+                        "required": [
+                            "ops"
+                        ],
+                        "additionalProperties": False
+                    }
+                },
+                {
+                    "name": "batch_edit",
+                    "description": "Apply up to 16 edit/write ops (supports dry_run).",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "ops": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {
+                                            "type": "string"
+                                        },
+                                        "op": {
+                                            "type": "string",
+                                            "enum": [
+                                                "edit",
+                                                "write"
+                                            ]
+                                        },
+                                        "path": {
+                                            "type": "string"
+                                        },
+                                        "content": {
+                                            "type": "string"
+                                        },
+                                        "old_string": {
+                                            "type": "string"
+                                        },
+                                        "new_string": {
+                                            "type": "string"
+                                        },
+                                        "expected_sha256": {
+                                            "type": "string"
+                                        },
+                                        "replace_all": {
+                                            "type": "boolean"
+                                        },
+                                        "create_dirs": {
+                                            "type": "boolean"
+                                        }
+                                    },
+                                    "required": [
+                                        "op",
+                                        "path"
+                                    ]
+                                }
+                            },
+                            "stop_on_error": {
+                                "type": "boolean"
+                            },
+                            "dry_run": {
+                                "type": "boolean"
+                            }
+                        },
+                        "required": [
+                            "ops"
+                        ],
+                        "additionalProperties": False
+                    }
+                },
+                {
+                    "name": "run_script",
+                    "description": "Run temp python/powershell/bash/cmd script.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "code": {
+                                "type": "string"
+                            },
+                            "lang": {
+                                "type": "string",
+                                "enum": [
+                                    "python",
+                                    "powershell",
+                                    "bash",
+                                    "cmd"
+                                ]
+                            },
+                            "cwd": {
+                                "type": "string"
+                            },
+                            "timeout_sec": {
+                                "type": "integer"
+                            },
+                            "background": {
+                                "type": "boolean"
+                            },
+                            "max_chars": {
+                                "type": "integer"
+                            }
+                        },
+                        "required": [
+                            "code"
+                        ],
+                        "additionalProperties": False
+                    }
+                },
+                {
+                    "name": "fs_index",
+                    "description": "Manage local SQLite FTS5 index (status/refresh/schedule).",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": [
+                                    "status",
+                                    "refresh",
+                                    "schedule"
+                                ]
+                            },
+                            "roots": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                }
+                            },
+                            "background": {
+                                "type": "boolean"
+                            },
+                            "time_budget_ms": {
+                                "type": "integer"
+                            },
+                            "every_sec": {
+                                "type": "integer"
+                            },
+                            "label": {
+                                "type": "string"
+                            }
+                        },
                         "additionalProperties": False
                     }
                 },
@@ -3122,6 +3353,7 @@ async def messages_endpoint(request: Request):
         args = _strip_reserved_arguments(params.get("arguments", {}))
         is_error = False
         is_liveusb = _is_liveusb_node(user)
+        content_blocks = None
         if name == "get_orchestration_skill":
             content_text = get_skill(user, request.headers.get("host", PUBLIC_HOST))
         elif name == "mesh_status":
@@ -3510,6 +3742,20 @@ async def messages_endpoint(request: Request):
                 content_text = res
             else:
                 content_text = json.dumps(res, ensure_ascii=False, indent=2, default=str)
+        elif name == "read_media":
+            res = await call_remote_tool(user, name, args)
+            err = remote_tool_error(res)
+            if err:
+                is_error = True
+                content_text = f"[Error] {err}"
+            elif isinstance(res, dict) and isinstance(res.get("content"), list) and res["content"]:
+                content_blocks = res["content"]
+            else:
+                is_error = True
+                content_text = (
+                    "[Error] The node returned no media content blocks "
+                    "(it may be running an older build without read_media support)."
+                )
         else:
             resp["error"] = {"code": -32601, "message": f"Unknown tool: {name}"}
             broadcast_sse(user, resp)
@@ -3524,25 +3770,31 @@ async def messages_endpoint(request: Request):
                 }
             )
 
-        # Size guard for the Gemini Web turn budget. The node already paginates
-        # via next_cursor, so the gateway must NOT cut the middle out: that would
-        # break byte-exact continuation. Keep the head and say how to get the
-        # rest, so the model can ask for the next page instead of losing data.
-        MAX_GATEWAY_TEXT = 45000
-        if len(content_text) > MAX_GATEWAY_TEXT:
-            kept = content_text[:MAX_GATEWAY_TEXT]
-            omitted = len(content_text) - MAX_GATEWAY_TEXT
-            content_text = (
-                f"{kept}\n\n... [Output truncated by the gateway: {omitted} more characters. "
-                f"Do not re-run the command; the node can page the rest: call the same tool again "
-                f"with cursor=<next_cursor> and a larger max_chars, or read the saved file if the "
-                f"result reported one.] ..."
-            )
+        if content_blocks is not None:
+            resp["result"] = {
+                "content": content_blocks,
+                "isError": is_error,
+            }
+        else:
+            # Size guard for the Gemini Web turn budget. The node already paginates
+            # via next_cursor, so the gateway must NOT cut the middle out: that would
+            # break byte-exact continuation. Keep the head and say how to get the
+            # rest, so the model can ask for the next page instead of losing data.
+            MAX_GATEWAY_TEXT = 45000
+            if len(content_text) > MAX_GATEWAY_TEXT:
+                kept = content_text[:MAX_GATEWAY_TEXT]
+                omitted = len(content_text) - MAX_GATEWAY_TEXT
+                content_text = (
+                    f"{kept}\n\n... [Output truncated by the gateway: {omitted} more characters. "
+                    f"Do not re-run the command; the node can page the rest: call the same tool again "
+                    f"with cursor=<next_cursor> and a larger max_chars, or read the saved file if the "
+                    f"result reported one.] ..."
+                )
 
-        resp["result"] = {
-            "content": [{"type": "text", "text": content_text}],
-            "isError": is_error
-        }
+            resp["result"] = {
+                "content": [{"type": "text", "text": content_text}],
+                "isError": is_error
+            }
     elif method == "prompts/list":
         resp["result"] = {
             "prompts": [{"name": "rhm-orchestrator", "description": f"Orchestrator role for {user}"}]
@@ -4329,6 +4581,27 @@ TOOL_ANNOTATIONS = {
     "job_list": _ANNOT_READ_ONLY,
     "share_list": _ANNOT_READ_ONLY,
     "device_info": _ANNOT_READ_ONLY,
+    "read_media": _ANNOT_READ_ONLY,
+    "win_places": _ANNOT_READ_ONLY,
+    "batch_read": _ANNOT_READ_ONLY,
+    "batch_edit": {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+    "run_script": {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+    "fs_index": {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
     # The node's settings do change real behaviour, so the advertisement is
     # honest (read-only false) exactly like the node's own surface: the model's
     # client may ask before a switch is thrown, and the cabinet - which has no

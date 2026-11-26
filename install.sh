@@ -901,14 +901,14 @@ if [ ! -f "$SCRIPT_DIR/core/agent.py" ]; then
     # tests/test_installer_bootstrap.py walks this list recursively and imports the
     # result, so neither failure can ship again.
     for f in core/__init__.py core/agent.py core/agent_harness.py core/autoruns.py core/code_cache.py \
-             core/control.py core/device.py core/domain.py core/goal.py core/hooks.py \
-             core/liveusb_bootstrap.py core/liveusb_connect_page.py core/mcp_tools.py core/menu.py core/paths.py \
+             core/control.py core/device.py core/doc_read.py core/domain.py core/fs_index.py core/fs_search.py core/goal.py core/hooks.py \
+             core/landing.py core/liveusb_bootstrap.py core/liveusb_connect_page.py core/liveusb_tunnel.py core/mcp_tools.py core/media.py core/menu.py core/paths.py \
              core/policies.py core/policy.py core/rekey.py \
-             core/redact.py core/rescue.py core/sandbox.py core/schedule.py core/schemas.py core/server.py core/settings.py core/skills_loader.py core/subagents.py core/termux.py \
+             core/redact.py core/rescue.py core/sandbox.py core/schedule.py core/schemas.py core/server.py core/settings.py core/skills_loader.py core/subagents.py core/termux.py core/tls.py \
              core/triggers.py core/updater.py core/usage.py core/version.py core/vitals.py core/web_share.py core/web_settings.py \
              core/platforms/__init__.py core/platforms/base.py core/platforms/common.py \
-             core/platforms/encoding.py core/platforms/png.py core/platforms/shell.py \
-             core/platforms/windows/__init__.py core/platforms/windows/clipboard.py \
+             core/platforms/encoding.py core/platforms/png.py core/platforms/raster.py core/platforms/shell.py \
+             core/platforms/windows/__init__.py core/platforms/windows/clipboard.py core/platforms/windows/places.py \
              core/platforms/windows/process.py core/platforms/windows/screen.py \
              core/platforms/windows/telemetry.py core/platforms/windows/winapi.py \
              core/platforms/linux/__init__.py core/platforms/linux/process.py \

@@ -1988,6 +1988,39 @@ def _add_allowed_host(hostname: str) -> None:
     os.environ[_ALLOWED_HOSTS_ENV] = ",".join(existing)
 
 
+def _remove_allowed_host(hostname: str) -> None:
+    candidate = (hostname or "").strip().lower()
+    if not candidate:
+        return
+    existing = [p.strip().lower() for p in (os.environ.get(_ALLOWED_HOSTS_ENV, "") or "").split(",") if p.strip()]
+    filtered = [h for h in existing if h != candidate]
+    if filtered:
+        os.environ[_ALLOWED_HOSTS_ENV] = ",".join(filtered)
+    else:
+        os.environ.pop(_ALLOWED_HOSTS_ENV, None)
+
+
+def _apply_tunnel_public_url(public_url: str, *, previous_url: str = "") -> str:
+    """Apply an ephemeral tunnel URL to allowed hosts, MESH_PUBLIC_URL, and share tools."""
+    clean = (public_url or "").strip().rstrip("/")
+    if not clean:
+        return ""
+    parsed_new = urlsplit(clean)
+    new_host = (parsed_new.hostname or "").strip().lower()
+
+    prev_clean = (previous_url or "").strip().rstrip("/")
+    if prev_clean:
+        prev_host = (urlsplit(prev_clean).hostname or "").strip().lower()
+        if prev_host and prev_host != new_host and prev_host.endswith(".trycloudflare.com"):
+            _remove_allowed_host(prev_host)
+
+    if new_host:
+        _add_allowed_host(new_host)
+    os.environ["MESH_PUBLIC_URL"] = clean
+    mcp_tools.configure(public_url=clean, web_share_direct=True)
+    return clean
+
+
 def start_quick_tunnel(
     port: int,
     token: str,
@@ -2045,11 +2078,7 @@ def start_quick_tunnel(
     ready.wait(timeout=max(0.1, float(wait_timeout)))
 
     if found_url:
-        public_url = found_url[0].rstrip("/")
-        parsed = urlsplit(public_url)
-        if parsed.hostname:
-            _add_allowed_host(parsed.hostname)
-        os.environ["MESH_PUBLIC_URL"] = public_url
+        public_url = _apply_tunnel_public_url(found_url[0])
         mcp_url = f"{public_url}/mcp?token={quote(token, safe='')}"
         sse_url = f"{public_url}/sse?token={quote(token, safe='')}"
         message = (
@@ -2221,11 +2250,12 @@ def run_standalone_server(
     if liveusb and effective_tunnel == "cloudflare":
         from core import liveusb_tunnel as _lt  # type: ignore
 
+        last_public_url = [""]
+
         def _on_public_url(public_url: str) -> None:
-            parsed = urlsplit(public_url)
-            if parsed.hostname:
-                _add_allowed_host(parsed.hostname)
-            os.environ["MESH_PUBLIC_URL"] = public_url
+            applied = _apply_tunnel_public_url(public_url, previous_url=last_public_url[0])
+            if applied:
+                last_public_url[0] = applied
 
         liveusb_supervisor = _lt.CloudflareQuickTunnelSupervisor(
             port=int(port),
@@ -2242,6 +2272,8 @@ def run_standalone_server(
             token=token,
             host="127.0.0.1" if host in ("0.0.0.0", "") else host,
         )
+        if _public_url:
+            _apply_tunnel_public_url(_public_url)
         print(tunnel_msg, file=sys.stderr, flush=True)
     logger.info(
         "Remote Harness MCP standalone MCP server listening on http://%s:%s/sse (auth: enabled)",

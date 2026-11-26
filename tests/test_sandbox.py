@@ -88,15 +88,17 @@ def test_system_root_is_refused_as_workspace():
     assert sandbox.workspace_refusal(os.path.expanduser("~"))
 
 
-def test_networked_isolation_requires_operator_approval():
+def test_sandbox_cannot_start_in_read_only_mode():
     from core import settings
 
-    assert settings.requires_approval(
-        {"action": "sandbox", "enabled": True, "network": True}
-    ) is True
-    assert settings.requires_approval(
-        {"action": "sandbox", "enabled": True, "network": False}
-    ) is False
+    settings.apply({"action": "mode", "mode": "read_only"}, actor="cli")
+    try:
+        refused = settings.apply(
+            {"action": "sandbox", "enabled": True, "network": True}, actor="mcp"
+        )
+        assert "read_only" in refused["error"]
+    finally:
+        settings.apply({"action": "mode", "mode": "full"}, actor="cli")
 
 
 def test_enable_uses_hardened_flags_and_no_host_mounts(tmp_path, monkeypatch):

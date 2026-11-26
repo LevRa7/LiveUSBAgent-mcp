@@ -199,7 +199,7 @@ def test_ready_pending_panel_hides_qr_until_session_ready(html_text: str, js_tex
     """Internet but no session -> pending panel instead of a stale QR."""
     assert 'id="ready-pending"' in ready_html
     pending_html = ready_html.split('id="ready-pending"', 1)[1].split('id="ready-content"', 1)[0]
-    assert "Интернет есть, получаем токен…" in pending_html
+    assert "Потеряно соединение с интернетом. Ожидание восстановления сети…" in pending_html
     assert 'id="ready-pending-title"' in pending_html
     assert 'id="ready-pending-text"' in pending_html
 
@@ -213,9 +213,10 @@ def test_ready_pending_panel_hides_qr_until_session_ready(html_text: str, js_tex
     assert "els.readyPending.classList.toggle" in js_text
     assert "els.readyContent.classList.toggle" in js_text
     assert "sessionReady" in js_text
+    assert "Интернет есть, получаем токен…" in js_text
     # Offline without a session must not claim that internet exists.
     assert "PENDING_TITLE_OFFLINE" in js_text
-    assert "QR-код появится, когда появится интернет." in js_text
+    assert "Старые QR-код и ссылка скрыты." in js_text
 
 
 def test_ready_view_has_qr_instruction(html_text: str, ready_html: str) -> None:

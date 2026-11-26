@@ -79,15 +79,15 @@
           </div>
         </div>
 
-        <div id="ready-pending" class="card pending-card is-hidden" role="status">
-          <div id="ready-pending-title" class="pending-title">Интернет есть, получаем токен…</div>
-          <div id="ready-pending-text" class="pending-text">QR-код и ссылка подключения появятся автоматически, как только сессия будет готова.</div>
+        <div id="ready-pending" class="card pending-card" role="status">
+          <div id="ready-pending-title" class="pending-title">Потеряно соединение с интернетом. Ожидание восстановления сети…</div>
+          <div id="ready-pending-text" class="pending-text">Старые QR-код и ссылка скрыты. Как только интернет восстановится, туннель переподключится и появится новый QR-код.</div>
         </div>
 
         <div id="terminal-feedback-ready" class="feedback-line is-hidden" role="status"></div>
         <div id="regen-feedback" class="feedback-line is-hidden" role="status"></div>
 
-        <div id="ready-content" class="ready-grid">
+        <div id="ready-content" class="ready-grid is-hidden">
           <div class="card qr-card">
             <div class="qr-frame">
               <img id="qr-image" class="qr-image" src="/api/qr.svg" alt="QR-код подключения MCP">

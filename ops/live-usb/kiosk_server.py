@@ -126,8 +126,8 @@ def parse_nmcli_wifi_list(output: str) -> List[Dict[str, Any]]:
         parts = split_nmcli_terse_line(line)
         if len(parts) < 4:
             continue
-        ssid = parts[0].strip()
-        if not ssid:
+        ssid = parts[0]
+        if not ssid.strip():
             continue
         try:
             signal = max(0, min(100, int(parts[1].strip() or "0")))
@@ -643,7 +643,7 @@ def trigger_session_regenerate(
 #                    found by shutil.which wins. A tail of ``None`` means the
 #                    argv is computed at launch time (file manager target dir).
 #   missing_reason - Russian explanation returned when no binary is installed.
-APP_LAUNCH_ORDER: Tuple[str, ...] = ("desktop", "terminal", "files", "editor")
+APP_LAUNCH_ORDER: Tuple[str, ...] = ("desktop", "terminal", "files", "partitions", "editor")
 
 APP_LAUNCHERS: Dict[str, Dict[str, Any]] = {
     "desktop": {
@@ -662,6 +662,11 @@ APP_LAUNCHERS: Dict[str, Dict[str, Any]] = {
         "label": "Файловый менеджер",
         "candidates": (("rhm-open-files", None), ("xfe", None), ("pcmanfm", None)),
         "missing_reason": "Файловый менеджер недоступен: не установлены rhm-open-files/xfe/pcmanfm",
+    },
+    "partitions": {
+        "label": "Редактор разделов (GParted)",
+        "candidates": (("gparted", ()),),
+        "missing_reason": "Редактор разделов недоступен: gparted не установлен",
     },
     "editor": {
         "label": "Текстовый редактор",
@@ -832,6 +837,95 @@ def _placeholder_svg(label: str) -> str:
     )
 
 
+def _write_tunnel_restart_trigger(state_dir: Optional[Path]) -> None:
+    """Write <state_dir>/tunnel-restart.trigger with current timestamp (non-fatal)."""
+    if state_dir is None:
+        return
+    try:
+        base = Path(state_dir)
+        base.mkdir(parents=True, exist_ok=True)
+        (base / "tunnel-restart.trigger").write_text(
+            f"{int(time.time())}\n", encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+def _detect_wifi_iface(run_cmd: CommandRunner = default_run_cmd) -> str:
+    """Detect the primary wireless interface via nmcli or sysfs, falling back to wlan0."""
+    rc, out, _ = run_cmd(["nmcli", "-t", "-f", "DEVICE,TYPE", "dev", "status"], 5.0)
+    if rc == 0 and out:
+        for raw_line in out.splitlines():
+            parts = split_nmcli_terse_line(raw_line.strip("\r\n"))
+            if len(parts) >= 2 and parts[1].strip() == "wifi" and parts[0].strip():
+                return parts[0].strip()
+    sys_net = Path("/sys/class/net")
+    try:
+        if sys_net.is_dir():
+            for entry in sorted(sys_net.iterdir()):
+                if entry.name.startswith(("wlan", "wlp", "wlx")):
+                    return entry.name
+    except Exception:
+        pass
+    return "wlan0"
+
+
+def _delete_conflicting_wifi_profiles(
+    ssid: str,
+    run_cmd: CommandRunner = default_run_cmd,
+) -> None:
+    """Delete existing NetworkManager 802-11-wireless profiles matching the target SSID."""
+    rc, out, _ = run_cmd(["nmcli", "-t", "-f", "NAME,TYPE", "con", "show"], 5.0)
+    if rc != 0 or not out:
+        return
+    for raw_line in out.splitlines():
+        parts = split_nmcli_terse_line(raw_line.strip("\r\n"))
+        if len(parts) >= 2 and parts[1].strip() == "802-11-wireless" and parts[0] == ssid:
+            run_cmd(["nmcli", "con", "delete", parts[0]], 5.0)
+
+
+def _connect_wifi_via_profile(
+    ssid: str,
+    password: str,
+    hidden: bool,
+    run_cmd: CommandRunner = default_run_cmd,
+) -> Dict[str, Any]:
+    """Create an explicit NetworkManager Wi-Fi profile and bring it up."""
+    wlan_iface = _detect_wifi_iface(run_cmd)
+    add_cmd = [
+        "nmcli",
+        "con",
+        "add",
+        "type",
+        "wifi",
+        "ifname",
+        wlan_iface,
+        "con-name",
+        ssid,
+        "ssid",
+        ssid,
+    ]
+    if hidden:
+        add_cmd.extend(["wifi.hidden", "yes"])
+    if password:
+        add_cmd.extend(["wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk", password])
+
+    rc_add, out_add, err_add = run_cmd(add_cmd, 15.0)
+    if rc_add != 0:
+        err_msg = (
+            err_add or out_add or f"Ошибка создания профиля Wi-Fi (код {rc_add})"
+        ).strip()
+        return {"ok": False, "message": err_msg}
+
+    rc_up, out_up, err_up = run_cmd(["nmcli", "con", "up", ssid], 35.0)
+    if rc_up == 0:
+        msg = (out_up or f"Подключено к {ssid}").strip()
+        return {"ok": True, "message": msg}
+
+    err_msg = (err_up or out_up or f"Ошибка подключения (код {rc_up})").strip()
+    return {"ok": False, "message": err_msg}
+
+
 def connect_wifi(
     ssid: str,
     password: str = "",
@@ -840,14 +934,13 @@ def connect_wifi(
 ) -> Dict[str, Any]:
     """Connect to a Wi-Fi network using nmcli."""
     raw_ssid = ssid or ""
-    clean_ssid = raw_ssid.strip()
-    if not clean_ssid:
+    if not raw_ssid.strip():
         return {"ok": False, "message": "Не указано имя сети (SSID)"}
-    if len(clean_ssid.encode("utf-8")) > 32:
+    if len(raw_ssid.encode("utf-8")) > 32:
         return {"ok": False, "message": "Имя сети (SSID) превышает 32 байта"}
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw_ssid):
         return {"ok": False, "message": "Имя сети (SSID) содержит недопустимые символы"}
-    if clean_ssid.startswith("-"):
+    if raw_ssid.startswith("-") or raw_ssid.lstrip().startswith("-"):
         return {"ok": False, "message": "Имя сети (SSID) не может начинаться с '-'"}
 
     raw_password = password or ""
@@ -855,19 +948,46 @@ def connect_wifi(
         return {"ok": False, "message": "Пароль Wi-Fi превышает 64 символа"}
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw_password):
         return {"ok": False, "message": "Пароль Wi-Fi содержит недопустимые символы"}
+    if raw_password:
+        is_64_hex = len(raw_password) == 64 and all(
+            ch in "0123456789abcdefABCDEF" for ch in raw_password
+        )
+        if len(raw_password) < 8 and not is_64_hex:
+            return {
+                "ok": False,
+                "message": "Пароль Wi-Fi (WPA-PSK) должен содержать не менее 8 символов (или 64 hex-символа)",
+            }
 
-    cmd = ["nmcli", "dev", "wifi", "connect", "--", clean_ssid]
+    # Ensure Wi-Fi radio is enabled and refresh scan list (non-fatal).
+    rc_radio, out_radio, _ = run_cmd(["nmcli", "radio", "wifi"], 5.0)
+    if rc_radio == 0 and out_radio.strip().lower() == "disabled":
+        run_cmd(["nmcli", "radio", "wifi", "on"], 5.0)
+    run_cmd(["nmcli", "dev", "wifi", "rescan"], 10.0)
+
+    # Remove stale/conflicting NM Wi-Fi profile for the same SSID.
+    _delete_conflicting_wifi_profiles(raw_ssid, run_cmd)
+
+    if hidden:
+        return _connect_wifi_via_profile(
+            raw_ssid, raw_password, hidden=True, run_cmd=run_cmd
+        )
+
+    cmd = ["nmcli", "dev", "wifi", "connect", raw_ssid]
     if raw_password:
         cmd.extend(["password", raw_password])
-    if hidden:
-        cmd.extend(["hidden", "yes"])
 
-    rc, out, err = run_cmd(cmd, 25.0)
+    rc, out, err = run_cmd(cmd, 35.0)
     if rc == 0:
-        msg = (out or f"Подключено к {clean_ssid}").strip()
+        msg = (out or f"Подключено к {raw_ssid}").strip()
         return {"ok": True, "message": msg}
 
     err_msg = (err or out or f"Ошибка подключения (код {rc})").strip()
+    if "key-mgmt: property is missing" in err_msg.lower():
+        _delete_conflicting_wifi_profiles(raw_ssid, run_cmd)
+        return _connect_wifi_via_profile(
+            raw_ssid, raw_password, hidden=False, run_cmd=run_cmd
+        )
+
     return {"ok": False, "message": err_msg}
 
 
@@ -3225,7 +3345,10 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
             internet = self.server.internet_checker()
         except Exception:
             internet = {"reachable": False, "ip": None, "target": None}
-        session = read_session_state(self.server.state_dir)
+        session = dict(read_session_state(self.server.state_dir))
+        if not internet.get("reachable"):
+            session["ready"] = False
+            session["tunnel_status"] = "offline"
         disks = _detect_disks(self.server.run_cmd)
         payload = {
             "ok": True,
@@ -3257,6 +3380,8 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
             )
             return
         result = connect_wifi(ssid, password=password, hidden=hidden, run_cmd=self.server.run_cmd)
+        if result.get("ok"):
+            _write_tunnel_restart_trigger(self.server.state_dir)
         self._send_json(HTTPStatus.OK, result)
 
     def _handle_session_regenerate(self) -> None:
@@ -3411,6 +3536,8 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
                 "ok": False,
                 "message": "Не удалось применить настройки сети",
             }
+        if int(status) < 400 and isinstance(payload, dict) and payload.get("ok"):
+            _write_tunnel_restart_trigger(self.server.state_dir)
         self._send_json(int(status), payload)
 
     def _handle_network_ip(self) -> None:

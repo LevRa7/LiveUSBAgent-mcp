@@ -158,6 +158,21 @@ check_assets() {
         kbd
         pcmanfm
         mousepad
+        gparted
+        gpart
+        mtools
+        ldmtool
+        partclone
+        restic
+        clamav
+        clamav-freshclam
+        yara
+        stress-ng
+        fio
+        s-tui
+        python3-evtx
+        mbr
+        debootstrap
         memtest86+
         wimtools
         libbde-utils
@@ -527,6 +542,9 @@ libvmdk-utils
 libqcow-utils
 ewf-tools
 fsarchiver
+partclone
+restic
+ldmtool
 ext4magic
 extundelete
 
@@ -535,12 +553,23 @@ smartmontools
 nvme-cli
 parted
 gdisk
+gpart
+mtools
 gddrescue
 testdisk
 sleuthkit
 chntpw
 libhivex-bin
+python3-evtx
 wimtools
+mbr
+debootstrap
+clamav
+clamav-freshclam
+yara
+stress-ng
+fio
+s-tui
 efibootmgr
 efivar
 grub-efi-${ARCH}-bin
@@ -610,6 +639,7 @@ lxde
 kbd
 pcmanfm
 mousepad
+gparted
 fonts-dejavu-core
 qrencode
 python3
@@ -635,7 +665,7 @@ drop_pkg() {
     sed -i -E "/^[[:space:]]*${pkg}[[:space:]]*$/d" "${PKG_LIST}"
 }
 if [[ "${ARCH}" == "arm64" ]]; then
-    for p in grub-pc-bin memtest86+ intel-microcode amd64-microcode cpuid msr-tools; do
+    for p in grub-pc-bin memtest86+ mbr intel-microcode amd64-microcode cpuid msr-tools; do
         drop_pkg "${p}"
     done
 elif [[ "${ARCH}" == "i386" ]]; then
@@ -645,7 +675,7 @@ elif [[ "${ARCH}" == "i386" ]]; then
     done
 fi
 if [[ "${PROFILE}" == "compact" ]]; then
-    for p in chromium lxde xfe pcmanfm mousepad xserver-xorg-video-all \
+    for p in chromium lxde xfe pcmanfm mousepad gparted xserver-xorg-video-all \
              firmware-linux-nonfree firmware-misc-nonfree firmware-qcom-soc \
              firmware-marvell-prestera firmware-ti-connectivity; do
         drop_pkg "${p}"
@@ -660,7 +690,8 @@ if [[ "${PROFILE}" == "compact" ]]; then
 elif [[ "${PROFILE}" == "lite" ]]; then
     for p in xserver-xorg-core xserver-xorg-video-all xserver-xorg-input-all \
              x11-xserver-utils xinit openbox xterm xfe xdotool chromium lxde \
-             pcmanfm mousepad fonts-dejavu-core zfsutils-linux zfs-dkms \
+             pcmanfm mousepad gparted fonts-dejavu-core zfsutils-linux zfs-dkms \
+             clamav clamav-freshclam \
              firmware-linux-nonfree firmware-misc-nonfree firmware-qcom-soc \
              firmware-marvell-prestera firmware-ti-connectivity; do
         drop_pkg "${p}"
@@ -790,6 +821,18 @@ cat <<'EOF' > config/includes.chroot/etc/mdadm/mdadm.conf
 AUTO -all
 EOF
 
+# Mask ZFS auto-import/mount/share services so LiveUSB never touches host ZFS pools at boot,
+# and mask zfs-load-module.service to avoid boot-time [FAILED] (zfs loads on demand via modprobe zfs).
+mkdir -p config/includes.chroot/etc/systemd/system
+for zfs_unit in \
+    zfs-import-cache.service \
+    zfs-import-scan.service \
+    zfs-mount.service \
+    zfs-share.service \
+    zfs-load-module.service; do
+    ln -sf /dev/null "config/includes.chroot/etc/systemd/system/${zfs_unit}"
+done
+
 # Enable rhm-live-agent.service via systemd symlink (hook also enables NetworkManager & usbmuxd)
 mkdir -p config/includes.chroot/etc/systemd/system/multi-user.target.wants
 ln -sf /etc/systemd/system/rhm-live-agent.service \
@@ -869,7 +912,9 @@ menuentry "Remote-Harness LiveUSB (Low RAM < 4 GB, boot from USB)" {
 
 menuentry "Memtest86+" {
     if [ "${grub_platform}" = "efi" ]; then
-        if [ -f /live/memtest86+x64.efi ]; then
+        if [ -f /live/memtest.efi ]; then
+            chainloader /live/memtest.efi
+        elif [ -f /live/memtest86+x64.efi ]; then
             chainloader /live/memtest86+x64.efi
         elif [ -f /boot/memtest86+x64.efi ]; then
             chainloader /boot/memtest86+x64.efi
@@ -878,7 +923,14 @@ menuentry "Memtest86+" {
             sleep 3
         fi
     else
-        linux16 /live/memtest
+        if [ -f /live/memtest.bin ]; then
+            linux16 /live/memtest.bin
+        elif [ -f /live/memtest ]; then
+            linux16 /live/memtest
+        else
+            echo "Memtest86+ BIOS binary not found."
+            sleep 3
+        fi
     fi
 }
 EOF

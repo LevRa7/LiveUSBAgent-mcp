@@ -328,13 +328,45 @@ def test_build_iso_ships_file_manager_and_editor_for_the_app_launcher() -> None:
     packages = _generated_package_list()
     required = _check_required_packages()
 
-    for package in ("xfe", "xdotool", "pcmanfm", "mousepad"):
+    for package in ("xfe", "xdotool", "pcmanfm", "mousepad", "gparted"):
         assert package in packages, (
             f"the generated package list must install {package!r} for the app launcher"
         )
         assert package in required, (
             f"build-iso.sh --check must verify package: {package}"
         )
+
+
+def test_build_iso_ships_service_toolkit_packages() -> None:
+    """Stage 1 service toolkit packages verified against Debian 13 (Trixie)."""
+    packages = _generated_package_list()
+    required = _check_required_packages()
+
+    service_packages = (
+        "gparted",
+        "gpart",
+        "mtools",
+        "ldmtool",
+        "partclone",
+        "restic",
+        "clamav",
+        "clamav-freshclam",
+        "yara",
+        "stress-ng",
+        "fio",
+        "s-tui",
+        "python3-evtx",
+        "mbr",
+        "debootstrap",
+    )
+    for package in service_packages:
+        assert package in packages, (
+            f"the generated package list must install {package!r} for the service toolkit"
+        )
+        assert package in required, (
+            f"build-iso.sh --check must verify package: {package}"
+        )
+    assert "ms-sys" not in packages, "ms-sys is not in Debian 13 apt repos"
 
     # The pre-existing kiosk GUI packages must survive the addition.
     for package in ("xterm", "chromium"):

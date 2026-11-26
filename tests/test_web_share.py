@@ -207,7 +207,9 @@ def test_a_bom_in_the_registry_does_not_hide_every_share(tmp_path):
     assert relayed["status"] == 200
 
 
-def test_share_file_publishes_serves_lists_and_unshares(tmp_path):
+def test_share_file_publishes_serves_lists_and_unshares(tmp_path, monkeypatch):
+    monkeypatch.setenv("MESH_PUBLIC_URL", "https://mesh.example.test")
+    domain.reset()
     source = tmp_path / "report.txt"
     # Bytes, not text: Path.write_text translates "\n" to CRLF on Windows and the
     # assertions below compare the published copy byte for byte.
@@ -293,7 +295,9 @@ def test_unshare_accepts_the_public_url(tmp_path):
 # serve_dir
 # ---------------------------------------------------------------------------
 
-def test_serve_dir_lists_in_place_and_survives_unshare(tmp_path):
+def test_serve_dir_lists_in_place_and_survives_unshare(tmp_path, monkeypatch):
+    monkeypatch.setenv("MESH_PUBLIC_URL", "https://mesh.example.test")
+    domain.reset()
     served = tmp_path / "site"
     served.mkdir()
     (served / "index.html").write_text("<h1>hello</h1>", encoding="utf-8")

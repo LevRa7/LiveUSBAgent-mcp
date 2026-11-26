@@ -373,3 +373,58 @@ def test_scan_invalid_and_missing_roots(tmp_path: Path):
     res_bad_hint = autoruns.scan_autoruns(str(empty_dir), os_hint="solaris")
     assert res_bad_hint["ok"] is False
     assert "Unsupported os_hint" in res_bad_hint["error"]
+
+
+def test_scan_windows_extended_persistence_winlogon_appinit_ifeo_wow64(
+    tmp_path: Path, monkeypatch
+):
+    (tmp_path / "Windows" / "System32" / "config").mkdir(parents=True)
+    (tmp_path / "Windows" / "System32" / "config" / "SOFTWARE").write_bytes(b"regf-mock")
+
+    monkeypatch.setattr(
+        autoruns.shutil,
+        "which",
+        lambda cmd: "/usr/bin/hivexget" if cmd == "hivexget" else None,
+    )
+
+    responses = {
+        r"WOW6432Node\Microsoft\Windows\CurrentVersion\Run": '"LegacyHelper"="C:\\\\Tools\\\\helper32.exe"\n',
+        r"Microsoft\Windows NT\CurrentVersion\Winlogon": (
+            '"Shell"="explorer.exe, C:\\\\Users\\\\Public\\\\evil.exe"\n'
+            '"Userinit"="C:\\\\Windows\\\\system32\\\\userinit.exe,"\n'
+        ),
+        r"Microsoft\Windows NT\CurrentVersion\Windows": '"AppInit_DLLs"="C:\\\\Temp\\\\inject.dll"\n',
+        r"Microsoft\Windows NT\CurrentVersion\Image File Execution Options\sethc.exe": (
+            '"Debugger"="C:\\\\Windows\\\\System32\\\\cmd.exe"\n'
+        ),
+    }
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=10, check=False):
+        key = cmd[2]
+        if key in responses:
+            return subprocess.CompletedProcess(cmd, 0, stdout=responses[key], stderr="")
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="not found")
+
+    monkeypatch.setattr(autoruns.subprocess, "run", fake_run)
+
+    res = autoruns.scan_autoruns(str(tmp_path), os_hint="windows")
+    assert res["ok"] is True
+
+    by_cat = {}
+    for entry in res["entries"]:
+        by_cat.setdefault(entry["category"], []).append(entry)
+
+    assert len(by_cat["registry_run_wow64"]) == 1
+    assert by_cat["registry_run_wow64"][0]["name"] == "LegacyHelper"
+
+    winlogon_by_name = {e["name"]: e for e in by_cat["registry_winlogon"]}
+    assert winlogon_by_name["Shell"]["details"]["suspicious"] is True
+    assert winlogon_by_name["Userinit"]["details"]["suspicious"] is False
+
+    assert len(by_cat["registry_appinit"]) == 1
+    assert by_cat["registry_appinit"][0]["details"]["suspicious"] is True
+
+    assert len(by_cat["registry_ifeo"]) == 1
+    assert by_cat["registry_ifeo"][0]["name"] == "sethc.exe"
+    assert by_cat["registry_ifeo"][0]["details"]["suspicious"] is True
+

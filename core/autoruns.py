@@ -39,6 +39,27 @@ _WINDOWS_RUN_KEYS: Tuple[str, ...] = (
     r"Microsoft\Windows\CurrentVersion\RunOnce",
 )
 
+_WINDOWS_WOW64_RUN_KEYS: Tuple[str, ...] = (
+    r"WOW6432Node\Microsoft\Windows\CurrentVersion\Run",
+    r"WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce",
+)
+
+_WINDOWS_WINLOGON_KEY = r"Microsoft\Windows NT\CurrentVersion\Winlogon"
+_WINDOWS_WINLOGON_VALUES: Tuple[str, ...] = ("Shell", "Userinit")
+
+_WINDOWS_APPINIT_KEY = r"Microsoft\Windows NT\CurrentVersion\Windows"
+
+_WINDOWS_IFEO_BASE = r"Microsoft\Windows NT\CurrentVersion\Image File Execution Options"
+_WINDOWS_IFEO_TARGETS: Tuple[str, ...] = (
+    "sethc.exe",
+    "utilman.exe",
+    "osk.exe",
+    "narrator.exe",
+    "magnify.exe",
+    "cmd.exe",
+    "taskmgr.exe",
+)
+
 _HIVEX_VALUE_RE = re.compile(r'^\s*"([^"]+)"\s*=\s*(.*)\s*$')
 
 
@@ -272,10 +293,11 @@ def _scan_windows_registry(
 
     info["hivexget_available"] = True
     inspected_keys: List[str] = []
-    for key_path in _WINDOWS_RUN_KEYS:
+
+    def _run_hivexget(hive_file: str, key_path: str) -> Optional[str]:
         try:
             proc = subprocess.run(
-                [hivexget_bin, software_hive, key_path],
+                [hivexget_bin, hive_file, key_path],
                 capture_output=True,
                 text=True,
                 timeout=_HIVEXGET_TIMEOUT_SEC,
@@ -283,14 +305,14 @@ def _scan_windows_registry(
             )
         except (OSError, subprocess.SubprocessError) as exc:
             warnings.append(f"hivexget failed for SOFTWARE\\{key_path}: {exc}")
-            continue
-
+            return None
         if proc.returncode != 0:
-            # Missing RunOnce key is common and non-fatal
-            continue
+            return None
+        return proc.stdout
 
-        inspected_keys.append(key_path)
-        for line in proc.stdout.splitlines():
+    def _parse_hivex_pairs(stdout: str) -> List[Tuple[str, str]]:
+        pairs: List[Tuple[str, str]] = []
+        for line in stdout.splitlines():
             match = _HIVEX_VALUE_RE.match(line)
             if not match:
                 continue
@@ -298,6 +320,18 @@ def _scan_windows_registry(
             raw_val = match.group(2).strip()
             if len(raw_val) >= 2 and raw_val.startswith('"') and raw_val.endswith('"'):
                 raw_val = raw_val[1:-1]
+            pairs.append((val_name, raw_val))
+        return pairs
+
+    hive_rel = _rel_posix(root_path, software_hive)
+
+    # 1. Standard 64-bit Run / RunOnce
+    for key_path in _WINDOWS_RUN_KEYS:
+        out = _run_hivexget(software_hive, key_path)
+        if out is None:
+            continue
+        inspected_keys.append(key_path)
+        for val_name, raw_val in _parse_hivex_pairs(out):
             entries.append(
                 {
                     "os": "windows",
@@ -309,10 +343,113 @@ def _scan_windows_registry(
                     "details": {
                         "hive": "SOFTWARE",
                         "key": key_path,
-                        "hive_path": _rel_posix(root_path, software_hive),
+                        "hive_path": hive_rel,
                     },
                 }
             )
+
+    # 2. 32-bit WOW6432Node Run / RunOnce
+    for key_path in _WINDOWS_WOW64_RUN_KEYS:
+        out = _run_hivexget(software_hive, key_path)
+        if out is None:
+            continue
+        inspected_keys.append(key_path)
+        for val_name, raw_val in _parse_hivex_pairs(out):
+            entries.append(
+                {
+                    "os": "windows",
+                    "category": "registry_run_wow64",
+                    "name": val_name,
+                    "path": f"SOFTWARE\\{key_path}",
+                    "command": raw_val,
+                    "arguments": "",
+                    "details": {
+                        "hive": "SOFTWARE",
+                        "key": key_path,
+                        "hive_path": hive_rel,
+                    },
+                }
+            )
+
+    # 3. Winlogon Shell / Userinit hijacking
+    winlogon_out = _run_hivexget(software_hive, _WINDOWS_WINLOGON_KEY)
+    if winlogon_out is not None:
+        inspected_keys.append(_WINDOWS_WINLOGON_KEY)
+        for val_name, raw_val in _parse_hivex_pairs(winlogon_out):
+            if val_name not in _WINDOWS_WINLOGON_VALUES or not raw_val:
+                continue
+            low = raw_val.strip().lower()
+            suspicious = (
+                (val_name == "Shell" and low != "explorer.exe")
+                or (val_name == "Userinit" and "userinit.exe" not in low)
+                or (val_name == "Userinit" and "," in low.rstrip(","))
+            )
+            entries.append(
+                {
+                    "os": "windows",
+                    "category": "registry_winlogon",
+                    "name": val_name,
+                    "path": f"SOFTWARE\\{_WINDOWS_WINLOGON_KEY}",
+                    "command": raw_val,
+                    "arguments": "",
+                    "details": {
+                        "hive": "SOFTWARE",
+                        "key": _WINDOWS_WINLOGON_KEY,
+                        "hive_path": hive_rel,
+                        "suspicious": suspicious,
+                    },
+                }
+            )
+
+    # 4. AppInit_DLLs injection
+    appinit_out = _run_hivexget(software_hive, _WINDOWS_APPINIT_KEY)
+    if appinit_out is not None:
+        inspected_keys.append(_WINDOWS_APPINIT_KEY)
+        for val_name, raw_val in _parse_hivex_pairs(appinit_out):
+            if val_name.lower() == "appinit_dlls" and raw_val.strip():
+                entries.append(
+                    {
+                        "os": "windows",
+                        "category": "registry_appinit",
+                        "name": val_name,
+                        "path": f"SOFTWARE\\{_WINDOWS_APPINIT_KEY}",
+                        "command": raw_val,
+                        "arguments": "",
+                        "details": {
+                            "hive": "SOFTWARE",
+                            "key": _WINDOWS_APPINIT_KEY,
+                            "hive_path": hive_rel,
+                            "suspicious": True,
+                        },
+                    }
+                )
+
+    # 5. Image File Execution Options (IFEO) Debugger hijacking
+    for target in _WINDOWS_IFEO_TARGETS:
+        ifeo_key = f"{_WINDOWS_IFEO_BASE}\\{target}"
+        ifeo_out = _run_hivexget(software_hive, ifeo_key)
+        if ifeo_out is None:
+            continue
+        inspected_keys.append(ifeo_key)
+        for val_name, raw_val in _parse_hivex_pairs(ifeo_out):
+            if val_name.lower() == "debugger" and raw_val.strip():
+                entries.append(
+                    {
+                        "os": "windows",
+                        "category": "registry_ifeo",
+                        "name": target,
+                        "path": f"SOFTWARE\\{ifeo_key}",
+                        "command": raw_val,
+                        "arguments": "",
+                        "details": {
+                            "hive": "SOFTWARE",
+                            "key": ifeo_key,
+                            "value": val_name,
+                            "hive_path": hive_rel,
+                            "suspicious": True,
+                        },
+                    }
+                )
 
     info["inspection_status"] = "completed"
     info["inspected_keys"] = inspected_keys

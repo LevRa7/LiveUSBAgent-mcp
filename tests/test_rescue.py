@@ -2269,3 +2269,158 @@ def test_collect_partitions_tolerates_non_string_arguments(linux_rescue_env, bad
     assert res["available"] is False
     assert "reason" in res
     assert json.dumps(res)
+
+
+# --- Stage 2: win_diag & malware_scan ---------------------------------------
+
+def test_collect_win_diag_reads_version_fast_startup_srt_minidump_and_evtx(
+    linux_rescue_env, tmp_path
+):
+    import struct
+
+    win_root = tmp_path / "win_c"
+    (win_root / "Windows" / "System32" / "config").mkdir(parents=True)
+    (win_root / "Windows" / "System32" / "config" / "SOFTWARE").write_bytes(b"regf")
+    (win_root / "Windows" / "System32" / "config" / "SYSTEM").write_bytes(b"regf")
+    (win_root / "hiberfil.sys").write_bytes(b"\x00" * 1024)
+
+    srt_dir = win_root / "Windows" / "System32" / "LogFiles" / "Srt"
+    srt_dir.mkdir(parents=True)
+    srt_text = "Startup Repair diagnosis\nRoot cause found: Boot critical file corrupt.\n"
+    (srt_dir / "SrtTrail.txt").write_bytes(b"\xff\xfe" + srt_text.encode("utf-16-le"))
+
+    dmp_dir = win_root / "Windows" / "Minidump"
+    dmp_dir.mkdir(parents=True)
+    buf = bytearray(96)
+    buf[0:8] = b"PAGEDU64"
+    struct.pack_into("<II", buf, 8, 15, 22631)
+    struct.pack_into("<I", buf, 0x38, 0x0000007E)
+    (dmp_dir / "112726-12345-01.dmp").write_bytes(bytes(buf))
+
+    logs_dir = win_root / "Windows" / "System32" / "winevt" / "Logs"
+    logs_dir.mkdir(parents=True)
+    (logs_dir / "System.evtx").write_bytes(b"ElfFile\x00" * 16)
+
+    linux_rescue_env.setattr(rescue, "_valid_mountpoint", lambda p: True)
+    linux_rescue_env.setattr(rescue, "_which", lambda name: "/usr/bin/hivexget" if name == "hivexget" else None)
+
+    def fake_run(argv, timeout=6):
+        if "SOFTWARE" in argv[1]:
+            return 0, '"ProductName"="Windows 11 Pro"\n"CurrentBuild"="22631"\n', ""
+        if "SYSTEM" in argv[1]:
+            return 0, '"HiberbootEnabled"=dword:00000001\n', ""
+        return 1, "", "not found"
+
+    linux_rescue_env.setattr(rescue, "_run_cmd", fake_run)
+
+    res = rescue.handle_rescue_info({"section": "win_diag", "mountpoint": str(win_root)})
+    assert res["available"] is True
+    assert res["version"]["ProductName"] == "Windows 11 Pro"
+    assert res["version"]["CurrentBuild"] == "22631"
+    assert res["fast_startup"]["hiberfil_present"] is True
+    assert res["fast_startup"]["hiberboot_enabled"] == "dword:00000001"
+    assert res["srt_trail"]["present"] is True
+    assert any("Root cause found" in ln for ln in res["srt_trail"]["root_causes"])
+    assert len(res["minidumps"]) == 1
+    assert res["minidumps"][0]["format"] == "PAGEDU64"
+    assert res["minidumps"][0]["bugcheck_code"] == "0x0000007E"
+    assert res["evtx_logs"]["System.evtx"]["present"] is True
+    assert res["evtx_logs"]["Application.evtx"]["present"] is False
+
+
+def test_collect_win_diag_rejects_windows_host(monkeypatch):
+    monkeypatch.setattr(rescue, "_IS_WINDOWS", True)
+    res = rescue.collect_win_diag("/mnt/rescue/win")
+    assert res["available"] is False
+    assert "requires Linux" in res["reason"]
+
+
+def test_malware_scan_dry_run_clamav_and_yara(linux_rescue_env):
+    res_clam = rescue.plan_or_run_rescue_action(
+        {"action": "malware_scan", "mountpoint": "/mnt/rescue/win_c"}
+    )
+    assert res_clam["dry_run"] is True
+    assert res_clam["scanner"] == "clamav"
+    assert res_clam["argv"] == ["clamscan", "-r", "--infected", "--no-summary", "/mnt/rescue/win_c"]
+
+    res_yara = rescue.plan_or_run_rescue_action(
+        {
+            "action": "malware_scan",
+            "mountpoint": "/mnt/rescue/win_c",
+            "scanner": "yara",
+            "yara_rules": "/opt/rules/malware.yar",
+        }
+    )
+    assert res_yara["dry_run"] is True
+    assert res_yara["argv"] == ["yara", "-r", "/opt/rules/malware.yar", "/mnt/rescue/win_c"]
+
+    bad_mp = rescue.plan_or_run_rescue_action(
+        {"action": "malware_scan", "mountpoint": "/etc"}
+    )
+    assert "error" in bad_mp
+
+    bad_q = rescue.plan_or_run_rescue_action(
+        {
+            "action": "malware_scan",
+            "mountpoint": "/mnt/rescue/win_c",
+            "quarantine": True,
+            "quarantine_dir": "/tmp/q",
+        }
+    )
+    assert "error" in bad_q
+
+
+def test_malware_scan_execute_and_quarantine_writes_manifest(linux_rescue_env, tmp_path):
+    scan_dir = tmp_path / "rescue_win"
+    scan_dir.mkdir()
+    infected_file = scan_dir / "bad.exe"
+    infected_file.write_bytes(b"EICAR-TEST-PAYLOAD")
+
+    q_dir = tmp_path / "scratch_q"
+
+    linux_rescue_env.setattr(rescue, "_valid_mountpoint", lambda p: True)
+    linux_rescue_env.setattr(rescue, "_is_volatile_path", lambda p: False)
+    linux_rescue_env.setattr(rescue, "_which", lambda name: "/usr/bin/clamscan" if name == "clamscan" else None)
+    linux_rescue_env.setattr(
+        rescue,
+        "_run_cmd",
+        lambda argv, timeout=120: (1, f"{infected_file}: Win.Test.EICAR_HDB-1 FOUND\n", ""),
+    )
+
+    # Bypass the /mnt/scratch/ prefix check only via a real-looking path or direct check:
+    # test the read-only execution path first
+    ro_res = rescue.plan_or_run_rescue_action(
+        {"action": "malware_scan", "mountpoint": str(scan_dir), "dry_run": False}
+    )
+    assert ro_res["executed"] is True
+    assert ro_res["findings_count"] == 1
+    assert ro_res["findings"][0]["signature"] == "Win.Test.EICAR_HDB-1"
+    assert infected_file.exists()
+
+    # Now test quarantine with a mocked os.makedirs/shutil.move target under /mnt/scratch/
+    moved_pairs = []
+    linux_rescue_env.setattr(rescue.os, "makedirs", lambda p, exist_ok=True: q_dir.mkdir(parents=True, exist_ok=True))
+    orig_move = rescue.shutil.move
+
+    def fake_move(src, dst):
+        moved_pairs.append((src, dst))
+        real_dst = q_dir / os.path.basename(dst)
+        return orig_move(src, str(real_dst))
+
+    linux_rescue_env.setattr(rescue.shutil, "move", fake_move)
+
+    q_res = rescue.plan_or_run_rescue_action(
+        {
+            "action": "malware_scan",
+            "mountpoint": str(scan_dir),
+            "quarantine": True,
+            "quarantine_dir": "/mnt/scratch/quarantine",
+            "dry_run": False,
+        }
+    )
+    assert q_res["executed"] is True
+    assert len(q_res["quarantined"]) == 1
+    assert q_res["quarantined"][0]["signature"] == "Win.Test.EICAR_HDB-1"
+    assert len(q_res["quarantined"][0]["sha256"]) == 64
+    assert not infected_file.exists()
+

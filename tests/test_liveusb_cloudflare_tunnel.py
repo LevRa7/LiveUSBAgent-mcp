@@ -327,7 +327,13 @@ def test_supervisor_watchdog_recovers_from_network_drop(tmp_path: Path, monkeypa
         while time.monotonic() < deadline and len(seen_urls) < 1:
             time.sleep(0.02)
         assert seen_urls == [urls[0]]
-        session1 = json.loads((tmp_path / "session.json").read_text(encoding="utf-8"))
+        deadline = time.monotonic() + 3.0
+        session1 = {}
+        while time.monotonic() < deadline:
+            session1 = json.loads((tmp_path / "session.json").read_text(encoding="utf-8"))
+            if session1.get("ready") is True:
+                break
+            time.sleep(0.02)
         assert session1["ready"] is True
         assert session1["tunnel_status"] == "connected"
 

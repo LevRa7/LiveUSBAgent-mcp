@@ -13,11 +13,13 @@ Designed to follow the exact contract of :mod:`core.device` and :mod:`core.mcp_t
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
+import struct
 import subprocess
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -39,6 +41,7 @@ RESCUE_SECTIONS: Tuple[str, ...] = (
     "installed_os",
     "boot_efi",
     "win_artifacts",
+    "win_diag",
     "dmesg_io",
     "ram_info",
     "filesystems",
@@ -56,6 +59,7 @@ RESCUE_ACTIONS: Tuple[str, ...] = (
     "chroot_exec",
     "ram_test_plan",
     "ram_dump_plan",
+    "malware_scan",
 )
 
 #: Filesystem driver and binary probe matrix for ``collect_filesystems()``.
@@ -147,6 +151,10 @@ RESCUE_TOOLS_SPEC: List[Dict[str, Any]] = [
                 "device": {
                     "type": "string",
                     "description": "Optional target block device, e.g. /dev/nvme0n1 or /dev/sda.",
+                },
+                "mountpoint": {
+                    "type": "string",
+                    "description": "Optional mounted OS root under /mnt/rescue/ (used by win_diag).",
                 },
                 "timeout_sec": {
                     "type": "integer",
@@ -262,6 +270,23 @@ RESCUE_TOOLS_SPEC: List[Dict[str, Any]] = [
                         "chroot_exec: bind /dev, /proc, /sys and /run into the guest before "
                         "running chroot_cmd (default true)."
                     ),
+                },
+                "scanner": {
+                    "type": "string",
+                    "enum": ["clamav", "yara"],
+                    "description": "malware_scan: offline scanner engine (clamav or yara, default clamav).",
+                },
+                "yara_rules": {
+                    "type": "string",
+                    "description": "malware_scan (yara): path to a YARA rules file.",
+                },
+                "quarantine": {
+                    "type": "boolean",
+                    "description": "malware_scan: move matched files to quarantine_dir with SHA-256 manifest (default false).",
+                },
+                "quarantine_dir": {
+                    "type": "string",
+                    "description": "malware_scan: non-volatile quarantine directory under /mnt/scratch/ (default /mnt/scratch/quarantine).",
                 },
                 "dry_run": {
                     "type": "boolean",
@@ -1386,6 +1411,264 @@ def collect_win_artifacts(timeout: int = 8) -> Dict[str, Any]:
     return result
 
 
+def _resolve_ci_path(base: str, *parts: str) -> Optional[str]:
+    """Resolve path segments case-insensitively under *base*."""
+    cur = base
+    for part in parts:
+        exact = os.path.join(cur, part)
+        if os.path.exists(exact):
+            cur = exact
+            continue
+        try:
+            entries = os.listdir(cur)
+        except OSError:
+            return None
+        target_low = part.lower()
+        found = None
+        for item in entries:
+            if item.lower() == target_low:
+                found = os.path.join(cur, item)
+                break
+        if found is None:
+            return None
+        cur = found
+    return cur
+
+
+def _parse_minidump_header(path: str) -> Dict[str, Any]:
+    """Parse minimal Windows crash-dump header (PAGEDU64/PAGEDUMP/MDMP) using stdlib only."""
+    info: Dict[str, Any] = {"name": os.path.basename(path)}
+    try:
+        st = os.stat(path)
+        info["size_bytes"] = int(st.st_size)
+        info["mtime"] = int(st.st_mtime)
+        with open(path, "rb") as fh:
+            header = fh.read(96)
+    except OSError as exc:
+        info["error"] = str(exc)
+        return info
+
+    if len(header) < 8:
+        info["format"] = "truncated"
+        return info
+
+    sig8 = header[:8]
+    if sig8 == b"PAGEDU64":
+        info["format"] = "PAGEDU64"
+        if len(header) >= 0x40:
+            major, minor = struct.unpack_from("<II", header, 8)
+            bugcheck = struct.unpack_from("<I", header, 0x38)[0]
+            info["major_version"] = major
+            info["minor_version"] = minor
+            info["bugcheck_code"] = f"0x{bugcheck:08X}"
+        return info
+    if sig8 == b"PAGEDUMP":
+        info["format"] = "PAGEDUMP"
+        if len(header) >= 0x24:
+            bugcheck = struct.unpack_from("<I", header, 0x20)[0]
+            info["bugcheck_code"] = f"0x{bugcheck:08X}"
+        return info
+    if header[:4] == b"MDMP":
+        info["format"] = "MDMP"
+        if len(header) >= 12:
+            version, streams = struct.unpack_from("<II", header, 4)
+            info["version"] = version & 0xFFFF
+            info["stream_count"] = streams
+        return info
+
+    info["format"] = "unknown"
+    return info
+
+
+def _parse_hivex_kv(text: str) -> Dict[str, str]:
+    """Parse key=value pairs from hivexget stdout."""
+    out: Dict[str, str] = {}
+    for line in (text or "").splitlines():
+        m = re.match(r'^\s*"([^"]+)"\s*=\s*(.*)\s*$', line)
+        if not m:
+            continue
+        k = m.group(1)
+        v = m.group(2).strip()
+        if len(v) >= 2 and v.startswith('"') and v.endswith('"'):
+            v = v[1:-1]
+        out[k] = v
+    return out
+
+
+def _read_srt_trail(path: str, max_bytes: int = 8192) -> Dict[str, Any]:
+    """Read Windows Startup Repair log tail (handles UTF-16LE and UTF-8)."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            if size > max_bytes:
+                fh.seek(size - max_bytes)
+            raw = fh.read(max_bytes)
+    except OSError as exc:
+        return {"present": False, "error": str(exc)}
+
+    text = ""
+    if raw.startswith(b"\xff\xfe") or b"\x00" in raw[:64]:
+        text = raw.decode("utf-16-le", errors="replace").lstrip("\ufeff")
+    else:
+        text = raw.decode("utf-8", errors="replace")
+
+    root_causes = [
+        line.strip()
+        for line in text.splitlines()
+        if "root cause" in line.lower() or "error code" in line.lower()
+    ][:10]
+    tail_lines = [ln for ln in text.splitlines() if ln.strip()][-15:]
+    return {
+        "present": True,
+        "size_bytes": size,
+        "root_causes": root_causes,
+        "tail": tail_lines,
+    }
+
+
+def _find_mounted_windows_root() -> Optional[str]:
+    """Return the first subdirectory under /mnt/rescue/ containing Windows/System32."""
+    base = "/mnt/rescue"
+    if not os.path.isdir(base):
+        return None
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return None
+    for name in names:
+        cand = os.path.join(base, name)
+        if not os.path.isdir(cand):
+            continue
+        sys32 = _resolve_ci_path(cand, "Windows", "System32")
+        if sys32 and os.path.isdir(sys32):
+            return cand
+    return None
+
+
+def collect_win_diag(mountpoint: Optional[str] = None, timeout: int = 12) -> Dict[str, Any]:
+    """Read-only offline Windows diagnostics on a mounted volume under /mnt/rescue/.
+
+    Inspects Windows version/build, Fast Startup / hiberfil.sys, SrtTrail.txt,
+    BSOD Minidump headers, and System.evtx / Application.evtx presence.
+    """
+    if _IS_WINDOWS:
+        return {"available": False, "reason": "win_diag requires Linux"}
+
+    root = (mountpoint or "").strip()
+    if root:
+        if not _valid_mountpoint(root):
+            return {
+                "available": False,
+                "reason": "mountpoint must be under /mnt/rescue/ or /mnt/scratch/",
+            }
+        if not os.path.isdir(root):
+            return {"available": False, "reason": f"mountpoint does not exist: {root}"}
+    else:
+        found = _find_mounted_windows_root()
+        if not found:
+            return {
+                "available": False,
+                "reason": "no mounted Windows volume found under /mnt/rescue/; mount read-only first",
+            }
+        root = found
+
+    sys32 = _resolve_ci_path(root, "Windows", "System32")
+    if not sys32 or not os.path.isdir(sys32):
+        return {
+            "available": False,
+            "mountpoint": root,
+            "reason": "Windows/System32 not found under mountpoint",
+        }
+
+    warnings: List[str] = []
+    probe_timeout = max(1, min(int(timeout), 6))
+
+    # 1. Version & Fast Startup via hivexget (strictly read-only)
+    version_info: Dict[str, str] = {}
+    fast_startup: Dict[str, Any] = {}
+    config_dir = _resolve_ci_path(sys32, "config")
+    hivexget_bin = _which("hivexget")
+    if config_dir and hivexget_bin:
+        sw_hive = _resolve_ci_path(config_dir, "SOFTWARE")
+        if sw_hive and os.path.isfile(sw_hive):
+            rc, out, _ = _run_cmd(
+                [hivexget_bin, sw_hive, r"Microsoft\Windows NT\CurrentVersion"],
+                timeout=probe_timeout,
+            )
+            if rc == 0:
+                kv = _parse_hivex_kv(out)
+                for field in ("ProductName", "DisplayVersion", "CurrentBuild", "UBR", "EditionID"):
+                    if field in kv:
+                        version_info[field] = kv[field]
+        sys_hive = _resolve_ci_path(config_dir, "SYSTEM")
+        if sys_hive and os.path.isfile(sys_hive):
+            rc, out, _ = _run_cmd(
+                [hivexget_bin, sys_hive, r"ControlSet001\Control\Session Manager\Power"],
+                timeout=probe_timeout,
+            )
+            if rc == 0:
+                kv = _parse_hivex_kv(out)
+                if "HiberbootEnabled" in kv:
+                    fast_startup["hiberboot_enabled"] = kv["HiberbootEnabled"]
+    elif not hivexget_bin:
+        warnings.append("hivexget not installed; registry version and Fast Startup skipped")
+
+    hiberfil = _resolve_ci_path(root, "hiberfil.sys")
+    fast_startup["hiberfil_present"] = bool(hiberfil and os.path.isfile(hiberfil))
+    if hiberfil and os.path.isfile(hiberfil):
+        try:
+            fast_startup["hiberfil_bytes"] = int(os.path.getsize(hiberfil))
+        except OSError:
+            pass
+
+    # 2. Startup Repair log (SrtTrail.txt)
+    srt_path = _resolve_ci_path(sys32, "LogFiles", "Srt", "SrtTrail.txt")
+    srt_trail = _read_srt_trail(srt_path) if (srt_path and os.path.isfile(srt_path)) else {"present": False}
+
+    # 3. BSOD Minidumps
+    minidumps: List[Dict[str, Any]] = []
+    minidump_dir = _resolve_ci_path(root, "Windows", "Minidump")
+    if minidump_dir and os.path.isdir(minidump_dir):
+        try:
+            dmp_files = [
+                os.path.join(minidump_dir, f)
+                for f in os.listdir(minidump_dir)
+                if f.lower().endswith(".dmp")
+            ]
+            dmp_files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            for dmp in dmp_files[:20]:
+                minidumps.append(_parse_minidump_header(dmp))
+        except OSError as exc:
+            warnings.append(f"could not list Minidump directory: {exc}")
+
+    # 4. Windows Event Logs (.evtx) presence
+    evtx_logs: Dict[str, Any] = {}
+    logs_dir = _resolve_ci_path(sys32, "winevt", "Logs")
+    if logs_dir and os.path.isdir(logs_dir):
+        for log_name in ("System.evtx", "Application.evtx"):
+            lp = _resolve_ci_path(logs_dir, log_name)
+            if lp and os.path.isfile(lp):
+                try:
+                    evtx_logs[log_name] = {"present": True, "size_bytes": int(os.path.getsize(lp))}
+                except OSError:
+                    evtx_logs[log_name] = {"present": True}
+            else:
+                evtx_logs[log_name] = {"present": False}
+
+    result: Dict[str, Any] = {
+        "available": True,
+        "mountpoint": root,
+        "version": version_info,
+        "fast_startup": fast_startup,
+        "srt_trail": srt_trail,
+        "minidumps": minidumps,
+        "evtx_logs": evtx_logs,
+    }
+    if warnings:
+        result["warnings"] = warnings
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Recovery action planner & executor
 # ---------------------------------------------------------------------------
@@ -2129,6 +2412,130 @@ def plan_or_run_rescue_action(args: Dict[str, Any]) -> Dict[str, Any]:
             "step_results": step_results,
         }
 
+    if action == "malware_scan":
+        mp = str(args.get("mountpoint") or "").strip()
+        if not mp or not _valid_mountpoint(mp):
+            return {
+                "error": "malware_scan requires a valid mountpoint under /mnt/rescue/ or /mnt/scratch/"
+            }
+        scanner = str(args.get("scanner") or "clamav").strip().lower()
+        if scanner not in ("clamav", "yara"):
+            return {"error": f"malware_scan scanner must be 'clamav' or 'yara', got: {scanner}"}
+
+        quarantine = bool(args.get("quarantine", False))
+        q_dir = str(args.get("quarantine_dir") or "/mnt/scratch/quarantine").strip()
+        if quarantine:
+            if not q_dir.startswith("/mnt/scratch/") or ".." in q_dir.split("/"):
+                return {
+                    "error": "malware_scan quarantine_dir must be under /mnt/scratch/"
+                }
+            if _is_volatile_path(q_dir):
+                return {
+                    "error": f"refusing to quarantine into volatile RAM path: {q_dir}"
+                }
+
+        if scanner == "clamav":
+            argv = ["clamscan", "-r", "--infected", "--no-summary", mp]
+        else:
+            rules = str(args.get("yara_rules") or "").strip()
+            if not rules:
+                return {"error": "malware_scan with scanner='yara' requires 'yara_rules' path"}
+            argv = ["yara", "-r", rules, mp]
+
+        if dry_run:
+            return {
+                "action": action,
+                "dry_run": True,
+                "scanner": scanner,
+                "mountpoint": mp,
+                "quarantine": quarantine,
+                "quarantine_dir": q_dir if quarantine else None,
+                "argv": argv,
+            }
+
+        bin_name = "clamscan" if scanner == "clamav" else "yara"
+        if not _which(bin_name):
+            return {"error": f"{bin_name} is not installed"}
+        if not os.path.isdir(mp):
+            return {"error": f"mountpoint does not exist: {mp}"}
+        if scanner == "yara" and not os.path.isfile(argv[2]):
+            return {"error": f"yara_rules file does not exist: {argv[2]}"}
+
+        rc, out, err = _run_cmd(argv, timeout=120)
+        findings: List[Dict[str, str]] = []
+        for line in out.splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            if scanner == "clamav" and s.endswith(" FOUND"):
+                # "<path>: <Signature> FOUND"
+                path_part, _, rest = s.rpartition(": ")
+                if path_part:
+                    sig = rest[:-6].strip()
+                    findings.append({"path": path_part, "signature": sig})
+            elif scanner == "yara":
+                parts = s.split(None, 1)
+                if len(parts) == 2:
+                    findings.append({"path": parts[1].strip(), "signature": parts[0].strip()})
+
+        quarantined: List[Dict[str, Any]] = []
+        quarantine_errors: List[str] = []
+        if quarantine and findings:
+            os.makedirs(q_dir, exist_ok=True)
+            manifest_path = os.path.join(q_dir, "manifest.json")
+            existing_manifest: List[Dict[str, Any]] = []
+            if os.path.isfile(manifest_path):
+                try:
+                    loaded = json.loads(_read_file_text(manifest_path) or "[]")
+                    if isinstance(loaded, list):
+                        existing_manifest = loaded
+                except Exception:
+                    existing_manifest = []
+            for item in findings:
+                src = item["path"]
+                if not os.path.isfile(src):
+                    continue
+                try:
+                    h = hashlib.sha256()
+                    with open(src, "rb") as fh:
+                        for chunk in iter(lambda: fh.read(65536), b""):
+                            h.update(chunk)
+                    digest = h.hexdigest()
+                    dst = os.path.join(q_dir, f"{digest[:12]}_{os.path.basename(src)}")
+                    shutil.move(src, dst)
+                    rec = {
+                        "original_path": src,
+                        "quarantine_path": dst,
+                        "signature": item["signature"],
+                        "sha256": digest,
+                        "timestamp": int(time.time()),
+                    }
+                    quarantined.append(rec)
+                    existing_manifest.append(rec)
+                except OSError as exc:
+                    quarantine_errors.append(f"{src}: {exc}")
+            try:
+                with open(manifest_path, "w", encoding="utf-8") as mf:
+                    json.dump(existing_manifest, mf, indent=2)
+            except OSError as exc:
+                quarantine_errors.append(f"manifest write failed: {exc}")
+
+        res: Dict[str, Any] = {
+            "action": action,
+            "dry_run": False,
+            "executed": True,
+            "scanner": scanner,
+            "argv": argv,
+            "exit_code": rc,
+            "findings_count": len(findings),
+            "findings": findings,
+            "quarantined": quarantined,
+            "stderr": err,
+        }
+        if quarantine_errors:
+            res["quarantine_errors"] = quarantine_errors
+        return res
+
     return {"error": f"rescue action is not implemented in this build: {action}"}
 
 
@@ -2168,6 +2575,9 @@ def handle_rescue_info(args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             return collect_boot_efi(timeout=timeout)
         if section == "win_artifacts":
             return collect_win_artifacts(timeout=timeout)
+        if section == "win_diag":
+            mountpoint = str(payload.get("mountpoint") or "").strip() or None
+            return collect_win_diag(mountpoint=mountpoint, timeout=timeout)
         if section == "dmesg_io":
             return collect_dmesg_io(device=device, timeout=min(timeout, 5))
         if section == "ram_info":

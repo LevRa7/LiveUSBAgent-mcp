@@ -368,7 +368,7 @@ def test_http_api_wifi_scan_and_connect(running_server):
         base,
         "/api/wifi/connect",
         method="POST",
-        payload={"ssid": "HiddenCorp", "password": "hidden-pass-123", "hidden": True},
+        payload={"ssid": "HiddenCorp", "password": "passpass11", "hidden": True},
     )
     assert st_hid == 200
     assert json.loads(body_hid.decode("utf-8"))["ok"] is True
@@ -389,7 +389,7 @@ def test_http_api_wifi_scan_and_connect(running_server):
         "wifi-sec.key-mgmt",
         "wpa-psk",
         "wifi-sec.psk",
-        "hidden-pass-123",
+        "passpass11",
     ] in calls
     assert ["nmcli", "con", "up", "HiddenCorp"] in calls
 

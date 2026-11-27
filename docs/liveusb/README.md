@@ -59,7 +59,7 @@ sudo ops/live-usb/build-iso.sh --with-external-skills --build
 ```
 
 Useful flags: `--work-dir PATH`, `--distro NAME`, `--arch ARCH` and
-`--gateway HOST`. `--gateway` takes a bare host (`racknerd-5a24bf9.merino-carob.ts.net`) or an
+`--gateway HOST`. `--gateway` takes a bare host (`gateway.example.ts.net`) or an
 `https://` URL; plaintext `http://` is refused for anything but loopback
 because the tunnel is TLS-only.
 

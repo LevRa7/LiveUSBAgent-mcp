@@ -5,7 +5,7 @@
 the old domain is not a working domain. Every active code/doc/test
 reference has been replaced with:
 
-`racknerd-5a24bf9.merino-carob.ts.net`
+`gateway.example.ts.net`
 
 `core/domain.py::DEFAULT_PUBLIC_BASE_URL`, `build-iso.sh --gateway`, README,
 docs, tests and release notes now use this host.

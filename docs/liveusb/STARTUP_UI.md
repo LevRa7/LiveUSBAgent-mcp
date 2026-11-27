@@ -104,7 +104,7 @@ The ISO ships `ppp`, `wireguard-tools`, `openvpn` and
 `network-manager-openvpn`, and `build-iso.sh --check` pins all four.
 
 The default public domain is now
-`racknerd-5a24bf9.merino-carob.ts.net` — the old domain is gone from the
+`gateway.example.ts.net` — the old domain is gone from the
 active code, docs and tests.
 
 ## 7. AmneziaWG and subscriptions

@@ -848,6 +848,34 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
+# Dedicated headless HTTP daemon for the Kiosk UI (127.0.0.1:8787).
+# Decoupled completely from /dev/tty1 and lightdm so VT switches, Xorg/lightdm
+# startup, or tty1 hangups can NEVER kill or block the local web server.
+cat <<EOF > config/includes.chroot/etc/systemd/system/rhm-live-kiosk-web.service
+[Unit]
+Description=Remote-Harness MCP Live USB Kiosk Web Server (127.0.0.1:8787)
+After=local-fs.target
+Before=display-manager.service lightdm.service rhm-live-kiosk.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/remote-harness-mcp
+Environment="PYTHONPATH=/opt/remote-harness-mcp"
+Environment="MESH_SCENARIO=live_usb"
+Environment="MESH_GATEWAY=${MESH_GATEWAY}"
+Environment="MESH_LIVE_STATE_DIR=/run/rhm-live"
+Environment="DISPLAY=:0"
+ExecStartPre=-/bin/mkdir -p /mnt/rescue /run/rhm-live
+ExecStart=/usr/bin/python3 /opt/remote-harness-mcp/ops/live-usb/kiosk_server.py --host 127.0.0.1 --port 8787
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 # tty1 kiosk as a systemd service: live-config may create a default "user" and
 # take over getty@tty1, which left the kiosk on a plain login prompt. The service
 # owns tty1 directly, starts start-kiosk.sh as root, and masks getty@tty1.
@@ -856,7 +884,8 @@ EOF
 cat <<EOF > config/includes.chroot/etc/systemd/system/rhm-live-kiosk.service
 [Unit]
 Description=Remote-Harness MCP Live USB Kiosk
-After=local-fs.target systemd-user-sessions.service
+After=local-fs.target rhm-live-kiosk-web.service systemd-user-sessions.service
+Wants=rhm-live-kiosk-web.service
 Conflicts=getty@tty1.service
 StartLimitIntervalSec=0
 
@@ -928,6 +957,8 @@ done
 mkdir -p config/includes.chroot/etc/systemd/system/multi-user.target.wants
 ln -sf /etc/systemd/system/rhm-live-agent.service \
     config/includes.chroot/etc/systemd/system/multi-user.target.wants/rhm-live-agent.service
+ln -sf /etc/systemd/system/rhm-live-kiosk-web.service \
+    config/includes.chroot/etc/systemd/system/multi-user.target.wants/rhm-live-kiosk-web.service
 ln -sf /etc/systemd/system/rhm-live-kiosk.service \
     config/includes.chroot/etc/systemd/system/multi-user.target.wants/rhm-live-kiosk.service
 ln -sf /etc/systemd/system/rhm-live-nopasswd.service \

@@ -28,14 +28,20 @@ kiosk_ready() {
     fi
 }
 
-# Wait up to 45 seconds for kiosk_server.py to answer on localhost:8787.
-# If it is still down after ~3s, nudge rhm-live-kiosk.service via passwordless sudo.
-for attempt in $(seq 1 225); do
+# Wait up to 30 seconds for kiosk_server.py to answer on localhost:8787.
+# rhm-live-kiosk-web.service starts before lightdm, so this normally succeeds
+# on attempt 1 (<100ms). If somehow still down, nudge systemd or spawn directly.
+for attempt in $(seq 1 150); do
     if kiosk_ready; then
         break
     fi
-    if [[ "${attempt}" == "15" ]] && command -v systemctl >/dev/null 2>&1; then
+    if [[ "${attempt}" == "5" ]] && command -v systemctl >/dev/null 2>&1; then
+        sudo -n systemctl start rhm-live-kiosk-web.service >/dev/null 2>&1 || true
         sudo -n systemctl start rhm-live-kiosk.service >/dev/null 2>&1 || true
+    elif [[ "${attempt}" == "30" ]]; then
+        sudo -n env PYTHONPATH=/opt/remote-harness-mcp DISPLAY="${DISPLAY:-:0}" \
+            /usr/bin/python3 /opt/remote-harness-mcp/ops/live-usb/kiosk_server.py \
+            --host "${KIOSK_HOST}" --port "${KIOSK_PORT}" >/tmp/rhm-kiosk-web-fallback.log 2>&1 &
     fi
     sleep 0.2
 done

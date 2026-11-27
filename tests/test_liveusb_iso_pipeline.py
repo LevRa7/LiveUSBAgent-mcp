@@ -937,8 +937,17 @@ def test_cross_component_gateway_bootstrap_kiosk_contract(tmp_path: Path, monkey
 
 
 def test_kiosk_service_does_not_block_on_network_online_and_restarts_always() -> None:
-    """Kiosk HTTP server (127.0.0.1:8787) must start before network-online and always restart."""
+    """Kiosk HTTP server (127.0.0.1:8787) must run as a TTY-free daemon before lightdm."""
     build_text = BUILD_ISO_SH.read_text(encoding="utf-8")
+    web_unit = build_text.split(
+        "cat <<EOF > config/includes.chroot/etc/systemd/system/rhm-live-kiosk-web.service\n", 1
+    )[1].split("\nEOF\n", 1)[0]
+    assert "network-online.target" not in web_unit
+    assert "TTYPath" not in web_unit
+    assert "Before=display-manager.service lightdm.service" in web_unit
+    assert "Restart=always" in web_unit
+    assert "multi-user.target.wants/rhm-live-kiosk-web.service" in build_text
+
     kiosk_unit = build_text.split(
         "cat <<EOF > config/includes.chroot/etc/systemd/system/rhm-live-kiosk.service\n", 1
     )[1].split("\nEOF\n", 1)[0]
@@ -946,6 +955,7 @@ def test_kiosk_service_does_not_block_on_network_online_and_restarts_always() ->
     assert "Restart=always" in kiosk_unit
 
     autostart_sh = (LIVEUSB_DIR / "open-kiosk-browser.sh").read_text(encoding="utf-8")
+    assert "systemctl start rhm-live-kiosk-web.service" in autostart_sh
     assert "systemctl start rhm-live-kiosk.service" in autostart_sh
 
 

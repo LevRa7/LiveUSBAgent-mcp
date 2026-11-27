@@ -102,7 +102,7 @@ if [[ "${1:-}" == "--inner-browser" ]]; then
     exit 0
 fi
 
-# 1. Start localhost kiosk HTTP server.
+# 1. Start localhost kiosk HTTP server (unless rhm-live-kiosk-web.service is already serving it).
 # The kiosk X session is :0. Export DISPLAY before the server starts so
 # kiosk_server.py inherits it and «Открыть терминал» (POST /api/terminal) can
 # spawn xterm on the local display. X11_WAS_RUNNING keeps the branch below on
@@ -119,12 +119,22 @@ export DISPLAY="${DISPLAY:-:0}"
 # read-only or already-mounted /mnt/rescue is fine either way.
 mkdir -p /mnt/rescue 2>/dev/null || true
 
-python3 "${SCRIPT_DIR}/kiosk_server.py" --host "${KIOSK_HOST}" --port "${KIOSK_PORT}" &
-SERVER_PID=$!
+server_responding() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsS --max-time 1 "${KIOSK_URL}/api/status" >/dev/null 2>&1
+    else
+        python3 -c "import urllib.request; urllib.request.urlopen('${KIOSK_URL}/api/status', timeout=1)" >/dev/null 2>&1
+    fi
+}
 
-if ! wait_for_server; then
-    echo "[rhm-kiosk] kiosk_server.py did not respond on ${KIOSK_URL}" >&2
-    fallback_tui
+if ! server_responding; then
+    python3 "${SCRIPT_DIR}/kiosk_server.py" --host "${KIOSK_HOST}" --port "${KIOSK_PORT}" &
+    SERVER_PID=$!
+
+    if ! wait_for_server; then
+        echo "[rhm-kiosk] kiosk_server.py did not respond on ${KIOSK_URL}" >&2
+        fallback_tui
+    fi
 fi
 
 # 2. If a graphical display manager (e.g. lightdm/LXDE in the full profile) is
@@ -145,8 +155,12 @@ display_manager_active() {
 
 if [[ -z "${X11_WAS_RUNNING}" ]] && display_manager_active; then
     echo "[rhm-kiosk] Display manager active; keeping kiosk_server.py alive on ${KIOSK_URL} (XDG autostart opens browser)." >&2
-    wait "${SERVER_PID}"
-    exit $?
+    if [[ -n "${SERVER_PID}" ]]; then
+        wait "${SERVER_PID}"
+        exit $?
+    fi
+    # rhm-live-kiosk-web.service already owns 127.0.0.1:8787; sleep forever so systemd stays active.
+    exec sleep infinity
 fi
 
 # 3. Pick browser binary

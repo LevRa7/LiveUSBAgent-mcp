@@ -12,7 +12,14 @@
   "remotes": [
     {
       "type": "streamable-http",
-      "url": "https://your-liveusb-tunnel.trycloudflare.com/mcp/{token}"
+      "url": "https://your-liveusb-tunnel.trycloudflare.com/mcp/{token}",
+      "variables": {
+        "token": {
+          "description": "Ephemeral RAM-only LiveUSB session token shown on the Kiosk QR screen",
+          "isRequired": true,
+          "isSecret": true
+        }
+      }
     }
   ]
 }

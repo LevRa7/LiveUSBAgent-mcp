@@ -215,7 +215,8 @@ def test_ready_pending_panel_hides_qr_until_session_ready(html_text: str, js_tex
     assert "sessionReady" in js_text
     assert "Интернет есть, получаем токен…" in js_text
     # Offline without a session must not claim that internet exists.
-    assert "PENDING_TITLE_OFFLINE" in js_text
+    assert "getPendingTitle" in js_text
+    assert "ready_pending_title" in js_text
     assert "Старые QR-код и ссылка скрыты." in js_text
 
 
@@ -759,7 +760,7 @@ def test_amneziawg_tab_renders_live_state(amnezia_panel: str, js_text: str) -> N
     assert "innerHTML" not in render
     # A failing snapshot still reaches the operator as an error line.
     assert 'setNetworkFeedback(els.netAwgFeedback' in js_text
-    assert 'data.message || data.error || "Состояние AmneziaWG недоступно"' in js_text
+    assert 'data.message || data.error || tr("net_awg_state_unavail", "Состояние AmneziaWG недоступно")' in js_text
 
 
 def test_amneziawg_clears_config_after_success_and_never_renders_keys(
@@ -806,7 +807,7 @@ def test_amneziawg_feedback_states_and_busy_buttons(
     assert 'els.btnNetAwgSubmit, els.netAwgFeedback' in flat_js
     assert 'els.btnNetAwgDown, els.netAwgFeedback' in flat_js
     assert 'els.btnNetAwgSubLoad, els.netAwgFeedback' in flat_js
-    assert 'setNetworkFeedback(els.netAwgFeedback, "Ссылка скопирована", "is-ok")' in js_text
+    assert 'setNetworkFeedback(els.netAwgFeedback, tr("net_link_copied", "Ссылка скопирована"), "is-ok")' in js_text
     # A successful action keeps its message while the status block refreshes.
     assert js_text.count("loadAmneziaState(true)") == 3
     assert "preserveFeedback" in js_text

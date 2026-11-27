@@ -5,6 +5,8 @@ import json
 import shlex
 from urllib.parse import quote
 
+from core.liveusb_i18n import get_connect_locales
+
 
 def _safe_json_for_script(value: object) -> str:
     """Serialize a Python object for safe embedding inside a <script> block."""
@@ -96,6 +98,7 @@ def render_connect_page(
                 "claude-cli": claude_cli_cmd,
                 "raw-token": link_key,
             },
+            "i18n": get_connect_locales(),
         }
     )
 
@@ -375,7 +378,18 @@ def render_connect_page(
 <body>
   <main class="page">
     <section class="card">
-      <h1>Узел {esc_node}</h1>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px;flex-wrap:wrap;">
+        <h1 id="node-heading" style="margin:0;">Узел {esc_node}</h1>
+        <select id="connect-lang" aria-label="Language" style="background:#0e1116;color:#e6edf3;border:1px solid #2b313a;border-radius:6px;padding:6px 10px;font-size:13px;cursor:pointer;">
+          <option value="en">English</option>
+          <option value="de">Deutsch</option>
+          <option value="ru" selected>Русский</option>
+          <option value="fr">Français</option>
+          <option value="es">Español</option>
+          <option value="ar">العربية</option>
+          <option value="zh">中文</option>
+        </select>
+      </div>
 
       <div class="status-bar" id="status-bar" aria-live="polite">
         <div class="status-state">
@@ -394,76 +408,76 @@ def render_connect_page(
       <div class="tab-panel is-active" id="panel-gemini" role="tabpanel" aria-labelledby="tab-gemini">
         <div class="field">
           <div class="field-header">
-            <span class="field-label">SSE URL для Gemini</span>
-            <button type="button" class="copy-btn" data-copy="gemini-sse">Копировать</button>
+            <span class="field-label" data-i18n="connect_gemini_url">SSE URL для Gemini</span>
+            <button type="button" class="copy-btn" data-copy="gemini-sse" data-i18n="btn_copy">Копировать</button>
           </div>
           <pre class="code-box">{esc_sse_url}</pre>
         </div>
         <ol class="steps">
-          <li>Откройте настройки подключений MCP в Gemini.</li>
-          <li>Добавьте сервер и вставьте SSE URL выше.</li>
-          <li>Сохраните подключение и проверьте список инструментов.</li>
+          <li data-i18n="connect_gemini_step1">Откройте настройки подключений MCP в Gemini.</li>
+          <li data-i18n="connect_gemini_step2">Добавьте сервер и вставьте SSE URL выше.</li>
+          <li data-i18n="connect_gemini_step3">Сохраните подключение и проверьте список инструментов.</li>
         </ol>
         <div class="connector-actions">
-          <a class="connector-link" href="https://gemini.google.com/customize/connectors" target="_blank" rel="noopener noreferrer">Открыть коннекторы Gemini &rarr;</a>
+          <a class="connector-link" href="https://gemini.google.com/customize/connectors" target="_blank" rel="noopener noreferrer" data-i18n="connect_gemini_link">Открыть коннекторы Gemini &rarr;</a>
         </div>
       </div>
 
       <div class="tab-panel" id="panel-chatgpt" role="tabpanel" aria-labelledby="tab-chatgpt">
         <div class="field">
           <div class="field-header">
-            <span class="field-label">MCP URL для ChatGPT</span>
-            <button type="button" class="copy-btn" data-copy="chatgpt-mcp">Копировать</button>
+            <span class="field-label" data-i18n="connect_chatgpt_url">MCP URL для ChatGPT</span>
+            <button type="button" class="copy-btn" data-copy="chatgpt-mcp" data-i18n="btn_copy">Копировать</button>
           </div>
           <pre class="code-box">{esc_mcp_url}</pre>
         </div>
         <ol class="steps">
-          <li>Откройте «Настройки» &rarr; «Приложения и коннекторы» &rarr; «Создать коннектор».</li>
-          <li>Вставьте MCP URL в поле адреса сервера.</li>
-          <li>Выберите режим без дополнительной аутентификации (токен передаётся в URL) и сохраните.</li>
+          <li data-i18n="connect_chatgpt_step1">Откройте «Настройки» &rarr; «Приложения и коннекторы» &rarr; «Создать коннектор».</li>
+          <li data-i18n="connect_chatgpt_step2">Вставьте MCP URL в поле адреса сервера.</li>
+          <li data-i18n="connect_chatgpt_step3">Выберите режим без дополнительной аутентификации (токен передаётся в URL) и сохраните.</li>
         </ol>
         <div class="connector-actions">
-          <a class="connector-link" href="https://chatgpt.com/#settings/Connectors" target="_blank" rel="noopener noreferrer">Открыть коннекторы ChatGPT &rarr;</a>
+          <a class="connector-link" href="https://chatgpt.com/#settings/Connectors" target="_blank" rel="noopener noreferrer" data-i18n="connect_chatgpt_link">Открыть коннекторы ChatGPT &rarr;</a>
         </div>
       </div>
 
       <div class="tab-panel" id="panel-claude" role="tabpanel" aria-labelledby="tab-claude">
         <div class="field">
           <div class="field-header">
-            <span class="field-label">MCP URL для Claude</span>
-            <button type="button" class="copy-btn" data-copy="claude-mcp">Копировать</button>
+            <span class="field-label" data-i18n="connect_claude_url">MCP URL для Claude</span>
+            <button type="button" class="copy-btn" data-copy="claude-mcp" data-i18n="btn_copy">Копировать</button>
           </div>
           <pre class="code-box">{esc_mcp_url}</pre>
         </div>
         <div class="field">
           <div class="field-header">
-            <span class="field-label">Конфигурация mcpServers (JSON)</span>
-            <button type="button" class="copy-btn" data-copy="claude-json">Копировать</button>
+            <span class="field-label" data-i18n="connect_claude_json">Конфигурация mcpServers (JSON)</span>
+            <button type="button" class="copy-btn" data-copy="claude-json" data-i18n="btn_copy">Копировать</button>
           </div>
           <pre class="code-box code-box-pre">{esc_claude_json}</pre>
         </div>
         <div class="field">
           <div class="field-header">
-            <span class="field-label">Команда Claude Code</span>
-            <button type="button" class="copy-btn" data-copy="claude-cli">Копировать</button>
+            <span class="field-label" data-i18n="connect_claude_cli">Команда Claude Code</span>
+            <button type="button" class="copy-btn" data-copy="claude-cli" data-i18n="btn_copy">Копировать</button>
           </div>
           <pre class="code-box">{esc_claude_cli}</pre>
         </div>
         <ol class="steps">
-          <li>В Claude.ai добавьте MCP URL в разделе «Настройки» &rarr; «Интеграции».</li>
-          <li>В Claude Desktop добавьте блок mcpServers в файл claude_desktop_config.json.</li>
-          <li>В Claude Code выполните команду claude mcp add в терминале.</li>
+          <li data-i18n="connect_claude_step1">В Claude.ai добавьте MCP URL в разделе «Настройки» &rarr; «Интеграции».</li>
+          <li data-i18n="connect_claude_step2">В Claude Desktop добавьте блок mcpServers в файл claude_desktop_config.json.</li>
+          <li data-i18n="connect_claude_step3">В Claude Code выполните команду claude mcp add в терминале.</li>
         </ol>
         <div class="connector-actions">
-          <a class="connector-link" href="https://claude.ai/settings/connectors" target="_blank" rel="noopener noreferrer">Открыть коннекторы Claude &rarr;</a>
+          <a class="connector-link" href="https://claude.ai/settings/connectors" target="_blank" rel="noopener noreferrer" data-i18n="connect_claude_link">Открыть коннекторы Claude &rarr;</a>
         </div>
       </div>
 
       <div class="token-section">
         <div class="field">
           <div class="field-header">
-            <span class="field-label">Токен доступа (link_key)</span>
-            <button type="button" class="copy-btn" data-copy="raw-token">Копировать</button>
+            <span class="field-label" data-i18n="connect_token_label">Токен доступа (link_key)</span>
+            <button type="button" class="copy-btn" data-copy="raw-token" data-i18n="btn_copy">Копировать</button>
           </div>
           <pre class="code-box">{esc_link_key}</pre>
         </div>
@@ -474,13 +488,44 @@ def render_connect_page(
   {script_open}
     (function () {{
       var cfg = {js_config};
+      var i18n = cfg.i18n || {{}};
+      var lang = "ru";
+      var lastStatusKey = cfg.online ? "connect_status_online" : "connect_status_offline";
+
+      function t(key) {{
+        var b = i18n[lang] || i18n.ru || {{}};
+        return b[key] || (i18n.en && i18n.en[key]) || key;
+      }}
+
+      function applyLang(code, persist) {{
+        lang = i18n[code] ? code : "ru";
+        var meta = (i18n[lang] && i18n[lang]._meta) || {{ code: lang, dir: lang === "ar" ? "rtl" : "ltr" }};
+        document.documentElement.lang = meta.code || lang;
+        document.documentElement.dir = meta.dir === "rtl" ? "rtl" : "ltr";
+        if (persist) {{
+          try {{ window.localStorage.setItem("rhm_liveusb_lang", lang); }} catch (e) {{}}
+        }}
+        var sel = document.getElementById("connect-lang");
+        if (sel && sel.value !== lang) sel.value = lang;
+        document.title = t("connect_title").replace("{{node}}", cfg.nodeId);
+        var h = document.getElementById("node-heading");
+        if (h) h.textContent = t("connect_node_heading").replace("{{node}}", cfg.nodeId);
+        document.querySelectorAll("[data-i18n]").forEach(function (el) {{
+          var k = el.getAttribute("data-i18n");
+          if (k) el.textContent = t(k);
+        }});
+        var tEl = document.getElementById("status-text");
+        if (tEl) tEl.textContent = t(lastStatusKey);
+        if (expiresEl) expiresEl.textContent = formatExpires(cfg.expiresAt);
+      }}
 
       function formatExpires(isoStr) {{
         if (!isoStr) return "";
+        var prefix = t("connect_expires_prefix") + " ";
         try {{
           var d = new Date(isoStr);
           if (!isNaN(d.getTime())) {{
-            return "Действует до " + d.toLocaleString("ru-RU", {{
+            return prefix + d.toLocaleString(lang, {{
               day: "2-digit",
               month: "2-digit",
               year: "numeric",
@@ -489,13 +534,22 @@ def render_connect_page(
             }});
           }}
         }} catch (e) {{}}
-        return "Действует до " + isoStr;
+        return prefix + isoStr;
       }}
 
       var expiresEl = document.getElementById("status-expires");
-      if (expiresEl) {{
-        expiresEl.textContent = formatExpires(cfg.expiresAt);
+      var langSel = document.getElementById("connect-lang");
+      if (langSel) {{
+        langSel.addEventListener("change", function () {{ applyLang(langSel.value, true); }});
       }}
+      var initLang = "ru";
+      try {{
+        var q = new URLSearchParams(window.location.search).get("lang");
+        var stored = window.localStorage.getItem("rhm_liveusb_lang");
+        if (q && i18n[q]) initLang = q;
+        else if (stored && i18n[stored]) initLang = stored;
+      }} catch (e) {{}}
+      applyLang(initLang, false);
 
       var tabButtons = document.querySelectorAll(".tab-btn");
       var tabPanels = document.querySelectorAll(".tab-panel");
@@ -531,10 +585,10 @@ def render_connect_page(
           var text = cfg.copyTargets[key];
           if (!text) return;
           var done = function () {{
-            btn.textContent = "Скопировано";
+            btn.textContent = t("btn_copied");
             btn.classList.add("is-copied");
             window.setTimeout(function () {{
-              btn.textContent = "Копировать";
+              btn.textContent = t("btn_copy");
               btn.classList.remove("is-copied");
             }}, 1500);
           }};
@@ -553,12 +607,13 @@ def render_connect_page(
       var dotEl = document.getElementById("status-dot");
       var textEl = document.getElementById("status-text");
 
-      function applyStatus(state, label, expiresIso) {{
+      function applyStatus(state, labelKey, expiresIso) {{
+        lastStatusKey = labelKey;
         if (dotEl) {{
           dotEl.className = "status-dot status-dot-" + state;
         }}
         if (textEl) {{
-          textEl.textContent = label;
+          textEl.textContent = t(labelKey);
         }}
         if (expiresEl && expiresIso) {{
           expiresEl.textContent = formatExpires(expiresIso);
@@ -581,11 +636,11 @@ def render_connect_page(
           .then(function (resp) {{
             if (timerId !== null) window.clearTimeout(timerId);
             if (resp.status === 404 || resp.status === 410) {{
-              applyStatus("error", "Сессия истекла", "");
+              applyStatus("error", "connect_status_expired", "");
               return null;
             }}
             if (!resp.ok) {{
-              applyStatus("offline", "Туннель не в сети — переподключение...", "");
+              applyStatus("offline", "connect_status_reconnecting", "");
               return null;
             }}
             return resp.json();
@@ -594,23 +649,23 @@ def render_connect_page(
             if (!data) return;
             if (cfg.standalone) {{
               if (data.status === "healthy") {{
-                applyStatus("online", "Туннель в сети", "");
+                applyStatus("online", "connect_status_online", "");
               }} else {{
-                applyStatus("offline", "Туннель не в сети", "");
+                applyStatus("offline", "connect_status_offline", "");
               }}
               return;
             }}
             if (data.revoked) {{
-              applyStatus("error", "Сессия отозвана", data.expires_at);
+              applyStatus("error", "connect_status_revoked", data.expires_at);
             }} else if (data.online) {{
-              applyStatus("online", "Туннель в сети", data.expires_at);
+              applyStatus("online", "connect_status_online", data.expires_at);
             }} else {{
-              applyStatus("offline", "Туннель не в сети", data.expires_at);
+              applyStatus("offline", "connect_status_offline", data.expires_at);
             }}
           }})
           .catch(function () {{
             if (timerId !== null) window.clearTimeout(timerId);
-            applyStatus("offline", "Туннель не в сети — переподключение...", "");
+            applyStatus("offline", "connect_status_reconnecting", "");
           }});
       }}
 

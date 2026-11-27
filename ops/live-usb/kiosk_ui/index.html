@@ -11,29 +11,38 @@
     <header class="topbar">
       <div class="topbar-title" id="hostname-label">—</div>
       <nav class="view-switch" aria-label="Разделы">
-        <button type="button" class="tab-btn is-active" id="nav-network" data-view="network">Сеть / Wi-Fi</button>
-        <button type="button" class="tab-btn" id="nav-ready" data-view="ready">Готово к подключению MCP</button>
+        <button type="button" class="tab-btn is-active" id="nav-network" data-view="network" data-i18n="nav_network">Сеть / Wi-Fi</button>
+        <button type="button" class="tab-btn" id="nav-ready" data-view="ready" data-i18n="nav_ready">Готово к подключению MCP</button>
+        <select id="lang-switcher" class="lang-select" aria-label="Language">
+          <option value="en">English</option>
+          <option value="de">Deutsch</option>
+          <option value="ru" selected>Русский</option>
+          <option value="fr">Français</option>
+          <option value="es">Español</option>
+          <option value="ar">العربية</option>
+          <option value="zh">中文</option>
+        </select>
       </nav>
     </header>
 
     <main class="main-content">
       <section id="view-network" class="view-panel" aria-labelledby="heading-network">
         <div class="section-head">
-          <h1 id="heading-network" class="page-heading">Сеть / Wi-Fi</h1>
+          <h1 id="heading-network" class="page-heading" data-i18n="nav_network">Сеть / Wi-Fi</h1>
           <div class="head-actions">
-            <button type="button" class="btn btn-secondary" id="btn-hidden-wifi">Скрытая сеть</button>
-            <button type="button" class="btn btn-primary" id="btn-refresh-wifi">Обновить список</button>
-            <button type="button" class="btn btn-secondary" id="btn-network-settings">Настройки сети</button>
-            <button type="button" class="btn btn-secondary" id="btn-apps-network">Приложения</button>
-            <button type="button" class="btn btn-secondary" id="btn-terminal-network">Открыть терминал</button>
+            <button type="button" class="btn btn-secondary" id="btn-hidden-wifi" data-i18n="btn_hidden_wifi">Скрытая сеть</button>
+            <button type="button" class="btn btn-primary" id="btn-refresh-wifi" data-i18n="btn_refresh_wifi">Обновить список</button>
+            <button type="button" class="btn btn-secondary" id="btn-network-settings" data-i18n="btn_network_settings">Настройки сети</button>
+            <button type="button" class="btn btn-secondary" id="btn-apps-network" data-i18n="btn_apps">Приложения</button>
+            <button type="button" class="btn btn-secondary" id="btn-terminal-network" data-i18n="btn_terminal">Открыть терминал</button>
           </div>
         </div>
 
-        <div id="internet-banner" class="alert-banner" role="status">
+        <div id="internet-banner" class="alert-banner" role="status" data-i18n="internet_offline_banner">
           Интернет не обнаружен. Подключите Wi-Fi, кабель или USB-модем.
         </div>
 
-        <div id="iphone-trust-banner" class="alert-banner is-hidden" role="alert">
+        <div id="iphone-trust-banner" class="alert-banner is-hidden" role="alert" data-i18n="iphone_trust_banner">
           Нажмите «Доверять» на iPhone и введите код-пароль
         </div>
 
@@ -41,17 +50,17 @@
 
         <div class="interface-grid" aria-label="Сетевые интерфейсы">
           <div class="card iface-card">
-            <div class="iface-label">Ethernet</div>
+            <div class="iface-label" data-i18n="iface_ethernet">Ethernet</div>
             <div class="iface-value" id="status-ethernet">—</div>
             <div class="iface-meta" id="meta-ethernet">—</div>
           </div>
           <div class="card iface-card">
-            <div class="iface-label">Android USB-модем</div>
+            <div class="iface-label" data-i18n="iface_android">Android USB-модем</div>
             <div class="iface-value" id="status-android">—</div>
             <div class="iface-meta" id="meta-android">—</div>
           </div>
           <div class="card iface-card">
-            <div class="iface-label">iPhone USB-модем</div>
+            <div class="iface-label" data-i18n="iface_iphone">iPhone USB-модем</div>
             <div class="iface-value" id="status-iphone">—</div>
             <div class="iface-meta" id="meta-iphone">—</div>
           </div>
@@ -59,7 +68,7 @@
 
         <div class="card wifi-card">
           <div class="card-head">
-            <h2 class="card-title">Сети Wi-Fi</h2>
+            <h2 class="card-title" data-i18n="wifi_networks_title">Сети Wi-Fi</h2>
             <span class="card-meta" id="wifi-scan-meta">—</span>
           </div>
           <div id="wifi-list" class="wifi-list" role="list">
@@ -70,18 +79,18 @@
 
       <section id="view-ready" class="view-panel is-hidden" aria-labelledby="heading-ready">
         <div class="section-head">
-          <h1 id="heading-ready" class="page-heading">Готово к подключению MCP</h1>
+          <h1 id="heading-ready" class="page-heading" data-i18n="nav_ready">Готово к подключению MCP</h1>
           <div class="head-actions">
-            <button type="button" class="btn btn-secondary" id="btn-change-wifi">Сменить Wi-Fi</button>
-            <button type="button" class="btn btn-secondary" id="btn-terminal">Открыть терминал</button>
-            <button type="button" class="btn btn-secondary" id="btn-apps">Приложения</button>
-            <button type="button" class="btn btn-primary" id="btn-new-token">Новый токен</button>
+            <button type="button" class="btn btn-secondary" id="btn-change-wifi" data-i18n="btn_change_wifi">Сменить Wi-Fi</button>
+            <button type="button" class="btn btn-secondary" id="btn-terminal" data-i18n="btn_terminal">Открыть терминал</button>
+            <button type="button" class="btn btn-secondary" id="btn-apps" data-i18n="btn_apps">Приложения</button>
+            <button type="button" class="btn btn-primary" id="btn-new-token" data-i18n="btn_new_token">Новый токен</button>
           </div>
         </div>
 
         <div id="ready-pending" class="card pending-card" role="status">
-          <div id="ready-pending-title" class="pending-title">Потеряно соединение с интернетом. Ожидание восстановления сети…</div>
-          <div id="ready-pending-text" class="pending-text">Старые QR-код и ссылка скрыты. Как только интернет восстановится, туннель переподключится и появится новый QR-код.</div>
+          <div id="ready-pending-title" class="pending-title" data-i18n="ready_pending_title">Потеряно соединение с интернетом. Ожидание восстановления сети…</div>
+          <div id="ready-pending-text" class="pending-text" data-i18n="ready_pending_text">Старые QR-код и ссылка скрыты. Как только интернет восстановится, туннель переподключится и появится новый QR-код.</div>
         </div>
 
         <div id="terminal-feedback-ready" class="feedback-line is-hidden" role="status"></div>
@@ -92,10 +101,10 @@
             <div class="qr-frame">
               <img id="qr-image" class="qr-image" src="/api/qr.svg" alt="QR-код подключения MCP">
             </div>
-            <p id="qr-instruction" class="qr-instruction">
+            <p id="qr-instruction" class="qr-instruction" data-i18n="qr_instruction">
               Отсканируйте QR-код или откройте ссылку подключения, затем выберите Gemini, ChatGPT или Claude на странице подключения.
             </p>
-            <p id="cloudflare-note" class="qr-instruction">
+            <p id="cloudflare-note" class="qr-instruction" data-i18n="cloudflare_note">
               Cloudflare Quick Tunnel (бесплатно, без аккаунта): URL меняется после каждого перезапуска — вставьте ссылку MCP заново. Часть AI-провайдеров может блокироваться защитой Cloudflare от ботов.
             </p>
           </div>
@@ -103,26 +112,26 @@
           <div class="ready-details">
             <div class="card detail-card">
               <div class="detail-row">
-                <div class="detail-label">Ссылка подключения</div>
+                <div class="detail-label" data-i18n="label_connect_url">Ссылка подключения</div>
                 <div class="detail-value mono" id="session-url">—</div>
               </div>
               <div class="detail-row">
-                <div class="detail-label">Токен сессии</div>
+                <div class="detail-label" data-i18n="label_session_token">Токен сессии</div>
                 <div class="detail-value mono" id="session-token">—</div>
               </div>
               <div class="detail-row">
-                <div class="detail-label">Туннель</div>
+                <div class="detail-label" data-i18n="label_tunnel">Туннель</div>
                 <div class="detail-value" id="session-tunnel">—</div>
               </div>
               <div class="detail-row">
-                <div class="detail-label">Обнаруженные диски</div>
+                <div class="detail-label" data-i18n="label_detected_disks">Обнаруженные диски</div>
                 <div class="detail-value" id="disks-summary">—</div>
               </div>
             </div>
 
             <div class="card disk-list-card">
               <div class="card-head">
-                <h2 class="card-title">Диски</h2>
+                <h2 class="card-title" data-i18n="disks_title">Диски</h2>
                 <span class="card-meta" id="disks-count-meta">—</span>
               </div>
               <div id="disks-list" class="disks-list">
@@ -464,6 +473,27 @@
     </div>
   </div>
 
+  <div id="lang-picker-backdrop" class="modal-backdrop lang-picker-backdrop is-hidden" role="dialog" aria-modal="true" aria-labelledby="lang-picker-title">
+    <div class="card modal-card lang-picker-card">
+      <div class="card-head">
+        <h2 id="lang-picker-title" class="card-title" data-i18n="lang_select_title">Choose Language / Выберите язык</h2>
+      </div>
+      <div class="modal-body">
+        <p class="field-hint" data-i18n="lang_select_subtitle">Choose the language for the LiveUSB interface and MCP connection instructions</p>
+        <div class="lang-picker-grid">
+          <button type="button" class="btn btn-secondary lang-btn" data-lang-pick="en">English</button>
+          <button type="button" class="btn btn-secondary lang-btn" data-lang-pick="de">Deutsch</button>
+          <button type="button" class="btn btn-secondary lang-btn" data-lang-pick="ru">Русский</button>
+          <button type="button" class="btn btn-secondary lang-btn" data-lang-pick="fr">Français</button>
+          <button type="button" class="btn btn-secondary lang-btn" data-lang-pick="es">Español</button>
+          <button type="button" class="btn btn-secondary lang-btn" data-lang-pick="ar">العربية</button>
+          <button type="button" class="btn btn-secondary lang-btn" data-lang-pick="zh">中文</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/i18n.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

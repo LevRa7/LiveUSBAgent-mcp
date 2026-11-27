@@ -3273,6 +3273,9 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/apps":
                 self._handle_apps()
                 return
+            if path == "/api/i18n":
+                self._handle_i18n()
+                return
             if path == "/api/network":
                 self._handle_network()
                 return
@@ -3422,6 +3425,25 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
                 "message": result.get("message") or "Терминал недоступен",
             },
         )
+
+    def _handle_i18n(self) -> None:
+        """Serve the 7-language localization dictionary (GET /api/i18n)."""
+        try:
+            from core.liveusb_i18n import SUPPORTED_LANGUAGES, get_all_locales
+
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "languages": list(SUPPORTED_LANGUAGES),
+                    "translations": get_all_locales(),
+                },
+            )
+        except Exception:
+            self._send_json(
+                HTTPStatus.OK,
+                {"ok": True, "languages": ["ru"], "translations": {}},
+            )
 
     def _handle_apps(self) -> None:
         """List the allowlisted kiosk applications (GET /api/apps)."""

@@ -5,7 +5,7 @@
 the old domain is not a working domain. Every active code/doc/test
 reference has been replaced with:
 
-`gateway.example.ts.net`
+`gateway.example.com`
 
 `core/domain.py::DEFAULT_PUBLIC_BASE_URL`, `build-iso.sh --gateway`, README,
 docs, tests and release notes now use this host.

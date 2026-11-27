@@ -34,7 +34,27 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
+
+_VALID_LANG_RE = re.compile(r"^[a-z]{2}$")
+
+
+def _append_lang_param(url: str, lang: str) -> str:
+    """Append or replace ?lang=<code> on a LiveUSB connect URL."""
+    clean_url = (url or "").strip()
+    code = (lang or "").strip().lower().split("-")[0]
+    if not clean_url or not _VALID_LANG_RE.match(code):
+        return clean_url
+    try:
+        from core.liveusb_i18n import SUPPORTED_LANGUAGES
+        if code not in SUPPORTED_LANGUAGES:
+            return clean_url
+    except Exception:
+        pass
+    parts = urlsplit(clean_url)
+    params = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != "lang"]
+    params.append(("lang", code))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(params), parts.fragment))
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
@@ -3622,7 +3642,12 @@ class KioskRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_qr_svg(self) -> None:
         session = read_session_state(self.server.state_dir)
-        svg_text, _ = render_qr_svg(session.get("connect_url", ""), self.server.run_cmd)
+        connect_url = session.get("connect_url", "")
+        qs = parse_qs(urlparse(self.path).query)
+        lang_vals = qs.get("lang") or []
+        if lang_vals:
+            connect_url = _append_lang_param(connect_url, lang_vals[0])
+        svg_text, _ = render_qr_svg(connect_url, self.server.run_cmd)
         self._send_bytes(
             HTTPStatus.OK,
             svg_text.encode("utf-8"),

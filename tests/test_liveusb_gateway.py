@@ -223,7 +223,7 @@ def test_liveusb_connect_page_html_rendering_and_tabs():
     assert resp.headers.get("cache-control") == "no-store"
 
     html_doc = resp.text
-    assert 'lang="ru"' in html_doc
+    assert 'lang="en"' in html_doc
     assert "Gemini" in html_doc
     assert "ChatGPT" in html_doc
     assert "Claude" in html_doc

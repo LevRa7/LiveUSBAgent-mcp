@@ -2,7 +2,7 @@
 
 > **SystemRescue / Hiren's BootCD meets MCP** — a bootable Debian 13 (Trixie) LiveUSB rescue OS that connects any broken or bare-metal PC to **Claude**, **ChatGPT**, or **Gemini** via QR code (no SSH, no accounts, no local setup).
 
-**Version:** 0.1.2 — [Release Notes](docs/releases/v0.1.2.md) · [Русская версия (`README_RU.md`)](README_RU.md) · [Latest Release](https://github.com/LevRa7/LiveUSBAgent-mcp/releases/latest) · [Startup UI Guide](docs/liveusb/STARTUP_UI.md) · [Watch HD MP4 Demo](docs/liveusb/demo/liveusb-agent-demo.mp4)
+**Version:** 0.2.0 — [Release Notes](docs/releases/v0.2.0.md) · [Русская версия (`README_RU.md`)](README_RU.md) · [Latest Release](https://github.com/LevRa7/LiveUSBAgent-mcp/releases/latest) · [Startup UI Guide](docs/liveusb/STARTUP_UI.md) · [Watch HD MP4 Demo](docs/liveusb/demo/liveusb-agent-demo.mp4)
 
 *Standalone evolution of [remote-harness-mcp](https://github.com/LevRa7/remote-harness-mcp) built specifically for bare-metal diagnostics, offline OS repair, and data recovery.*
 

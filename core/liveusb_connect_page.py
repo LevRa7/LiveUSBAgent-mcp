@@ -103,12 +103,12 @@ def render_connect_page(
     )
 
     return f"""<!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>Подключение {esc_node}</title>
+<title>Connect {esc_node}</title>
 <style>
   *, *::before, *::after {{
     box-sizing: border-box;
@@ -489,16 +489,16 @@ def render_connect_page(
     (function () {{
       var cfg = {js_config};
       var i18n = cfg.i18n || {{}};
-      var lang = "ru";
+      var lang = "en";
       var lastStatusKey = cfg.online ? "connect_status_online" : "connect_status_offline";
 
       function t(key) {{
-        var b = i18n[lang] || i18n.ru || {{}};
+        var b = i18n[lang] || i18n.en || i18n.ru || {{}};
         return b[key] || (i18n.en && i18n.en[key]) || key;
       }}
 
       function applyLang(code, persist) {{
-        lang = i18n[code] ? code : "ru";
+        lang = i18n[code] ? code : "en";
         var meta = (i18n[lang] && i18n[lang]._meta) || {{ code: lang, dir: lang === "ar" ? "rtl" : "ltr" }};
         document.documentElement.lang = meta.code || lang;
         document.documentElement.dir = meta.dir === "rtl" ? "rtl" : "ltr";
@@ -542,7 +542,7 @@ def render_connect_page(
       if (langSel) {{
         langSel.addEventListener("change", function () {{ applyLang(langSel.value, true); }});
       }}
-      var initLang = "ru";
+      var initLang = "en";
       try {{
         var q = new URLSearchParams(window.location.search).get("lang");
         var stored = window.localStorage.getItem("rhm_liveusb_lang");

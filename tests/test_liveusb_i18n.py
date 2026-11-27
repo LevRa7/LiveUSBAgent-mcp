@@ -100,3 +100,37 @@ def test_kiosk_ui_has_zero_untranslated_cyrillic_and_all_keys_exist():
     frozen = re.findall(r"^\s{2}const [A-Z0-9_]+ =\s*tr\(", app, re.M)
     assert frozen == [], f"Top-level frozen tr() consts in app.js: {frozen}"
 
+
+
+def test_connect_page_defaults_to_english_and_honors_lang_query():
+    html_doc = render_connect_page(
+        session_code="s1",
+        node_id="live-1234",
+        link_key="lk_abc",
+        host="demo.trycloudflare.com",
+        expires_at="2026-12-01T00:00:00Z",
+        online=True,
+        standalone=True,
+    )
+    assert '<html lang="en">' in html_doc
+    assert 'var initLang = "en";' in html_doc
+    assert 'new URLSearchParams(window.location.search).get("lang")' in html_doc
+
+
+def test_kiosk_qr_appends_selected_language():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "kiosk_server_lang_test",
+        REPO_ROOT / "ops" / "live-usb" / "kiosk_server.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod._append_lang_param("https://demo.trycloudflare.com/connect?token=abc", "de") == (
+        "https://demo.trycloudflare.com/connect?token=abc&lang=de"
+    )
+    assert mod._append_lang_param("https://gw.example.com/connect/s1", "fr") == (
+        "https://gw.example.com/connect/s1?lang=fr"
+    )
+    assert mod._append_lang_param("https://demo.trycloudflare.com/connect?token=abc", "xx") == (
+        "https://demo.trycloudflare.com/connect?token=abc"
+    )

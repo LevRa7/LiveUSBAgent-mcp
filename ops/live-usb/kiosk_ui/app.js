@@ -255,8 +255,32 @@
     });
   }
 
+  function getActiveLang() {
+    if (typeof window.rhmGetLang === "function") {
+      return window.rhmGetLang() || "en";
+    }
+    return "en";
+  }
+
+  function withSelectedLang(rawUrl) {
+    const clean = (rawUrl || "").trim();
+    if (!clean) {
+      return "";
+    }
+    const lang = getActiveLang();
+    try {
+      const parsed = new URL(clean);
+      parsed.searchParams.set("lang", lang);
+      return parsed.toString();
+    } catch (_err) {
+      const sep = clean.indexOf("?") === -1 ? "?" : "&";
+      return clean + sep + "lang=" + encodeURIComponent(lang);
+    }
+  }
+
   function refreshQrImage() {
-    els.qrImage.src = "/api/qr.svg?t=" + Date.now();
+    const lang = getActiveLang();
+    els.qrImage.src = "/api/qr.svg?t=" + Date.now() + "&lang=" + encodeURIComponent(lang);
   }
 
   function updateInternetBanner(reachable, sessionReady) {
@@ -314,7 +338,7 @@
       updateInternetBanner(internetReachable, effectiveReady);
       updateReadyPending(sessionReady, internetReachable);
 
-      const connectUrl = session.connect_url || "";
+      const connectUrl = withSelectedLang(session.connect_url || "");
       els.sessionUrl.textContent = effectiveReady && connectUrl ? connectUrl : tr("waiting_connect_url", "Ожидание ссылки подключения");
       els.sessionToken.textContent = effectiveReady && session.token ? session.token : tr("waiting_token", "Ожидание токена");
       const tunMode = session.tunnel_mode || "cloudflare";

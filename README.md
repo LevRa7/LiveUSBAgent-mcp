@@ -1,111 +1,165 @@
 # LiveUSBAgent-mcp
 
-> **Bootable Debian 13 (Trixie) LiveUSB rescue OS that turns any broken or bare-metal PC/laptop into an AI-assisted sysadmin, OS repair, and data-recovery workstation — controlled via MCP directly from Gemini, ChatGPT, or Claude.**
+> **SystemRescue / Hiren's BootCD meets MCP** — a bootable Debian 13 (Trixie) LiveUSB rescue OS that connects any broken or bare-metal PC to **Claude**, **ChatGPT**, or **Gemini** via QR code (no SSH, no accounts, no local setup).
 
-Русская версия: [README_RU.md](README_RU.md)
+**Version:** 0.1.2 — [Release Notes](docs/releases/v0.1.2.md) · [Русская версия (`README_RU.md`)](README_RU.md) · [Latest Release](https://github.com/LevRa7/LiveUSBAgent-mcp/releases/latest) · [Startup UI Guide](docs/liveusb/STARTUP_UI.md) · [Watch HD MP4 Demo](docs/liveusb/demo/liveusb-agent-demo.mp4)
 
-**Repository:** [github.com/LevRa7/LiveUSBAgent-mcp](https://github.com/LevRa7/LiveUSBAgent-mcp) (evolved from [github.com/LevRa7/remote-harness-mcp](https://github.com/LevRa7/remote-harness-mcp))
+*Standalone evolution of [remote-harness-mcp](https://github.com/LevRa7/remote-harness-mcp) built specifically for bare-metal diagnostics, offline OS repair, and data recovery.*
 
-**Version:** 0.1.2 — release notes: [docs/releases/v0.1.2.md](docs/releases/v0.1.2.md).
+![LiveUSBAgent-mcp Demo](docs/liveusb/demo/liveusb-agent-demo.gif)
 
----
+## Quick Start in 60 Seconds
 
-## What It Is & Purpose
+You do not need to build anything to try **LiveUSBAgent-mcp**. Keep one hybrid ISO on your rescue stick and boot it whenever a machine refuses to start.
 
-When a PC refuses to boot, a drive starts failing, BitLocker or LUKS locks you out, or you need to rescue files from a Windows, Linux, or macOS disk, you usually have to memorize obscure rescue commands on a bare terminal.
-
-**LiveUSBAgent-mcp** solves that for both **beginners** and **experienced sysadmins**:
-
-- **For beginners:** Plug in the USB stick, boot the broken PC, connect to Wi-Fi or tether your phone on the graphical screen, scan the QR code, and paste one link into **Gemini**, **ChatGPT**, or **Claude**. You can then describe the problem in plain language while the AI inspects disks, reads logs, and guides or executes the recovery.
-- **For sysadmins & engineers:** Get an instant, zero-config Debian 13 (Trixie) rescue environment loaded with cross-OS filesystem drivers (NTFS/BitLocker, ext4/Btrfs/XFS/F2FS/ZFS/LVM/mdadm/LUKS, HFS+/APFS), hardware/RAM diagnostics, curated `SKILL.md` playbooks, and full root MCP access over an outbound TLS WebSocket tunnel — no SSH setup, no port forwarding, and no manual agent installation.
+1. **Download the prebuilt ISO** from the [Latest GitHub Release](https://github.com/LevRa7/LiveUSBAgent-mcp/releases/latest).
+   - **Architectures**: `amd64`, `arm64`, and `i386` (Debian 12 `bookworm` `686-pae` with `lite` profile).
+   - **Profiles**: `full` (complete rescue toolkit + Kiosk GUI), `compact` (lightweight WebKit `surf` Kiosk + network firmware), or `lite` (minimal TUI-only image for older/low-RAM hardware).
+2. **Put it on a USB drive**:
+   - **Ventoy (recommended)**: drop the `.iso` directly onto your [Ventoy](https://www.ventoy.net/) partition alongside your other rescue images.
+   - **Direct flash**: write with **Rufus (DD Image mode)**, **balenaEtcher**, or `dd if=liveusb-agent.iso of=/dev/sdX bs=4M status=progress oflag=sync`.
+3. **Boot & get online**:
+   - Boot the target machine in **UEFI** or **Legacy BIOS** mode.
+   - Connect via **Ethernet**, **Wi-Fi** (including hidden SSIDs), or **iPhone / Android USB tethering** directly from the 7-language Kiosk UI.
+4. **Scan the QR code & connect your AI client**:
+   - Scan the on-screen QR code (opens `/connect/<token>` on your phone or laptop) and paste the single endpoint link into **Claude**, **ChatGPT**, or **Gemini**.
+   - Supports **Streamable HTTP** (`/mcp/<token>`), **SSE** (`/sse?token=...`), and **OAuth 2.1 (PKCE)** out of the box.
+5. **Start diagnosing with real prompts**:
 
 ```text
-  Gemini (/sse) · ChatGPT (/mcp/<token>) · Claude (/mcp/<token>, CLI or JSON)
-                          │  MCP over HTTPS (Streamable HTTP / SSE / OAuth 2.1)
-                          ▼
-        Cloudflare Quick Tunnel (*.trycloudflare.com — default, no account)
-                          │  Outbound cloudflared tunnel -> 127.0.0.1:8096
-                          ▼
-   Booted LiveUSB (Debian 13 Trixie · python3 -m core.server --liveusb --tunnel cloudflare)
-   ├─ tty1: Graphical Kiosk UI (127.0.0.1:8787) — Wi-Fi, USB tethering, SVG QR
-   ├─ tty2: Fallback console dashboard (firstboot_tui.py + nmtui + [S] Shell (bash))
-   └─ Full root MCP tools (v0.7.2 core: batch_read/edit, fs_index, read_media, git, fetch_url)
-      + read-safe rescue_info / rescue_action + SKILL.md library
+Inspect all attached disks and EFI partitions on this PC. Windows fails to boot with INACCESSIBLE_BOOT_DEVICE—check if BitLocker is enabled, inspect the BCD store read-only, and propose a safe offline repair plan before changing anything.
 ```
 
----
+```text
+This Linux workstation drops to an initramfs shell after a kernel update. Map the LUKS/LVM volumes, inspect /etc/fstab and GRUB config via read-only tools, and prepare a chroot repair plan.
+```
 
-## Key Features
+```text
+Check NVMe and SATA SMART health across all drives. If any disk shows pending/reallocated sectors, calculate the exact read-only ddrescue command and mapfile path to image it onto the external USB drive.
+```
 
-### 1. Broad Hardware, Wi-Fi & Phone USB Tethering Out of the Box
-- **Firmware & drivers (`non-free-firmware`):** Ships with `firmware-linux`, `firmware-linux-nonfree`, `firmware-misc-nonfree`, `firmware-iwlwifi` (Intel Wi-Fi 6/6E/7), `firmware-realtek`, `firmware-atheros`, `firmware-brcm80211` (Broadcom), `firmware-mediatek`, `firmware-marvell-prestera`, `firmware-qcom-soc`, `firmware-ti-connectivity`, `firmware-zd1211`, and `firmware-libertas`, plus `network-manager`, `wpasupplicant`, `iw`, `rfkill`, `ethtool`, `usb-modeswitch`, `modemmanager`, `wireguard-tools`, and `openssh-client`. Out-of-tree DKMS support includes `broadcom-sta-dkms` for older Broadcom/MacBook Wi-Fi adapters.
-- **iPhone USB Tethering (iOS):** Preinstalled `usbmuxd`, `ipheth` (`ipheth-utils`), `libimobiledevice-utils` (`idevicepair`, `ideviceinfo`), and `ifuse`. Plug in an iPhone with Personal Hotspot enabled, tap **Trust**, and NetworkManager brings up DHCP automatically.
-- **Android USB Tethering:** Built-in `rndis_host`, `cdc_ether`, and `cdc_ncm` support with `99-rhm-network-tethering.rules` so newly attached USB-Ethernet interfaces automatically acquire DHCP.
+```text
+Run a non-destructive hardware triage: inspect dmesg/journal hardware errors, thermal sensors, memory topology, and run a targeted RAM stress check without touching any internal partitions.
+```
 
-### 2. Graphical Kiosk Startup Screen + Console Fallback
-- **Kiosk UI (`tty1`):** Boots directly into a clean fullscreen Chromium kiosk over `openbox` / Xorg served locally by `ops/live-usb/kiosk_server.py` on `127.0.0.1:8787`. Features an interactive Wi-Fi scanner (`nmcli`) with **`Обновить список`** (refresh list) and **`Скрытая сеть`** (hidden SSID) controls, a password modal with an on-screen keyboard (handy for touchscreens or broken laptop keyboards), live Ethernet & USB tethering status (including an iPhone Trust prompt when unpaired), and a Ready view with a large SVG QR code, a detected-disks summary, **`Сменить Wi-Fi`** (switch Wi-Fi), and **`Новый токен`** (regenerate token).
-- **Headless / GPU Fallback (`tty2`):** `ops/live-usb/firstboot_tui.py` runs on `tty2` (switch via `Ctrl+Alt+F2`; also takes over automatically if X11 cannot start), giving full status, QR code, `nmtui` network configuration, and a local `bash` shell via `Ctrl+Alt+F2` → **`[S] Shell (bash)`**.
+## Security TL;DR
 
-### 3. Zero-Account Cloudflare Quick Tunnel Onboarding (Default)
-- As soon as the LiveUSB gets internet access, `rhm-live-agent.service` (`python3 -m core.server --liveusb --tunnel cloudflare --port 8096`) starts the local standalone MCP HTTP server and publishes it via **Cloudflare Quick Tunnel** (`cloudflared tunnel --url http://127.0.0.1:8096`) — free, no Cloudflare or Tailscale account needed, and no external VPS gateway required.
-- Generates an ephemeral token stored only in RAM (`/run/rhm-live/standalone.token`, mode `0600`) and displays a QR code pointing directly to `https://<slug>.trycloudflare.com/connect?token=<token>` (with one-paste `/mcp/<token>` and `/sse?token=<token>` links, plus OAuth 2.1 support).
-- **Important notes:** The `trycloudflare.com` URL changes on every run/restart, so re-paste the MCP link after each restart. Note: some AI providers' servers get blocked by Cloudflare's bot protection (an optional `--tunnel gateway --gateway <host>` fallback remains available if you run your own gateway).
+Booting a live OS and giving an LLM access to bare-metal hardware should make any sysadmin skeptical. Here is how the blast radius is contained by default:
 
-### 4. Out-of-the-Box Cross-OS Filesystem Support
+- **Read-only inspection first (`rescue_info`)**: All hardware, partition, SMART, filesystem, and cross-OS autorun discovery runs through strictly read-only inspection calls.
+- **Dry-run by default (`rescue_action`)**: Every mutating recovery operation defaults to `dry_run=true`—the agent returns the exact command and target device/mountpoint for review before executing with `dry_run=false`.
+- **RAM-only ephemeral credentials**: Session tokens live exclusively in RAM with a **24-hour TTL**, are wiped automatically on shutdown/reboot, and can be revoked instantly from the Kiosk UI using **New token**.
+- **No mandatory third-party relay**: Cloudflare Quick Tunnel is zero-config for convenience, or point `--tunnel gateway` to your own self-hosted [remote-harness-mcp](https://github.com/LevRa7/remote-harness-mcp) gateway (including WireGuard, OpenVPN, PPPoE, and AmneziaWG uplinks).
+- **Reproducible builds & audited skills**: Official ISOs are built transparently via Debian `live-build` in GitHub Actions, and bundled rescue skills are vetted with [NVIDIA/SkillSpector](https://github.com/NVIDIA/SkillSpector) static security scanning.
 
-| OS Family | Filesystem / Volume | Included Packages & Modules | Capabilities & Notes |
-| :--- | :--- | :--- | :--- |
-| **Cross-platform** | **exFAT** | `exfatprogs`, `exfat-fuse`, kernel `exfat` | Full R/W, `fsck.exfat`, `mkfs.exfat`. |
-| **Cross-platform** | **FAT32 / FAT16 (`vfat`)** | `dosfstools` | Full R/W, EFI System Partition (ESP) repair. |
-| **Windows** | **NTFS** | Kernel `ntfs3` + `ntfs-3g` | Full R/W via `ntfs3`; safe fallback to `ntfs-3g` (`ro` or `ntfsfix`) for dirty/hibernated volumes. |
-| **Windows** | **BitLocker** | `dislocker`, `cryptsetup` (`--type bitlk`) | Decrypt with password or 48-digit recovery key, then mount NTFS. |
-| **Linux** | **ext2 / ext3 / ext4** | `e2fsprogs` | Full R/W, `e2fsck`, `resize2fs`, `debugfs`. |
-| **Linux** | **Btrfs** | `btrfs-progs` | Full R/W, subvolumes, snapshots, `btrfs check`/`restore`. |
-| **Linux** | **XFS** | `xfsprogs` | Full R/W, `xfs_repair`, `xfs_info`. |
-| **Linux** | **F2FS** | `f2fs-tools` | Full R/W (`fsck.f2fs`, `dump.f2fs`). |
-| **Linux** | **ZFS (OpenZFS)** | `zfsutils-linux`, `zfs-dkms` | Full R/W and read-only `zpool import -f -R /mnt/rescue <pool>`. |
-| **Linux** | **LVM2 / mdadm / LUKS** | `lvm2`, `mdadm`, `cryptsetup`, `kpartx` | Manual RAID assembly, LUKS1/LUKS2 unlock, and LVM activation. |
-| **macOS** | **HFS / HFS+** | `hfsplus`, `libfshfs-utils`, kernel `hfsplus` | Safe R/O; R/W supported (`fsck.hfsplus`, `-o force,rw` for journaled volumes). |
-| **macOS** | **APFS** | `apfs-dkms`, `apfsprogs`, `apfs-fuse` (compiled from source in the chroot hook to `/usr/local/bin/apfs-fuse`), `libfsapfs-utils` | Dual-mode: native `apfs-dkms` for unencrypted APFS (default R/O; experimental R/W with warning), `apfs-fuse` (R/O) for FileVault-encrypted volumes, and `libfsapfs-utils` (`fsapfsmount`/`fsapfsinfo`) for damaged containers. |
+## Screenshots (English Kiosk UI)
 
-### 5. Built-In Progressive `SKILL.md` Library
-Instead of flooding the AI's context window with dozens of long manuals, LiveUSBAgent-mcp exposes two progressive-disclosure MCP tools (`list_skills` and `load_skill`) backed by `/opt/remote-harness-mcp/skills/`:
-- **4 custom LiveUSB recovery skills** in `skills/liveusb/`:
-  1. `windows-offline-boot-repair` — UEFI/ESP & BCD repair, offline Windows Registry (`chntpw`, `libhivex-bin`), `ntfsfix`, and BitLocker decryption.
-  2. `linux-chroot-grub-luks-rescue` — Safe `mdadm` -> `cryptsetup` -> `lvm2` assembly, `chroot`, GRUB/systemd-boot, and `initramfs` rebuilds.
-  3. `macos-apfs-hfs-recovery` — Safe data extraction from APFS (`apfs-dkms` / `apfs-fuse` for FileVault / `libfsapfs-utils`) and HFS+.
-  4. `ram-hardware-live-diagnostics` — Hardware inventory (`dmidecode`, `lshw`, `lspci`, `lsusb`, `lm-sensors`), live RAM stress testing (`memtester`), and memory capture (`/proc/kcore` works out of the box; `avml` is not preinstalled in the ISO and is optional if installed separately).
-- **LXDE desktop** — the kiosk app launcher opens a full lightweight LXDE session on t2 (Start menu, PCManFM, display/keyboard/appearance settings); Ctrl+Alt+F1 returns to the kiosk.
-- **Curated external skills (`ops/live-usb/fetch-skills.sh`):** Downloads vetted GitHub sysadmin, DevOps, storage, and recovery skills listed in `ops/live-usb/skills-manifest.json`, records exact commit SHAs in `ops/live-usb/skills-lock.json`, and scans them offline with [NVIDIA/SkillSpector](https://github.com/NVIDIA/SkillSpector) (`--recursive --no-llm`) when installed.
+The live environment launches straight into a clean touchscreen- and keyboard-friendly Kiosk UI on `tty1` (with a full TUI fallback on `tty2`). Key actions—**Refresh list**, **Hidden network**, **Switch Wi-Fi**, **New token**, **Network Settings**, and **Apps**—are accessible without opening a terminal. See [docs/liveusb/STARTUP_UI.md](docs/liveusb/STARTUP_UI.md) for the full UI walkthrough.
 
----
-
-## Screenshots
-
-| Network / no internet | Ready: QR and token |
+| Network & USB Tethering | Ready: QR Code & Detected Disks |
 | :---: | :---: |
-| ![Kiosk network view](docs/liveusb/images/kiosk-network.png) | ![Kiosk QR view](docs/liveusb/images/kiosk-ready.png) |
+| ![Network & USB Tethering](docs/liveusb/images/en/kiosk-network.png) | ![Ready: QR Code & Detected Disks](docs/liveusb/images/en/kiosk-ready.png) |
+| **Local Rescue Apps Launcher** | **Network Settings — Interfaces & IDs** |
+| ![Local Rescue Apps Launcher](docs/liveusb/images/en/kiosk-apps.png) | ![Network Settings — Interfaces & IDs](docs/liveusb/images/en/network-settings-current.png) |
+| **WireGuard / OpenVPN / PPPoE / AmneziaWG** | **Hidden Wi-Fi Modal** |
+| ![WireGuard / OpenVPN / PPPoE / AmneziaWG](docs/liveusb/images/en/network-settings-wireguard.png) | ![Hidden Wi-Fi Modal](docs/liveusb/images/en/kiosk-hidden-wifi.png) |
 
-| Applications | Network settings |
-| :---: | :---: |
-| ![Kiosk app launcher](docs/liveusb/images/kiosk-apps.png) | ![Network settings](docs/liveusb/images/network-settings-current.png) |
+## Architecture & Key Capabilities
 
-| File manager | Terminal |
-| :---: | :---: |
-| ![File manager](docs/liveusb/images/kiosk-files.png) | ![Terminal](docs/liveusb/images/kiosk-terminal.png) |
+```text
++----------------------------------+
+|  Claude / ChatGPT / Gemini       |
+|  (Streamable HTTP / SSE / OAuth) |
++----------------+-----------------+
+                 | HTTPS (Ephemeral Token, 24h TTL)
+                 v
++----------------------------------+
+|  Cloudflare Quick Tunnel         |
+|  https://<random>.trycloudflare  |
+|  (or self-hosted --tunnel gateway|
++----------------+-----------------+
+                 | Localhost MCP Bridge (127.0.0.1:8096)
+                 v
++-------------------------------------------------------------------+
+|  LiveUSBAgent-mcp — Debian 13 (Trixie) LiveUSB (RAM-only)         |
+|                                                                   |
+|  tty1: 7-Language Kiosk UI      tty2: Full TUI Fallback           |
+|  (Wi-Fi / USB Tether / QR /     (headless / low-RAM / serial)     |
+|   Network Settings / Apps)                                        |
+|                                                                   |
+|  MCP Server: 38 Tools                                             |
+|  - rescue_info (read-only)  - rescue_action (dry_run=true)        |
+|  - list_skills / load_skill (progressive SKILL.md library)        |
+|  - Core shell, file, search, async job & node control tools       |
++-------------------------------------------------------------------+
+```
 
-More screens, including pending-session and PPPoE/WireGuard/OpenVPN tabs:
-[docs/liveusb/STARTUP_UI.md](docs/liveusb/STARTUP_UI.md).
+### Supported Filesystems & Storage Stacks
 
----
+| Category | Filesystem / Stack | Tooling & Capabilities |
+| :--- | :--- | :--- |
+| **Windows / Removable** | `exFAT`, `FAT32`, `NTFS` | `ntfs3` + `ntfs-3g`, `ntfsfix`, `exfatprogs`, `dosfstools`, offline registry (`chntpw`, `libhivex-bin`) & EFI/BCD inspection |
+| **Windows Encryption** | `BitLocker` | `dislocker`, `cryptsetup --type bitlk` unlock with recovery key or password |
+| **Linux Native** | `ext2/3/4`, `Btrfs`, `XFS`, `F2FS` | `e2fsprogs`, `btrfs-progs`, `xfsprogs`, `f2fs-tools`, `fsck` & subvolume diagnostics |
+| **Enterprise / Volumes** | `ZFS`, `LVM2`, `mdadm`, `LUKS` | `zfsutils-linux` (`zfs-dkms`), `lvm2`, `mdadm`, `cryptsetup`, `kpartx` |
+| **macOS** | `HFS+`, `APFS` | `hfsplus`, `libfshfs-utils`, `apfs-dkms`, `apfs-fuse` (FileVault R/O), `libfsapfs-utils` |
 
-## Step-by-Step: Build, Flash, Boot & Use
+### Built for Real-World Field Recovery
 
-> **Prebuilt ISO:** published on the [v0.1.1 release](https://github.com/LevRa7/LiveUSBAgent-mcp/releases/tag/v0.1.1). To build it yourself, use Debian 13 (Trixie) as described below.
+- **7-language Kiosk UI**: Instant switching between English, German, Russian, French, Spanish, Arabic (RTL), and Chinese—ideal for helping family or clients remotely over a phone camera.
+- **Zero-drama connectivity**: Plug in an **iPhone** (`usbmuxd` / `ipheth` / `libimobiledevice-utils`) or **Android** phone (`rndis_host` / `cdc_ether` / `cdc_ncm`) via USB tethering when Wi-Fi drivers or routers are unavailable, or configure **WireGuard**, **OpenVPN**, **PPPoE**, and **AmneziaWG** inside **Network Settings**.
+- **Broad Wi-Fi hardware support**: Ships Debian `non-free-firmware` plus `broadcom-sta-dkms` for stubborn laptop and MacBook wireless adapters, with **Refresh list**, **Hidden network**, and **Switch Wi-Fi** controls right on screen.
+- **Progressive `SKILL.md` rescue library**: Keeps the LLM context window lean by loading domain runbooks only when needed via `list_skills` and `load_skill`:
+  - `windows-offline-boot-repair`
+  - `linux-chroot-grub-luks-rescue`
+  - `macos-apfs-hfs-recovery`
+  - `ram-hardware-live-diagnostics`
 
-### Step 1: Build the ISO (on Debian 13 Trixie)
+## Available MCP Tools & Concrete Rescue Use Cases
 
-Install the build prerequisites on a Debian 13 (Trixie) host or VM:
+**LiveUSBAgent-mcp** exposes **38 MCP tools** structured around safe inspection, guarded action, and progressive skill loading.
+
+### Rescue & Skill Tools
+
+| Tool | Mode | Purpose |
+| :--- | :--- | :--- |
+| `rescue_info` | Read-only | Inspect block devices, GPT/MBR tables, EFI entries, SMART health, filesystems (NTFS/BitLocker/LUKS/LVM/ZFS/APFS), boot logs, RAM/DIMMs, and cross-OS autoruns. |
+| `rescue_action` | Guarded (`dry_run=true` default) | Execute structured recovery operations (`mount_safe`, `mount_auto`, `umount`, `fsck_check`, `ntfs_fix`, `grub_repair`, `win_sam_reset`, `ddrescue_plan`, `chroot_exec`, `ram_test_plan`, `ram_dump_plan`) with preview before commit. |
+| `list_skills` | Read-only | Enumerate installed `SKILL.md` rescue runbooks and metadata without bloating model context. |
+| `load_skill` | Read-only | Load the full step-by-step instructions, safety checks, and reference files for a specific rescue scenario. |
+
+### Core System, File & Job Tools
+
+| Tool Group | Tools | What It Enables |
+| :--- | :--- | :--- |
+| **Mesh & Telemetry** | `mesh_status`, `system_info`, `system_vitals` | Verify uplink status, active tunnel, CPU/RAM/thermal vitals, and attached hardware topology. |
+| **Shell Execution** | `bash_exec` | Run ad-hoc Linux diagnostic utilities (`smartctl`, `nvme`, `dmidecode`, `efibootmgr`, `journalctl`, `memtester`). |
+| **File Operations** | `read_file`, `write_file`, `edit_file` | Inspect and patch `/etc/fstab`, GRUB configs, systemd units, or Windows/Linux boot logs on mounted targets. |
+| **Filesystem Search** | `list_dir`, `glob_find`, `grep_search` | Locate crash dumps, kernel logs, EFI binaries, or corrupted configuration files across mounted volumes. |
+| **Async Long Jobs** | `run_job`, `job_output`, `job_list`, `job_kill` | Run long-running `ddrescue`, `badblocks`, `testdisk`, or `memtester` sessions in the background and stream progress without tool timeouts. |
+| **Node Lifecycle** | `node_control` | Controlled access mode adjustments, working directory changes, or pause/resume once recovery is complete. |
+
+## Security Model & Safety Guardrails
+
+1. **Clear Trust Boundary**:
+   - The LiveUSB OS runs in RAM (`toram` default on >= 4 GB RAM) and never auto-mounts internal target partitions read-write.
+   - `rescue_info` is strictly read-only. Every state-changing step in `rescue_action` defaults to `dry_run=true` so you can verify target block devices (`/dev/nvme0n1p2` vs `/dev/sda1`) before approving `dry_run=false`.
+   - Physical/screen possession of the QR code and `lk_...` token is the trust boundary—treat the pairing URL like a temporary root password and never share live Kiosk QR screenshots publicly.
+   - An active uplink lock prevents accidental disconnection of the network interface carrying your live MCP tunnel while troubleshooting other NICs.
+2. **Ephemeral Credentials & Instant Revocation**:
+   - On boot, the agent generates a cryptographically random session token stored only in RAM (`/run/rhm-live/`, mode `0600`) with a **24-hour TTL**.
+   - Clicking **New token** in the Kiosk UI or performing a clean shutdown/reboot revokes the active session immediately. Powering off erases all RAM-only state.
+3. **Secure Boot & Unsigned DKMS Modules**:
+   - The image includes `shim-signed` and Debian's signed kernel, so basic boot works with Secure Boot enabled. However, optional out-of-tree DKMS drivers (`apfs-dkms`, `broadcom-sta-dkms`, `zfs`) are unsigned—disable Secure Boot in UEFI/BIOS (or enroll a MOK key) if you need APFS, Broadcom STA, or ZFS kernel modules.
+4. **Cloudflare Quick Tunnel Caveat & Self-Hosted Fallback**:
+   - By default, `--tunnel cloudflare` creates an instant `*.trycloudflare.com` endpoint with zero accounts. Occasionally, Cloudflare edge bot-protection or corporate firewalls may challenge or block `trycloudflare.com` requests from certain AI client backends.
+   - For corporate networks, strict privacy policies, or guaranteed uptime, switch to `--tunnel gateway` (or bake `--gateway <host>` into your custom ISO) to route exclusively through your own self-hosted [remote-harness-mcp](https://github.com/LevRa7/remote-harness-mcp) server.
+
+## Build from Source & Test in QEMU
+
+Every official release ISO is reproducible using Debian `live-build`. You can customize profiles, architectures, bundled skills, or a preconfigured self-hosted gateway.
+
+### Build a Custom ISO (`ops/live-usb/build-iso.sh`)
 
 ```bash
 sudo apt-get update
@@ -113,167 +167,47 @@ sudo apt-get install -y \
   live-build debootstrap squashfs-tools xorriso \
   grub-efi-amd64-bin grub-pc-bin mtools dosfstools \
   curl jq git ca-certificates
-```
 
-Configure and build the hybrid ISO (including curated external skills):
-
-```bash
 git clone https://github.com/LevRa7/LiveUSBAgent-mcp.git
 cd LiveUSBAgent-mcp
+
+# Full amd64 ISO with curated external rescue skills
 sudo ./ops/live-usb/build-iso.sh --with-external-skills --build
 ```
 
-Useful `build-iso.sh` options:
-- `--work-dir PATH` — Custom `live-build` workspace (default: `/tmp/rhm-live-build`; use e.g. `/var/tmp/rhm-live-build` if `/tmp` is small).
-- `--gateway HOST` — Mesh gateway hostname (default: `racknerd-5a24bf9.merino-carob.ts.net`).
-- `--distro NAME` / `--arch ARCH` — Debian suite and architecture (defaults: `trixie`, `amd64`).
-- Omit `--build` if you want to inspect the generated `live-build` config before running `sudo lb build` manually.
-
-The finished hybrid image (`live-image-amd64.hybrid.iso`) is written to your `WORK_DIR`.
-
-#### Optional: Test in QEMU/KVM Before Flashing
+Common `build-iso.sh` options:
 
 ```bash
-# UEFI boot with auto-created virtual test disks (exfat, ntfs, ext4, btrfs, xfs, vfat)
-./ops/live-usb/test-qemu.sh --mode uefi --create-fs-disks
+# Compact WebKit Kiosk image (smaller footprint, network firmware included)
+sudo ./ops/live-usb/build-iso.sh --profile compact --arch amd64 --build
 
-# Legacy BIOS and Low-RAM (< 4 GB) check
-./ops/live-usb/test-qemu.sh --mode bios --ram 2048
+# Minimal TUI-only image for legacy 32-bit x86 machines (Debian 12 bookworm 686-pae)
+sudo ./ops/live-usb/build-iso.sh --profile lite --arch i386 --build
 
-# Headless serial-console mode for CI or previewing the exact QEMU command
-./ops/live-usb/test-qemu.sh --headless --create-fs-disks
-./ops/live-usb/test-qemu.sh --dry-run --mode uefi --create-fs-disks
+# ARM64 build with custom work directory and preconfigured self-hosted gateway
+sudo ./ops/live-usb/build-iso.sh \
+  --profile full \
+  --arch arm64 \
+  --work-dir /var/tmp/rhm-live-build \
+  --gateway your-gateway.example.com \
+  --build
 ```
 
-*(Requires `qemu-system-x86`, `ovmf`, and filesystem tools `exfatprogs`, `ntfs-3g`, `e2fsprogs`, `btrfs-progs`, `xfsprogs`, `dosfstools`.)*
+### Boot & Test Locally in QEMU (`ops/live-usb/test-qemu.sh`)
 
----
+Validate boot flow, Kiosk UI, and multi-filesystem recovery against synthetic test disks without touching real hardware:
 
-### Step 2: Flash the ISO to a USB Drive
+```bash
+# UEFI boot with auto-generated test disks (exFAT, FAT32, NTFS, ext4, Btrfs, XFS)
+./ops/live-usb/test-qemu.sh --mode uefi --create-fs-disks
 
-The ISO is hybrid (**UEFI + Legacy BIOS**). Choose whichever tool fits your OS:
+# Legacy BIOS boot with 2 GB RAM (great for verifying compact/lite profiles)
+./ops/live-usb/test-qemu.sh --mode bios --ram 2048
 
-- **Ventoy (recommended for multi-boot USBs):** Install [Ventoy](https://www.ventoy.net/) onto a USB stick and copy the `.iso` file straight onto the Ventoy partition. If normal mode has issues on a specific machine, choose **Grub2 mode** in the Ventoy menu.
-- **Rufus (Windows):** Select your USB drive and the `.iso` file, then click **START**. When prompted, choose **Write in DD Image mode** to preserve the hybrid UEFI/BIOS partition layout.
-- **balenaEtcher (Windows / Linux / macOS):** Click **Flash from file**, pick the `.iso`, select your target USB drive, and click **Flash!**.
-- **`dd` (Linux / macOS):** Verify the target device with `lsblk` (Linux) or `diskutil list` (macOS), then write to the whole disk (not a partition):
-  ```bash
-  sudo dd if=/tmp/rhm-live-build/live-image-amd64.hybrid.iso of=/dev/sdX bs=4M status=progress oflag=sync
-  sync
-  ```
+# Headless serial console test for CI or SSH-only dev boxes
+./ops/live-usb/test-qemu.sh --mode uefi --headless --create-fs-disks
+```
 
----
+## Contributing & License
 
-### Step 3: Boot from USB (UEFI / BIOS, Secure Boot & GRUB Menu)
-
-1. Insert the USB drive, power on the target PC, and open its boot menu (`F12`, `F8`, `F11`, `Esc`, or `Option` on Intel Macs).
-2. **Secure Boot note:** The image includes `shim-signed` and Debian's signed kernel, so basic boot works with Secure Boot enabled. However, **unsigned out-of-tree DKMS kernel modules** — specifically `apfs-dkms` (Apple APFS), `zfs` (OpenZFS), and `broadcom-sta-dkms` (some Broadcom Wi-Fi cards) — will be blocked by the kernel while Secure Boot is on. Disable Secure Boot in UEFI/BIOS (or enroll a MOK key) if you need APFS, ZFS, or Broadcom Wi-Fi.
-3. Choose an entry in the **GRUB boot menu**:
-   - **`Remote-Harness LiveUSB (Load to RAM / toram, >= 4 GB RAM)`** *(default)* — Copies `filesystem.squashfs` completely into RAM. Fast, responsive, and lets you unplug the USB stick after boot.
-   - **`Remote-Harness LiveUSB (Low RAM < 4 GB, boot from USB)`** — Reads SquashFS directly from the USB drive to conserve RAM. **Keep the USB stick plugged in** until shutdown.
-   - **`Memtest86+`** — Standalone pre-boot memory hardware tester (works on both UEFI and Legacy BIOS).
-
----
-
-### Step 4: Connect to the Internet
-
-Once the Kiosk screen appears on `tty1`:
-- **Ethernet:** Plug in a cable — DHCP connects automatically.
-- **iPhone USB Tethering:** Enable **Personal Hotspot** on your iPhone, connect via USB, unlock the phone, and tap **Trust This Computer** (enter passcode). The Kiosk screen prompts you if pairing is still pending.
-- **Android USB Tethering:** Connect via USB and toggle **USB Tethering** in Android network settings — DHCP connects automatically.
-- **Wi-Fi:** Pick your network on the Kiosk screen (click **`Обновить список`** to rescan or **`Скрытая сеть`** to connect to a hidden SSID), and enter the password using your keyboard or the built-in on-screen keyboard.
-- **Console fallback / local shell:** Press `Ctrl+Alt+F2` for `firstboot_tui.py`, where you can launch `nmtui` or open a local `bash` shell via **`[S] Shell (bash)`**.
-
----
-
-### Step 5: Pair with Gemini, ChatGPT, or Claude
-
-As soon as the LiveUSB is online, the Kiosk Ready screen displays a large **SVG QR code**, short pairing URL (`https://<gateway>/connect/<session_code>`), detected-disks summary, **`Сменить Wi-Fi`**, and **`Новый токен`**:
-
-1. **Scan the QR code** with your phone or open the URL on another device.
-2. **Copy the MCP URL or config** for your AI client:
-   - **Gemini (Web / Mobile):** Copy the **`/sse`** URL (`https://<gateway>/sse?user=<live_node_id>&token=<lk_...>`) and add it as an MCP connector.
-   - **ChatGPT:** Copy the **`/mcp`** URL (`https://<gateway>/mcp?user=<live_node_id>&token=<lk_...>`) and add it under Custom MCP Servers.
-   - **Claude (Claude.ai Custom Connectors / Claude Desktop / Claude Code):** Copy the **`/mcp`** URL, the `claude mcp add --transport http ...` CLI command, or the one-click `mcpServers` JSON snippet shown on `/connect/<session_code>`.
-3. **Start with a first prompt:**
-   - *"Check `mesh_status` and run `rescue_info` (`summary`) to show me all disks, partitions, and detected operating systems."*
-   - *"My Windows PC won't boot. Load the `windows-offline-boot-repair` skill and inspect the EFI partition and NTFS health read-only first."*
-   - *"Check SMART health and kernel I/O errors (`dmesg_io`) on `/dev/nvme0n1`, then prepare a safe `ddrescue` plan to my external drive."*
-   - *"Run `rescue_info` with `ram_info` and show all DIMM slots, ECC status, and available RAM."*
-
----
-
-## Available MCP Tools & Use Cases
-
-### LiveUSB-Specific Tools
-
-| Tool | Purpose | Key Parameters / Capabilities |
-| :--- | :--- | :--- |
-| `rescue_info` | **Read-only** hardware, disk, OS, RAM, and driver diagnostics (never modifies disks). | `section`: `summary`, `all`, `disks`, `smart`, `partitions`, `raid_lvm`, `installed_os`, `boot_efi`, `win_artifacts`, `dmesg_io`, `ram_info`, `filesystems`; optional `device`, `timeout_sec`. |
-| `rescue_action` | Controlled recovery actions with mandatory `dry_run=true` default preview. | `action`: `mount_safe`, `mount_auto`, `umount`, `fsck_check`, `ntfs_fix`, `grub_repair`, `win_sam_reset`, `ddrescue_plan`, `chroot_exec`, `ram_test_plan`, `ram_dump_plan`. Supports `writable` (default `false`), `fstype`, `encrypted`, `mapper_name`, `pool_name`, `recovery_key`, `target_image`, `output_path`, `method` (`kcore` works out of the box; `avml` is optional if installed separately). |
-| `list_skills` | Progressive discovery of installed `SKILL.md` playbooks (returns compact metadata only). | Optional filters: `category` (e.g. `recovery`, `sysadmin`), `query`, `os` (`linux`, `windows`, `macos`). |
-| `load_skill` | Loads full instructions for a skill or a specific file from its `references/` directory. | `name` (required), optional `reference_file` (path-traversal protected). |
-
-### Core System, File & Background Job Tools
-
-| Tool | Purpose |
-| :--- | :--- |
-| `mesh_status` | Verify node connectivity, active session, and reachability. |
-| `system_info` | Host summary: OS, kernel, CPU, memory, disks, load, and top processes. |
-| `system_vitals` | Real-time CPU, RAM, and disk utilization metrics. |
-| `bash_exec` | Run shell commands directly on the LiveUSB host as `root`. |
-| `read_file` / `write_file` / `edit_file` | Read line-numbered files, write files atomically, or apply exact string replacements. |
-| `list_dir` / `glob_find` / `grep_search` | Browse directories, find files by glob pattern, and recursively search file contents. |
-| `run_job` / `job_output` / `job_list` / `job_kill` | Run long tasks (`ddrescue`, `memtester`, `fsck`, `rsync`) in the background, stream logs, list, or stop them. |
-| `node_control` | Inspect or adjust node settings (access mode, working directory, pause/resume). |
-
-### Concrete Rescue Use Cases
-
-- **Windows Unbootable / BitLocker Repair:** Detect Windows partitions and EFI entries via `rescue_info(boot_efi, win_artifacts)`, unlock BitLocker volumes with `dislocker` or `cryptsetup --type bitlk`, clear dirty NTFS flags (`ntfs_fix`), or edit offline Registry hives (`chntpw`, `libhivex-bin`) guided by `windows-offline-boot-repair`.
-- **Linux GRUB / LUKS / LVM / RAID Chroot Rescue:** Inspect arrays with `rescue_info(raid_lvm)`, assemble `mdadm`, unlock LUKS, activate LVM volume groups, chroot via `chroot_exec`, and repair GRUB or rebuild `initramfs` guided by `linux-chroot-grub-luks-rescue`.
-- **macOS APFS / HFS+ Data Extraction:** Mount unencrypted APFS read-only with `apfs-dkms`, unlock FileVault APFS volumes read-only with `apfs-fuse`, inspect damaged containers with `libfsapfs-utils`, or extract data from HFS+ (`hfsplus` / `libfshfs-utils`) guided by `macos-apfs-hfs-recovery`.
-- **Failing Disk `ddrescue` Imaging:** Check `dmesg_io` and `smart` before mounting anything, mount damaged filesystems `ro,noload` via `mount_safe`, or generate a resumable `gddrescue` plan (`ddrescue_plan`) with a mapfile writing strictly to non-volatile external storage.
-- **RAM & Hardware Diagnostics:** Inventory DIMM modules, ECC error counters (`edac-utils`), PCI/USB devices, and temperatures (`lm-sensors`); run live memory stress tests (`ram_test_plan` -> `memtester`), capture physical memory (`ram_dump_plan` -> `/proc/kcore` works out of the box; `avml` is not preinstalled and is optional if installed separately), or reboot into `Memtest86+` from GRUB.
-
----
-
-## Security Model & Safety Guardrails
-
-LiveUSBAgent-mcp is designed to be transparent about both its power and its built-in protections:
-
-### 1. Full Root Access & Trust Boundary
-- On a booted LiveUSB, `rhm-live-agent.service` runs as `root` with `MESH_SCENARIO=live_usb`, `MESH_ACCESS_MODE=full`, and `MESH_WORKSPACE=/` so the AI can immediately diagnose hardware, mount partitions, and repair operating systems without blocking on local approval prompts.
-- **Physical/screen possession of the QR code and `lk_...` token is the trust boundary.** Treat the pairing URL and token on screen like a temporary root password — do not share screenshots of the Kiosk QR code publicly.
-
-### 2. Ephemeral Credentials & Session Lifecycle
-- Credentials are generated per boot in RAM (`/run/rhm-live/`) with a **24-hour TTL**.
-- Clicking **`Новый токен`** (token regeneration) in the Kiosk UI or a graceful agent exit (`atexit` on clean shutdown/reboot) calls `/v1/liveusb/revoke` on the gateway to invalidate the active session and `lk_...` key immediately; a hard power-off falls back to the 24-hour TTL.
-- The gateway enforces a `LIVEUSB_MAX_ACTIVE` cap on concurrent ephemeral LiveUSB sessions.
-- The local UI state file (`session.json`) is written with strict **`0600`** permissions and intentionally **excludes `device_token`** so the tunnel credential is never exposed to the Kiosk frontend.
-
-### 3. Storage & OS Safety Guards
-- **No silent automounting:** `/etc/udev/rules.d/99-rhm-no-automount.rules` disables automatic mounting at boot so failing or dirty disks are never touched before inspection.
-- **No automatic LVM/RAID activation:** `/etc/lvm/lvm.conf` (`auto_activation_volume_list = []`) and `/etc/mdadm/mdadm.conf` (`AUTO -all`) prevent the kernel from auto-assembling degraded host arrays on boot.
-- **Dry-run & read-only defaults:** `rescue_action` defaults to `dry_run=True` (previewing exact commands before execution) and `writable=False` (`ro,noload` for `mount_safe`).
-- **Mountpoint restrictions:** `rescue_action` restricts target mount directories to `/mnt/rescue/*` and `/mnt/scratch/*`.
-- **Volatile RAM-disk write refusal:** Before creating disk images (`ddrescue_plan`) or RAM dumps (`ram_dump_plan`), `core/rescue.py` inspects `/proc/mounts` and refuses destinations on volatile `tmpfs`, `ramfs`, `overlay`, `squashfs`, or `devtmpfs` filesystems (including `/tmp`, `/run`, and `/var/tmp`) to prevent crashing a `toram` session via OOM. Also caps `journald` to `50M` volatile RAM (`Storage=volatile`, `SystemMaxUse=50M`).
-- **APFS read-only policy:** `mount_auto` always mounts APFS read-only; encrypted FileVault volumes use read-only `apfs-fuse`. The experimental `linux-apfs-rw` write path is not exposed by `rescue_action` (a `writable=true` request is downgraded to `ro` with a warning), so the tool never writes to an APFS volume.
-
-### 4. Network, UI & Skill Safety
-- **Active uplink protection (`active_uplink_lock`):** Protects the active default-route interface carrying the WebSocket tunnel from accidental disconnection during network troubleshooting.
-- **Hardened loopback-only Kiosk server:** `ops/live-usb/kiosk_server.py` binds strictly to `127.0.0.1:8787` (never exposed on LAN/WAN) and enforces loopback `Host`, `Origin`, and CSRF checks on mutating endpoints.
-- **Hardened `/connect/<session_code>` pairing page:** Served by the gateway with non-wildcard CORS, a per-response CSP nonce, and `X-Frame-Options: DENY` to prevent clickjacking and cross-origin token theft.
-- **Strict transport hardening:** Outbound agent-to-gateway HTTP calls enforce **TLS 1.2+** with HTTP redirects disabled.
-- **Path-traversal rejection:** `load_skill` validates every `reference_file` path and rejects `..` traversal or absolute paths outside the skill's `references/` directory.
-- **Offline skill security scanning:** External skills fetched by `ops/live-usb/fetch-skills.sh` are commit-SHA pinned in `ops/live-usb/skills-lock.json` and scanned offline with `SkillSpector` (`--recursive --no-llm`) against prompt injection and tool poisoning.
-
----
-
-## Additional Documentation
-
-- **LiveUSB ISO build & QEMU testing guide:** [ops/live-usb/README.md](ops/live-usb/README.md)
-- **LiveUSB build, write and boot guide:** [docs/liveusb/README.md](docs/liveusb/README.md)
-- **Kiosk startup screens (network vs QR):** [docs/liveusb/STARTUP_UI.md](docs/liveusb/STARTUP_UI.md)
-- **LiveUSB troubleshooting (no Wi-Fi, no tunnel, I/O errors, RAM OOM):** [docs/liveusb/TROUBLESHOOTING.md](docs/liveusb/TROUBLESHOOTING.md)
-- **Russian README:** [README_RU.md](README_RU.md)
-- **Architecture & development roadmap:** [ProjectPlan.md](ProjectPlan.md)
+Issues, pull requests, new `SKILL.md` rescue runbooks, and hardware compatibility reports are welcome on [GitHub](https://github.com/LevRa7/LiveUSBAgent-mcp). If you also want an always-on MCP agent for running Windows, Linux, macOS, or Android (Termux) machines, check out the sibling project [remote-harness-mcp](https://github.com/LevRa7/remote-harness-mcp).

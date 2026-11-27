@@ -11,7 +11,7 @@
     "README.md"
   ],
   "dependencies": {
-    "remote-harness-mcp": "^0.2.0"
+    "remote-harness-mcp": "^0.2.1"
   },
   "keywords": [
     "gemini",

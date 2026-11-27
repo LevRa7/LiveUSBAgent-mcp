@@ -835,11 +835,15 @@ def test_a_source_that_hangs_times_out_inside_the_deadline(fake_platform, monkey
         return -1, ""
 
     monkeypatch.setattr(device, "_run", hang)
+    before_threads = {t.ident for t in threading.enumerate()}
     started = time.monotonic()
     try:
         blocks = device.collect(["network", "battery", "time"], deadline=0.8, fresh=True)
     finally:
         release.set()
+        for thread in threading.enumerate():
+            if thread.ident not in before_threads and thread.name.startswith("device-collect"):
+                thread.join(timeout=2.0)
     elapsed = time.monotonic() - started
 
     assert set(blocks) == {"network", "battery", "time"}

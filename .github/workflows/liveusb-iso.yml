@@ -164,7 +164,7 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             git ca-certificates python3 \
             live-build debootstrap squashfs-tools xorriso \
-            ${{ matrix.grub_pkgs }} mtools dosfstools curl jq
+            ${{ matrix.grub_pkgs }} mtools dosfstools cpio curl jq
 
       - uses: actions/checkout@v4
 

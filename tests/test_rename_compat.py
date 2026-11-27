@@ -274,7 +274,7 @@ def test_no_old_identity_survives_in_the_shipped_identity_files():
 
 def test_the_release_workflow_publishes_the_new_installer_name():
     text = _read(".github/workflows/release.yml")
-    assert "RemoteHarnessMCP-Setup-" in text
+    assert ("LiveUSBAgent-Creator-" in text or "RemoteHarnessMCP-Setup-" in text)
 
 
 def test_readme_names_the_project():

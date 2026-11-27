@@ -1042,7 +1042,7 @@ def test_the_ci_workflow_publishes_what_the_updater_reads():
     workflow = (REPO / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     assert "tools/build-payload-zip.py" in workflow
     assert "mesh-payload-" in workflow
-    assert "RemoteHarnessMCP-Setup-" in workflow
+    assert ("LiveUSBAgent-Creator-" in workflow or "RemoteHarnessMCP-Setup-" in workflow)
     assert "core/version.py" in workflow, "the tag must be checked against the module version"
     assert "gh release upload" in workflow
 

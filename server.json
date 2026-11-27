@@ -3,7 +3,7 @@
   "name": "io.github.LevRa7/LiveUSBAgent-mcp",
   "title": "LiveUSBAgent-mcp",
   "description": "Bootable Debian 13 LiveUSB rescue OS with 38 MCP tools for AI-assisted bare-metal recovery.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "repository": {
     "url": "https://github.com/LevRa7/LiveUSBAgent-mcp",
     "source": "github"

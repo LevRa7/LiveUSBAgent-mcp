@@ -119,7 +119,29 @@ if ! wait_for_server; then
     fallback_tui
 fi
 
-# 2. Pick browser binary
+# 2. If a graphical display manager (e.g. lightdm/LXDE in the full profile) is
+# installed/active, it owns :0 and launches /etc/xdg/autostart/rhm-kiosk-browser.desktop
+# (rhm-open-kiosk-browser) inside the window manager. Keep kiosk_server.py running
+# without competing for :0 or falling back to TUI (which would kill the server).
+display_manager_active() {
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl is-active --quiet display-manager 2>/dev/null || systemctl is-enabled --quiet lightdm 2>/dev/null; then
+            return 0
+        fi
+    fi
+    if command -v pgrep >/dev/null 2>&1 && pgrep -x lightdm >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+if [[ -z "${X11_WAS_RUNNING}" ]] && display_manager_active; then
+    echo "[rhm-kiosk] Display manager active; keeping kiosk_server.py alive on ${KIOSK_URL} (XDG autostart opens browser)." >&2
+    wait "${SERVER_PID}"
+    exit $?
+fi
+
+# 3. Pick browser binary
 BROWSER_BIN="$(find_browser || true)"
 if [[ -z "${BROWSER_BIN}" ]]; then
     echo "[rhm-kiosk] No Chromium or WebKitGTK browser found." >&2

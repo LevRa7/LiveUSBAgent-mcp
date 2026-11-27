@@ -375,6 +375,26 @@ def test_build_iso_ships_service_toolkit_packages() -> None:
         )
 
 
+def test_build_iso_installs_xdg_autostart_for_kiosk_browser() -> None:
+    """LXDE/lightdm desktop must automatically open Chromium to http://127.0.0.1:8787."""
+    build_text = (REPO_ROOT / "ops" / "live-usb" / "build-iso.sh").read_text(encoding="utf-8")
+    autostart_sh = (REPO_ROOT / "ops" / "live-usb" / "open-kiosk-browser.sh").read_text(encoding="utf-8")
+    start_kiosk = (REPO_ROOT / "ops" / "live-usb" / "start-kiosk.sh").read_text(encoding="utf-8")
+
+    assert "/etc/xdg/autostart/rhm-kiosk-browser.desktop" in build_text
+    assert "Exec=/usr/local/bin/rhm-open-kiosk-browser" in build_text
+    assert "open-kiosk-browser.sh" in build_text
+
+    assert "127.0.0.1" in autostart_sh
+    assert "8787" in autostart_sh
+    assert "xhost +SI:localuser:root" in autostart_sh
+    assert "chromium" in autostart_sh
+    assert "/tmp/rhm-kiosk-profile-$(id -u)" in autostart_sh
+
+    assert "display_manager_active" in start_kiosk
+    assert 'wait "${SERVER_PID}"' in start_kiosk
+
+
 NETWORK_SETTINGS_PACKAGES = (
     "ppp",
     "wireguard-tools",

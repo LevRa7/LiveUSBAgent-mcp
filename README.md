@@ -6,7 +6,7 @@
 
 **Repository:** [github.com/LevRa7/LiveUSBAgent-mcp](https://github.com/LevRa7/LiveUSBAgent-mcp) (evolved from [github.com/LevRa7/remote-harness-mcp](https://github.com/LevRa7/remote-harness-mcp))
 
-**Version:** 0.1.0 — release notes: [docs/releases/v0.1.0.md](docs/releases/v0.1.0.md).
+**Version:** 0.1.1 — release notes: [docs/releases/v0.1.1.md](docs/releases/v0.1.1.md).
 
 ---
 
@@ -101,7 +101,7 @@ More screens, including pending-session and PPPoE/WireGuard/OpenVPN tabs:
 
 ## Step-by-Step: Build, Flash, Boot & Use
 
-> **Prebuilt ISO:** published on the [v0.1.0 release](https://github.com/LevRa7/LiveUSBAgent-mcp/releases/tag/v0.1.0). To build it yourself, use Debian 13 (Trixie) as described below.
+> **Prebuilt ISO:** published on the [v0.1.1 release](https://github.com/LevRa7/LiveUSBAgent-mcp/releases/tag/v0.1.1). To build it yourself, use Debian 13 (Trixie) as described below.
 
 ### Step 1: Build the ISO (on Debian 13 Trixie)
 

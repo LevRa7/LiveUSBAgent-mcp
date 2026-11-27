@@ -121,6 +121,7 @@ check_assets() {
         "ops/live-usb/start-kiosk.sh"
         "ops/live-usb/start-lxde.sh"
         "ops/live-usb/open-files.sh"
+        "ops/live-usb/open-kiosk-browser.sh"
         "ops/live-usb/firstboot_tui.py"
         "ops/live-usb/udev/99-rhm-network-tethering.rules"
         "ops/live-usb/udev/99-rhm-no-automount.rules"
@@ -133,6 +134,7 @@ check_assets() {
         "ops/live-usb/start-kiosk.sh"
         "ops/live-usb/start-lxde.sh"
         "ops/live-usb/open-files.sh"
+        "ops/live-usb/open-kiosk-browser.sh"
         "ops/live-usb/fetch-skills.sh"
         "ops/live-usb/test-qemu.sh"
         "ops/live-usb/hooks/0100-build-apfs-and-drivers.hook.chroot"
@@ -721,7 +723,21 @@ cp "${REPO_ROOT}/ops/live-usb/firstboot_tui.py" "${CHROOT_OPT}/ops/live-usb/"
 mkdir -p config/includes.chroot/usr/local/bin
 cp "${REPO_ROOT}/ops/live-usb/open-files.sh" config/includes.chroot/usr/local/bin/rhm-open-files
 cp "${REPO_ROOT}/ops/live-usb/start-lxde.sh" config/includes.chroot/usr/local/bin/rhm-open-desktop
-chmod 0755 "${CHROOT_OPT}/ops/live-usb/start-kiosk.sh" "${CHROOT_OPT}/ops/live-usb/firstboot_tui.py" config/includes.chroot/usr/local/bin/rhm-open-files config/includes.chroot/usr/local/bin/rhm-open-desktop
+cp "${REPO_ROOT}/ops/live-usb/open-kiosk-browser.sh" config/includes.chroot/usr/local/bin/rhm-open-kiosk-browser
+chmod 0755 "${CHROOT_OPT}/ops/live-usb/start-kiosk.sh" "${CHROOT_OPT}/ops/live-usb/firstboot_tui.py" config/includes.chroot/usr/local/bin/rhm-open-files config/includes.chroot/usr/local/bin/rhm-open-desktop config/includes.chroot/usr/local/bin/rhm-open-kiosk-browser
+
+# XDG autostart entry so LXDE / lightdm automatically opens http://127.0.0.1:8787
+# in Chromium immediately after desktop startup for Wi-Fi setup and QR scanning.
+mkdir -p config/includes.chroot/etc/xdg/autostart
+cat <<'EOF' > config/includes.chroot/etc/xdg/autostart/rhm-kiosk-browser.desktop
+[Desktop Entry]
+Type=Application
+Name=Remote-Harness LiveUSB Kiosk
+Comment=Open LiveUSB Wi-Fi and QR onboarding UI
+Exec=/usr/local/bin/rhm-open-kiosk-browser
+Terminal=false
+X-GNOME-Autostart-enabled=true
+EOF
 
 echo "[4/7] Installing udev rules and chroot build hooks..."
 mkdir -p config/includes.chroot/etc/udev/rules.d

@@ -660,12 +660,21 @@ openvpn
 network-manager-openvpn
 EOF
 
-# Apply architecture and profile filtering to config/package-lists/rhm-rescue.list.chroot
+# Apply architecture, distro, and profile filtering to config/package-lists/rhm-rescue.list.chroot
 PKG_LIST="config/package-lists/rhm-rescue.list.chroot"
 drop_pkg() {
     local pkg="$1"
-    sed -i -E "/^[[:space:]]*${pkg}[[:space:]]*$/d" "${PKG_LIST}"
+    # Use fixed-string comparison (not regex) so names like "memtest86+" or "g++"
+    # are matched literally instead of treating '+' as a regex quantifier.
+    awk -v target="${pkg}" '{ line=$0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", line); if (line != target) print }' "${PKG_LIST}" > "${PKG_LIST}.tmp" \
+        && mv "${PKG_LIST}.tmp" "${PKG_LIST}"
 }
+if [[ "${DISTRO}" == "bookworm" ]]; then
+    # Split out of firmware-misc-nonfree only in Debian 13 (trixie); absent in bookworm.
+    for p in firmware-mediatek firmware-marvell-prestera; do
+        drop_pkg "${p}"
+    done
+fi
 if [[ "${ARCH}" == "arm64" ]]; then
     for p in grub-pc-bin memtest86+ mbr intel-microcode amd64-microcode cpuid msr-tools; do
         drop_pkg "${p}"
@@ -739,6 +748,55 @@ Terminal=false
 X-GNOME-Autostart-enabled=true
 EOF
 
+# Disable Chromium's desktop keyring prompt globally on LiveUSB (autologin leaves
+# gnome-keyring locked, so Chromium would otherwise ask to create a new keyring password).
+mkdir -p config/includes.chroot/etc/chromium.d
+cat <<'EOF' > config/includes.chroot/etc/chromium.d/rhm-no-keyring
+# LiveUSB runs in RAM with autologin; skip gnome-keyring password prompt.
+export CHROMIUM_FLAGS="${CHROMIUM_FLAGS:-} --password-store=basic --no-first-run"
+EOF
+
+# Helper run at boot (after live-config creates the live user, before lightdm) so
+# logging out of LXDE never traps the user on a LightDM password prompt.
+cat <<'EOF' > config/includes.chroot/usr/local/bin/rhm-configure-live-login
+#!/usr/bin/env bash
+set -u
+
+LIVE_USER="user"
+if ! id "${LIVE_USER}" >/dev/null 2>&1; then
+    LIVE_USER="$(awk -F: '$3 >= 1000 && $3 < 65534 { print $1; exit }' /etc/passwd || true)"
+fi
+if [[ -z "${LIVE_USER}" ]]; then
+    exit 0
+fi
+
+# 1. Allow passwordless re-login via LightDM (nopasswdlogin group + PAM rule).
+groupadd -f nopasswdlogin 2>/dev/null || true
+usermod -aG nopasswdlogin "${LIVE_USER}" 2>/dev/null || true
+
+if [[ -f /etc/pam.d/lightdm ]] && ! grep -q "nopasswdlogin" /etc/pam.d/lightdm; then
+    sed -i '1i auth sufficient pam_succeed_if.so user ingroup nopasswdlogin' /etc/pam.d/lightdm
+fi
+
+# 2. Ensure LightDM shows the user list and keeps autologin configured.
+mkdir -p /etc/lightdm/lightdm.conf.d
+cat <<LDEOF > /etc/lightdm/lightdm.conf.d/99-rhm-live.conf
+[Seat:*]
+autologin-user=${LIVE_USER}
+autologin-user-timeout=0
+greeter-hide-users=false
+allow-guest=false
+LDEOF
+
+# 3. Disable screen lockers (light-locker / xscreensaver) so idle never asks for a password.
+for locker in /etc/xdg/autostart/light-locker.desktop /etc/xdg/autostart/xscreensaver.desktop; do
+    if [[ -f "${locker}" ]]; then
+        rm -f "${locker}" 2>/dev/null || true
+    fi
+done
+EOF
+chmod 0755 config/includes.chroot/usr/local/bin/rhm-configure-live-login
+
 echo "[4/7] Installing udev rules and chroot build hooks..."
 mkdir -p config/includes.chroot/etc/udev/rules.d
 cp "${REPO_ROOT}/ops/live-usb/udev/99-rhm-network-tethering.rules" \
@@ -793,11 +851,12 @@ EOF
 # tty1 kiosk as a systemd service: live-config may create a default "user" and
 # take over getty@tty1, which left the kiosk on a plain login prompt. The service
 # owns tty1 directly, starts start-kiosk.sh as root, and masks getty@tty1.
+# NOTE: Do NOT wait on network-online.target — kiosk_server.py binds strictly to
+# 127.0.0.1:8787 and is used to configure Wi-Fi before any network is online.
 cat <<EOF > config/includes.chroot/etc/systemd/system/rhm-live-kiosk.service
 [Unit]
 Description=Remote-Harness MCP Live USB Kiosk
-After=systemd-user-sessions.service network-online.target
-Wants=network-online.target
+After=local-fs.target systemd-user-sessions.service
 Conflicts=getty@tty1.service
 StartLimitIntervalSec=0
 
@@ -816,8 +875,24 @@ TTYReset=yes
 TTYVHangup=yes
 TTYVTDisallocate=yes
 ExecStart=/opt/remote-harness-mcp/ops/live-usb/start-kiosk.sh
-Restart=on-failure
+Restart=always
 RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Configure passwordless LightDM re-login after live-config creates the live user.
+cat <<'EOF' > config/includes.chroot/etc/systemd/system/rhm-live-nopasswd.service
+[Unit]
+Description=Remote-Harness LiveUSB Passwordless Re-Login Setup
+After=local-fs.target live-config.service
+Before=display-manager.service lightdm.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rhm-configure-live-login
+RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
@@ -855,6 +930,8 @@ ln -sf /etc/systemd/system/rhm-live-agent.service \
     config/includes.chroot/etc/systemd/system/multi-user.target.wants/rhm-live-agent.service
 ln -sf /etc/systemd/system/rhm-live-kiosk.service \
     config/includes.chroot/etc/systemd/system/multi-user.target.wants/rhm-live-kiosk.service
+ln -sf /etc/systemd/system/rhm-live-nopasswd.service \
+    config/includes.chroot/etc/systemd/system/multi-user.target.wants/rhm-live-nopasswd.service
 
 # The kiosk service owns tty1; mask the autologin getty that live-config creates.
 mkdir -p config/includes.chroot/etc/systemd/system

@@ -934,3 +934,72 @@ def test_cross_component_gateway_bootstrap_kiosk_contract(tmp_path: Path, monkey
         gateway.liveusb_revoked_sessions.clear()
         gateway.active_tunnels.clear()
         gateway.active_sse_subscribers.clear()
+
+
+def test_kiosk_service_does_not_block_on_network_online_and_restarts_always() -> None:
+    """Kiosk HTTP server (127.0.0.1:8787) must start before network-online and always restart."""
+    build_text = BUILD_ISO_SH.read_text(encoding="utf-8")
+    kiosk_unit = build_text.split(
+        "cat <<EOF > config/includes.chroot/etc/systemd/system/rhm-live-kiosk.service\n", 1
+    )[1].split("\nEOF\n", 1)[0]
+    assert "network-online.target" not in kiosk_unit
+    assert "Restart=always" in kiosk_unit
+
+    autostart_sh = (LIVEUSB_DIR / "open-kiosk-browser.sh").read_text(encoding="utf-8")
+    assert "systemctl start rhm-live-kiosk.service" in autostart_sh
+
+
+def test_chromium_disables_keyring_password_prompt() -> None:
+    """LiveUSB Chromium launches must pass --password-store=basic and install /etc/chromium.d drop-in."""
+    build_text = BUILD_ISO_SH.read_text(encoding="utf-8")
+    autostart_sh = (LIVEUSB_DIR / "open-kiosk-browser.sh").read_text(encoding="utf-8")
+    start_kiosk = START_KIOSK_SH.read_text(encoding="utf-8")
+
+    assert "--password-store=basic" in autostart_sh
+    assert "--password-store=basic" in start_kiosk
+    assert "config/includes.chroot/etc/chromium.d/rhm-no-keyring" in build_text
+
+
+def test_build_iso_configures_passwordless_lightdm_relogin() -> None:
+    """Logging out of LXDE must allow passwordless re-login via nopasswdlogin + LightDM config."""
+    build_text = BUILD_ISO_SH.read_text(encoding="utf-8")
+    assert "rhm-configure-live-login" in build_text
+    assert "rhm-live-nopasswd.service" in build_text
+    assert "nopasswdlogin" in build_text
+    assert "greeter-hide-users=false" in build_text
+    assert "multi-user.target.wants/rhm-live-nopasswd.service" in build_text
+
+
+def test_mcp_server_defaults_to_liveusb_name_in_liveusb_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """In LiveUSB mode (liveusb=True or MESH_SCENARIO=live_usb), MCP serverInfo.name defaults to LiveUSB."""
+    from core import server as core_server
+
+    monkeypatch.delenv("MESH_MCP_SERVER_NAME", raising=False)
+    monkeypatch.delenv("MESH_SCENARIO", raising=False)
+    assert core_server.create_mcp_server().name == "remote_harness_mcp"
+    assert core_server.create_mcp_server(liveusb=True).name == "LiveUSB"
+
+    monkeypatch.setenv("MESH_SCENARIO", "live_usb")
+    srv = core_server.create_mcp_server()
+    assert srv.name == "LiveUSB"
+    status, resp = srv.handle_jsonrpc({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    assert status == 200
+    assert resp is not None
+    assert resp["result"]["serverInfo"]["name"] == "LiveUSB"
+
+
+def test_ci_multiarch_iso_build_and_release_upload_fixes() -> None:
+    """Pin fixes for arm64 memtest86+, bookworm firmware packages, and gh --repo upload."""
+    build_text = BUILD_ISO_SH.read_text(encoding="utf-8")
+    # drop_pkg must use literal matching (awk) so 'memtest86+' is dropped on arm64.
+    assert 'awk -v target="${pkg}"' in build_text
+    assert 'sed -i -E "/^[[:space:]]*${pkg}[[:space:]]*$/d"' not in build_text
+    # bookworm lacks Trixie-only firmware packages.
+    assert 'if [[ "${DISTRO}" == "bookworm" ]]; then' in build_text
+    assert "firmware-mediatek" in build_text.split('if [[ "${DISTRO}" == "bookworm" ]]; then', 1)[1].split("\nfi\n", 1)[0]
+
+    wf_text = (REPO_ROOT / ".github" / "workflows" / "liveusb-iso.yml").read_text(encoding="utf-8")
+    assert "GH_REPO: ${{ github.repository }}" in wf_text
+    assert '--repo "${GH_REPO}"' in wf_text
+
+

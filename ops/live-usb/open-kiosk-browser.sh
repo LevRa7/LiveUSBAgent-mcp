@@ -20,10 +20,22 @@ if command -v xset >/dev/null 2>&1; then
     xset s off -dpms s noblank >/dev/null 2>&1 || true
 fi
 
-# Wait up to 30 seconds for kiosk_server.py to answer on localhost:8787.
-for _ in $(seq 1 150); do
-    if python3 -c "import urllib.request; urllib.request.urlopen('${KIOSK_URL}/api/status', timeout=1)" >/dev/null 2>&1; then
+kiosk_ready() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsS --max-time 1 "${KIOSK_URL}/api/status" >/dev/null 2>&1
+    else
+        python3 -c "import urllib.request; urllib.request.urlopen('${KIOSK_URL}/api/status', timeout=1)" >/dev/null 2>&1
+    fi
+}
+
+# Wait up to 45 seconds for kiosk_server.py to answer on localhost:8787.
+# If it is still down after ~3s, nudge rhm-live-kiosk.service via passwordless sudo.
+for attempt in $(seq 1 225); do
+    if kiosk_ready; then
         break
+    fi
+    if [[ "${attempt}" == "15" ]] && command -v systemctl >/dev/null 2>&1; then
+        sudo -n systemctl start rhm-live-kiosk.service >/dev/null 2>&1 || true
     fi
     sleep 0.2
 done
@@ -51,6 +63,7 @@ case "${BROWSER_BIN}" in
             ${extra_flags[@]+"${extra_flags[@]}"} \
             --start-maximized \
             --no-first-run \
+            --password-store=basic \
             --noerrdialogs \
             --disable-infobars \
             --disable-session-crashed-bubble \

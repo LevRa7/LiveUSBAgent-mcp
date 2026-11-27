@@ -235,6 +235,7 @@ jobs:
       - name: Upload ISOs to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
           shopt -s nullglob
@@ -243,7 +244,7 @@ jobs:
             echo "No ISO artifacts were produced; skipping release upload."
             exit 0
           fi
-          if ! gh release view "${TAG}" >/dev/null 2>&1; then
-            gh release create "${TAG}" --title "${TAG}" --generate-notes
+          if ! gh release view "${TAG}" --repo "${GH_REPO}" >/dev/null 2>&1; then
+            gh release create "${TAG}" --repo "${GH_REPO}" --title "${TAG}" --generate-notes
           fi
-          gh release upload "${TAG}" "${files[@]}" --clobber
+          gh release upload "${TAG}" "${files[@]}" --repo "${GH_REPO}" --clobber

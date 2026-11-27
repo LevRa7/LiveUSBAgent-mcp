@@ -506,12 +506,14 @@ class RemoteHarnessMCPServer(object):
                     # lives, because a phone node (Termux) is exactly the case where
                     # a model otherwise hand-writes termux-* commands through
                     # bash_exec instead of using the typed tools.
-                    "instructions": ("Standalone Local Remote Harness MCP Server. "
-                                     "For the device this node runs on - battery, signal, "
-                                     "time, sensors, cameras, microphones, notifications, "
-                                     "torch, volume - use device_info / device_control; "
-                                     "device_capture and device_messages need no confirmation, "
-                                     "and the node's MESH_DEVICE switches decide what is allowed."),
+                    "instructions": (
+                        ("LiveUSB Rescue MCP Server. " if self.name == "LiveUSB" else "Standalone Local Remote Harness MCP Server. ")
+                        + "For the device this node runs on - battery, signal, "
+                        "time, sensors, cameras, microphones, notifications, "
+                        "torch, volume - use device_info / device_control; "
+                        "device_capture and device_messages need no confirmation, "
+                        "and the node's MESH_DEVICE switches decide what is allowed."
+                    ),
                 },
             }
 
@@ -775,10 +777,24 @@ def configure_tools_from_env() -> None:
     )
 
 
-def create_mcp_server() -> RemoteHarnessMCPServer:
+def _default_server_name(liveusb: bool = False) -> str:
+    """Resolve the default MCP server name for initialize/OAuth metadata."""
+    explicit = (os.environ.get("MESH_MCP_SERVER_NAME") or "").strip()
+    if explicit:
+        return explicit
+    scenario = (os.environ.get("MESH_SCENARIO") or "").strip().lower()
+    if liveusb or scenario == "live_usb":
+        return "LiveUSB"
+    return "remote_harness_mcp"
+
+
+def create_mcp_server(
+    name: Optional[str] = None, *, liveusb: bool = False
+) -> RemoteHarnessMCPServer:
     """Factory used by the HTTP handler and by the test-suite."""
     configure_tools_from_env()
-    return RemoteHarnessMCPServer(name="remote_harness_mcp")
+    resolved_name = name or _default_server_name(liveusb=liveusb)
+    return RemoteHarnessMCPServer(name=resolved_name)
 
 
 # ---------------------------------------------------------------------------
@@ -1373,7 +1389,12 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
         self.send_response(401)
         self._cors_headers()
         self.send_header("Content-Type", "application/json")
-        self.send_header("WWW-Authenticate", 'Bearer realm="remote-harness-mcp"')
+        realm = (
+            self.server_mcp.name
+            if (self.server_mcp and self.server_mcp.name == "LiveUSB")
+            else "remote-harness-mcp"
+        )
+        self.send_header("WWW-Authenticate", f'Bearer realm="{realm}"')
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -1563,9 +1584,15 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
             try:
                 from core import liveusb_connect_page as _connect_page  # type: ignore
 
+                raw_host = (socket.gethostname() or "").strip()
+                live_node_id = (
+                    "LiveUSB"
+                    if not raw_host or raw_host.lower() in ("debian", "liveusb", "localhost")
+                    else raw_host
+                )
                 html_doc = _connect_page.render_connect_page(
                     session_code="cloudflare",
-                    node_id=socket.gethostname() or "liveusb",
+                    node_id=live_node_id,
                     link_key=tok,
                     host=base,
                     expires_at="",
@@ -1602,6 +1629,7 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
                 200,
                 {
                     "resource": base,
+                    "resource_name": self.server_mcp.name if self.server_mcp else _default_server_name(),
                     "authorization_servers": [base],
                     "bearer_methods_supported": ["header"],
                 },
@@ -2231,7 +2259,7 @@ def run_standalone_server(
     else:
         token = ensure_auth_token(token)
 
-    mcp = create_mcp_server()
+    mcp = create_mcp_server(liveusb=liveusb)
     StandaloneMCPHandler.server_mcp = mcp
     StandaloneMCPHandler.auth_token = token
     StandaloneMCPHandler.oauth_store = StandaloneOAuthStore()

@@ -37,10 +37,17 @@ find_browser() {
 }
 
 wait_for_server() {
-    local attempts=30
+    local attempts=150
     local i=0
     while (( i < attempts )); do
-        if python3 -c "import urllib.request; urllib.request.urlopen('${KIOSK_URL}/api/status', timeout=1)" >/dev/null 2>&1; then
+        if [[ -n "${SERVER_PID}" ]] && ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+            return 1
+        fi
+        if command -v curl >/dev/null 2>&1; then
+            if curl -fsS --max-time 1 "${KIOSK_URL}/api/status" >/dev/null 2>&1; then
+                return 0
+            fi
+        elif python3 -c "import urllib.request; urllib.request.urlopen('${KIOSK_URL}/api/status', timeout=1)" >/dev/null 2>&1; then
             return 0
         fi
         sleep 0.2
@@ -61,6 +68,7 @@ launch_browser() {
                 --kiosk \
                 --incognito \
                 --no-first-run \
+                --password-store=basic \
                 --noerrdialogs \
                 --disable-infobars \
                 --disable-session-crashed-bubble \

@@ -140,7 +140,6 @@ check_assets() {
         "ops/live-usb/hooks/0100-build-apfs-and-drivers.hook.chroot"
         "ops/live-usb/hooks/0200-rhm-kernel-symlinks.hook.binary"
         "ops/live-usb/hooks/0300-purge-build-deps.hook.chroot"
-        "install.sh"
     )
     local -a python_sources=(
         "ops/live-usb/firstboot_tui.py"

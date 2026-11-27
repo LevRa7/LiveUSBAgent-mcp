@@ -72,14 +72,13 @@ def _build_tar_gz(entries: List[Tuple[str, bytes, int]], mtime: int) -> bytes:
 
 
 def resolve_version() -> str:
-    pkg = json.loads((REPO_ROOT / "package.json").read_text(encoding="utf-8"))
-    ver = str(pkg["version"]).strip()
+    ver = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
     sys.path.insert(0, str(REPO_ROOT))
     from core import version as core_version
 
     if ver != core_version.__version__:
         raise RuntimeError(
-            f"Version mismatch: package.json={ver} != core/version.py={core_version.__version__}"
+            f"Version mismatch: VERSION={ver} != core/version.py={core_version.__version__}"
         )
     return ver
 

@@ -59,15 +59,15 @@ jobs:
 
           tag = os.environ["TAG"]
           module = version.__version__
-          with open("package.json", encoding="utf-8") as handle:
-              package = json.load(handle)["version"]
+          with open("VERSION", encoding="utf-8") as handle:
+              marker = handle.read().strip()
           match = re.fullmatch(r"v?(.+)", tag)
           tagged = match.group(1) if match else tag
           problems = []
           if tagged != module:
               problems.append("tag %s != core/version.py %s" % (tag, module))
-          if package != module:
-              problems.append("package.json %s != core/version.py %s" % (package, module))
+          if marker != module:
+              problems.append("VERSION %s != core/version.py %s" % (marker, module))
           if not re.fullmatch(version.VERSION_PATTERN, module):
               problems.append("core/version.py %r is not MAJOR.MINOR.PATCH" % module)
           if problems:
@@ -81,19 +81,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pytest pytest-asyncio websockets starlette
 
-      - name: Updater and version gate
+      - name: Version gate
         env:
           PYTHONIOENCODING: utf-8
-        run: python -m pytest -q -p no:cacheprovider tests/test_updater.py tests/test_version_single_source.py
-
-      - name: Build the payload archive
-        run: python tools/build-payload-zip.py
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mesh-payload
-          path: dist/mesh-payload-*
-          if-no-files-found: error
+        run: python -m pytest -q -p no:cacheprovider tests/test_version_single_source.py
 
   windows:
     name: Windows LiveUSB Creator executable
@@ -247,8 +238,6 @@ jobs:
             dist/liveusb-agent-creator_*_all.deb.sha256 \
             dist/LiveUSBAgent-Creator-*-macOS.dmg \
             dist/LiveUSBAgent-Creator-*-macOS.dmg.sha256 \
-            dist/mesh-payload-*.zip \
-            dist/mesh-payload-*.zip.sha256 \
             --clobber
 
       - name: Verify what a node will see

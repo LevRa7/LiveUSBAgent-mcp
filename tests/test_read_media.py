@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 from starlette.requests import Request
 
 import gateway
-from core import media, mcp_tools, policy, server
+from core import media, mcp_tools, server
 from core.platforms import png as png_encoder
 from core.platforms import raster
 
@@ -316,7 +316,6 @@ def test_the_node_advertises_the_tool_read_only():
     assert spec["annotations"]["destructiveHint"] is False
     assert "read_media" in mcp_tools._READ_ONLY_ALLOWED
     assert "read_media" in mcp_tools._HANDLERS
-    assert "read_media" in policy.READ_ONLY_TOOLS
 
 
 @pytest.mark.skipif("read_media" not in gateway.TOOL_ANNOTATIONS, reason="LiveUSB uses standalone/Cloudflare; legacy gateway.py lacks read_media")

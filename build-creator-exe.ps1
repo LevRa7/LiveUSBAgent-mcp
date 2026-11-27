@@ -13,11 +13,17 @@ $repo = $PSScriptRoot
 if (-not $repo) { $repo = (Get-Location).Path }
 if (-not $OutputDir) { $OutputDir = Join-Path $repo 'dist' }
 
-$packagePath = Join-Path $repo 'package.json'
-$package = Get-Content -LiteralPath $packagePath -Raw -Encoding UTF8 | ConvertFrom-Json
-$version = [string]$package.version
+$versionPath = Join-Path $repo 'VERSION'
+$version = (Get-Content -LiteralPath $versionPath -Raw -Encoding UTF8).Trim()
 if ($version -notmatch '^\d+\.\d+\.\d+$') {
-    throw ("package.json version is not MAJOR.MINOR.PATCH: '" + $version + "'")
+    throw ("VERSION is not MAJOR.MINOR.PATCH: '" + $version + "'")
+}
+$coreVersionPath = Join-Path $repo 'core\version.py'
+$moduleMatch = Select-String -LiteralPath $coreVersionPath -Pattern '^__version__\s*=\s*"([^"]+)"' | Select-Object -First 1
+if (-not $moduleMatch) { throw 'core\version.py has no __version__ declaration' }
+$moduleVersion = $moduleMatch.Matches[0].Groups[1].Value
+if ($moduleVersion -ne $version) {
+    throw ('version mismatch: VERSION says ' + $version + ' but core/version.py says ' + $moduleVersion)
 }
 
 $cscCandidates = @(

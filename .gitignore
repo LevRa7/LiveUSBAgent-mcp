@@ -53,3 +53,6 @@ artifacts/**
 
 # Superpowers subagent-driven-development workspace (ledger, briefs, reviews).
 .superpowers/
+
+# Local git worktrees
+.agents/worktrees/

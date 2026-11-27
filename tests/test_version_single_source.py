@@ -37,21 +37,11 @@ def test_the_version_is_a_documented_shape():
         % version_module.__version__)
 
 
-def test_package_json_agrees_with_the_node():
-    package = json.loads(_read("package.json"))
-    assert package["version"] == version_module.__version__, (
-        "package.json (%s) and core/version.py (%s) disagree; the installer names the "
-        "release after the package while the node compares the tag with the module"
-        % (package["version"], version_module.__version__))
-
-
-def test_the_repository_slug_agrees_with_package_json():
-    package = json.loads(_read("package.json"))
-    url = str(package.get("repository", {}).get("url", ""))
-    slug = url.replace("git+", "").replace("https://github.com/", "").replace(".git", "")
-    assert slug == version_module.REPO_SLUG == updater.REPO, (
-        "the updater asks GitHub for %s while package.json points at %s"
-        % (version_module.REPO_SLUG, slug))
+def test_version_file_agrees_with_the_node():
+    marker = _read("VERSION").strip()
+    assert marker == version_module.__version__, (
+        "VERSION (%s) and core/version.py (%s) disagree"
+        % (marker, version_module.__version__))
 
 
 def test_every_other_declaration_of_the_version_is_derived():
@@ -117,8 +107,8 @@ def test_the_local_version_reads_this_tree():
 
 
 def test_the_build_refuses_a_mismatch():
-    """build-installer-exe.ps1 is the gate that catches a bad bump locally."""
-    build = _read("build-installer-exe.ps1")
+    """build-creator-exe.ps1 is the gate that catches a bad bump locally."""
+    build = _read("build-creator-exe.ps1")
     assert "core\\version.py" in build
     assert "version mismatch" in build
 

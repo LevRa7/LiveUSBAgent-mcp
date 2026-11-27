@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUT_DIR="${1:-${REPO_ROOT}/dist}"
 
-VERSION="$(python3 -c "import json; print(json.load(open('${REPO_ROOT}/package.json'))['version'])")"
+VERSION="$(tr -d ' \t\r\n' < "${REPO_ROOT}/VERSION")"
 APP_NAME="LiveUSBAgent Creator"
 BIN_NAME="LiveUSBAgentCreator"
 SRC_SWIFT="${REPO_ROOT}/tools/macos-creator/LiveUSBAgentCreator.swift"

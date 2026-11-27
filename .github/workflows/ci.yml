@@ -49,31 +49,13 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          # What the suite imports directly: pydantic for core/schemas.py and
-          # core/code_cache.py, uvicorn and starlette for the gateway tests and for
-          # rhm_mcp_server, websockets for the agent, requests and httpx for the
-          # MCP helper tests, mcp for rhm_mcp_server. Every one of these comes from
-          # PyPI, and the first CI run proved that a missing one is not a skip but
-          # a collection error.
-          python -m pip install pytest pytest-asyncio pydantic uvicorn starlette websockets requests httpx mcp
-          # pywin32 is needed by the MCP SDK on Windows only.
-          python -m pip install pywin32 || true
-          # Google's SDK is optional by design - the tests that need it call
-          # pytest.importorskip, "so a private SDK is a skip, never a collection
-          # ERROR". It is installed on the Windows runner, where those tests pass,
-          # and deliberately NOT on the Linux runners: there the SDK's harness asks
-          # for a writable /root/agy-gdrive-runner, which a runner does not have, so
-          # installing it turns a documented skip into three PermissionError
-          # failures. That is an environment limit, not a defect in this project.
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            python -m pip install google-antigravity || true
-          fi
+          python -m pip install pytest pytest-asyncio pydantic uvicorn starlette websockets requests httpx
         shell: bash
 
-      - name: Updater and version gate
+      - name: Version gate
         env:
           PYTHONIOENCODING: utf-8
-        run: python -m pytest -q -p no:cacheprovider tests/test_updater.py tests/test_version_single_source.py
+        run: python -m pytest -q -p no:cacheprovider tests/test_version_single_source.py
         shell: bash
 
       - name: Full suite
@@ -81,94 +63,6 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python -m pytest -q -p no:cacheprovider
         shell: bash
-
-  payload:
-    name: payload archive
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Build the payload archive the updater installs
-        run: python tools/build-payload-zip.py
-
-      - name: The archive must unpack into a usable node
-        env:
-          PYTHONIOENCODING: utf-8
-        run: |
-          python - <<'PY'
-          import glob, os, tempfile, zipfile, sys
-          sys.path.insert(0, os.getcwd())
-          from core import updater
-
-          archive = glob.glob("dist/mesh-payload-*.zip")[0]
-          with tempfile.TemporaryDirectory() as work:
-              updater._safe_extract_zip(archive, work)
-              updater.verify_payload(work)
-              assert os.path.isfile(os.path.join(work, "core", "updater.py"))
-              assert not glob.glob(os.path.join(work, "**", "__pycache__"), recursive=True)
-          print("payload ok:", archive)
-          PY
-
-  installer:
-    name: Windows setup executable
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Build the single-file setup
-        shell: pwsh
-        run: ./build-installer-exe.ps1
-
-      - name: Self-test the executable
-        shell: pwsh
-        run: |
-          $exe = @(Get-ChildItem dist/RemoteHarnessMCP-Setup-*.exe | Select-Object -First 1)
-          if ($exe.Count -eq 0) { throw "the build produced no executable" }
-          $path = $exe[0].FullName
-
-          # The launcher is a *winexe*: PowerShell's call operator does not wait for
-          # one, so $LASTEXITCODE still held the previous command's value and the
-          # first CI run failed with "the payload did not unpack" while the payload
-          # unpacked perfectly well. Start-Process -PassThru reports an empty
-          # ExitCode on Windows PowerShell 5.1 once the process has exited - the
-          # trap install-gui.ps1 documents - so the process is created through
-          # ProcessStartInfo, which is reliable on every PowerShell.
-          function Invoke-Setup {
-              param([string]$Path, [string[]]$Arguments)
-              $info = New-Object System.Diagnostics.ProcessStartInfo
-              $info.FileName = $Path
-              $info.Arguments = ($Arguments -join ' ')
-              $info.UseShellExecute = $false
-              $info.RedirectStandardOutput = $true
-              $info.RedirectStandardError = $true
-              $process = [System.Diagnostics.Process]::Start($info)
-              $out = $process.StandardOutput.ReadToEnd()
-              $err = $process.StandardError.ReadToEnd()
-              $process.WaitForExit()
-              return @{ ExitCode = $process.ExitCode; Output = (($out + $err).Trim()) }
-          }
-
-          $version = Invoke-Setup $path @('--version')
-          if ($version.ExitCode -ne 0) { throw "--version exited $($version.ExitCode): $($version.Output)" }
-          Write-Host "version: $($version.Output)"
-
-          $unpack = Invoke-Setup $path @('--unpack')
-          if ($unpack.ExitCode -ne 0) { throw "--unpack exited $($unpack.ExitCode): $($unpack.Output)" }
-          Write-Host "unpack: $($unpack.Output)"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: setup-exe
-          path: dist/RemoteHarnessMCP-Setup-*
-          if-no-files-found: error
 
   creator-linux-deb:
     name: Linux LiveUSB Creator (.deb)

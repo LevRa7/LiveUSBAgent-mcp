@@ -44,7 +44,7 @@ from typing import Any, Dict, Optional
 from core.platforms.base import PlatformBackend
 
 #: Every scenario this package implements, in the order detection tries them.
-SCENARIOS = ("windows", "termux", "darwin", "linux")
+SCENARIOS = ("windows", "linux")
 
 _LOCK = threading.RLock()
 _BACKENDS: Dict[str, PlatformBackend] = {}
@@ -88,23 +88,6 @@ def detect(termux_data_dir: Optional[bool] = None,
     """
     if os.name == "nt":
         return "windows"
-    environment = os.environ if env is None else env
-    try:
-        if environment.get("TERMUX_VERSION") or "com.termux" in environment.get("PREFIX", ""):
-            return "termux"
-    except Exception:
-        pass
-    if termux_data_dir is None:
-        termux_data_dir = _termux_data_dir()
-    if termux_data_dir:
-        return "termux"
-    platform_name = system
-    if platform_name is None:
-        import platform as _platform
-
-        platform_name = _platform.system()
-    if platform_name in ("Darwin", "darwin"):
-        return "darwin"
     return "linux"
 
 
@@ -135,14 +118,6 @@ def _build(scenario: str) -> PlatformBackend:
         from core.platforms.windows import WindowsBackend
 
         return WindowsBackend()
-    if scenario == "termux":
-        from core.platforms.android import AndroidBackend
-
-        return AndroidBackend()
-    if scenario == "darwin":
-        from core.platforms.darwin import DarwinBackend
-
-        return DarwinBackend()
     from core.platforms.linux import LinuxBackend
 
     return LinuxBackend()

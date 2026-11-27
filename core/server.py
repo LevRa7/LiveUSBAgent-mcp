@@ -87,8 +87,39 @@ except Exception as _vitals_import_error:  # pragma: no cover
     logger.debug("core.vitals unavailable (%s); using inline vitals collector", _vitals_import_error)
 
 # Shared tool logic.  core.mcp_tools is stdlib-only, so this import always works.
-from core import landing  # noqa: E402
 from core import mcp_tools  # noqa: E402
+
+
+def _is_browser_request(headers: Any) -> bool:
+    accept = str(headers.get("Accept") or "").lower()
+    if "text/event-stream" in accept:
+        return False
+    return "text/html" in accept or str(headers.get("Sec-Fetch-Dest") or "").lower() == "document"
+
+
+def _render_browser_connect(base: str, token: str) -> str:
+    try:
+        from core import liveusb_connect_page as _connect_page  # type: ignore
+
+        raw_host = (socket.gethostname() or "").strip()
+        live_node_id = (
+            "LiveUSB"
+            if not raw_host or raw_host.lower() in ("debian", "liveusb", "localhost")
+            else raw_host
+        )
+        return _connect_page.render_connect_page(
+            session_code="cloudflare",
+            node_id=live_node_id,
+            link_key=token,
+            host=base,
+            expires_at="",
+            public_base_url=base,
+            online=True,
+            standalone=True,
+            tunnel_mode="cloudflare",
+        )
+    except Exception:
+        return "<!doctype html><title>LiveUSBAgent-mcp</title><h1>LiveUSBAgent-mcp</h1>"
 
 # Public file shares (core/web_share.py) are optional: a checkout from before the
 # share surface existed still runs every other tool. The standalone server is the
@@ -1568,8 +1599,8 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
         if path in _PUBLIC_PATHS:
             # A browser that followed the link from the clipboard gets the
             # connection card, not a JSON probe nobody can read.
-            if self._token_valid() and landing.is_browser(self.headers):
-                self._send_html(landing.render_landing(self._public_base(), self._provided_token() or ""))
+            if self._token_valid() and _is_browser_request(self.headers):
+                self._send_html(_render_browser_connect(self._public_base(), self._provided_token() or ""))
                 return
             # Liveness is public so the installer health poll keeps working, but
             # host vitals are only disclosed to an authenticated caller when a
@@ -1602,14 +1633,14 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
                     tunnel_mode="cloudflare",
                 )
             except Exception:
-                html_doc = landing.render_landing(base, tok)
+                html_doc = "<!doctype html><title>LiveUSBAgent-mcp</title><h1>LiveUSBAgent-mcp</h1>"
             self._send_html(html_doc)
         elif path in ("/sse", "/mcp"):
             # A human opening the endpoint in a browser is not an MCP client: it
             # would sit on a stream that renders nothing. The token is already
             # validated above, so the card may show it.
-            if landing.is_browser(self.headers):
-                self._send_html(landing.render_landing(self._public_base(), self._provided_token() or ""))
+            if _is_browser_request(self.headers):
+                self._send_html(_render_browser_connect(self._public_base(), self._provided_token() or ""))
                 return
             # Which client asked for the stream is the one fact that explains a
             # connector refusing the URL; headers only, never the token.

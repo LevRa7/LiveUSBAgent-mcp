@@ -721,6 +721,7 @@ mkdir -p "${CHROOT_OPT}/ops/live-usb"
 
 rm -rf "${CHROOT_OPT}/core" "${CHROOT_OPT}/skills" "${CHROOT_OPT}/ops/live-usb/kiosk_ui"
 cp -r "${REPO_ROOT}/core" "${CHROOT_OPT}/"
+rm -rf "${CHROOT_OPT}/core/platforms/windows"
 if [[ -d "${REPO_ROOT}/skills" ]]; then
     cp -r "${REPO_ROOT}/skills" "${CHROOT_OPT}/"
 fi

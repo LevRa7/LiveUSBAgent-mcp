@@ -38,7 +38,7 @@ async def test_policy_restricts_workspaces():
     # (the documented /root/... on Linux, %USERPROFILE%\... on Windows), so they
     # are taken from the module instead of being hardcoded POSIX literals.
     for root in ALLOWED_WORKSPACES:
-        assert validate_workspace_path(os.path.join(root, "core", "schemas.py")) is True
+        assert validate_workspace_path(os.path.join(root, "core", "version.py")) is True
         assert validate_workspace_path(root) is True
 
     # Outside allowed workspaces. A POSIX path abspaths to a drive-relative path on

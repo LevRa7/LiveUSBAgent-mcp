@@ -59,7 +59,7 @@ except ImportError as _websockets_error:      # a launcher pinned a Python witho
 else:
     _WEBSOCKETS_IMPORT_ERROR = None
 
-from core import control, domain, mcp_tools, paths, updater
+from core import control, domain, mcp_tools, paths
 from core import schedule as schedule_module
 from core import version as version_module
 
@@ -495,50 +495,8 @@ def request_restart(delay: float = 5.0) -> bool:
 
 
 def start_update_thread():
-    """Check for a newer release in the background and install it.
-
-    The first check is delayed (``MESH_UPDATE_INITIAL_DELAY``, 90 s by default)
-    so a node that was just started - including one that was just updated - gets
-    its tunnel up and serves a few calls before anything restarts.
-    """
-    config = updater.config_from_env()
-    if not config["enabled"]:
-        logger.info("Self-update is disabled (MESH_UPDATE_CHECK=0).")
-        return None
-    # Registered even when automatic updating is off: an operator (or the model
-    # through mesh_update) can still ask for an update, and the node then has to
-    # stop itself for the new version to run.
-    updater.set_restart_hook(request_restart)
-    try:
-        initial = float(os.environ.get("MESH_UPDATE_INITIAL_DELAY", "") or 90.0)
-    except ValueError:
-        initial = 90.0
-
-    def _loop():
-        time.sleep(max(0.0, initial))
-        while True:
-            try:
-                result = updater.background_tick(config=config)
-                note_update_state(result)
-                check = result.get("check") or {}
-                applied = result.get("apply") or {}
-                if applied.get("applied"):
-                    logger.warning("Self-update: %s -> %s applied from %s; restarting.",
-                                   applied.get("from"), applied.get("to"), applied.get("asset"))
-                elif check.get("update_available"):
-                    logger.info("Self-update: release %s is available (%s).",
-                                check.get("latest"), check.get("reason"))
-                elif check.get("ok"):
-                    logger.debug("Self-update: up to date (%s).", check.get("current"))
-                else:
-                    logger.warning("Self-update check failed: %s", check.get("reason"))
-            except Exception as exc:      # the updater must never take the node down
-                logger.warning("Self-update iteration failed: %s", exc)
-            time.sleep(max(60, int(config["interval"])))
-
-    thread = threading.Thread(target=_loop, name="mesh-updater", daemon=True)
-    thread.start()
-    return thread
+    """Self-update is disabled in LiveUSBAgent-mcp (RAM-only image)."""
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -879,11 +837,6 @@ def main(argv: Optional[list] = None) -> None:
     install_exit_markers()
     enable_fault_log()
     log_runtime_banner()
-    # An update that was interrupted mid-swap (a kill, a power cut) is settled
-    # here, before the tunnel starts: either finished or rolled back.
-    recovery = updater.recover_pending()
-    if recovery:
-        logger.warning("Self-update recovery: %s", recovery)
     start_heartbeat()
     start_scheduler()
     if _WEBSOCKETS_IMPORT_ERROR is not None:

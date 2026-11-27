@@ -16,7 +16,6 @@ import sys
 
 import pytest
 
-from core import updater
 from core import version as version_module
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -101,11 +100,6 @@ def test_the_release_notes_file_exists_for_this_version():
         "the release workflow takes the notes from docs/releases/v<version>.md")
 
 
-def test_the_local_version_reads_this_tree():
-    """A checkout reports the version the updater will compare against."""
-    assert updater.local_version(REPO) == version_module.__version__
-
-
 def test_the_build_refuses_a_mismatch():
     """build-creator-exe.ps1 is the gate that catches a bad bump locally."""
     build = _read("build-creator-exe.ps1")
@@ -135,23 +129,10 @@ def test_the_build_gate_actually_stops_a_mismatch(tmp_path):
     assert version_module.__version__ in result.stdout
 
 
-def test_the_updater_reads_the_version_from_the_tree_not_from_memory(tmp_path):
-    """After a swap, the installed version is what is on disk - not what was loaded."""
-    node = tmp_path / "node"
-    (node / "core").mkdir(parents=True)
-    (node / "core" / "version.py").write_text('__version__ = "7.7.7"\n', encoding="utf-8")
-    previous = os.environ.pop("MESH_UPDATE_LOCAL_VERSION", None)
-    try:
-        assert updater.local_version(str(node)) == "7.7.7"
-    finally:
-        if previous is not None:
-            os.environ["MESH_UPDATE_LOCAL_VERSION"] = previous
-
-
 def test_python_can_import_every_shipped_module():
     """A syntax error in a shipped module must fail here, not on a client's node."""
     result = subprocess.run(
         [sys.executable, "-c",
-         "import core.agent, core.updater, core.mcp_tools, core.server, core.version"],
+         "import core.agent, core.mcp_tools, core.server, core.version"],
         cwd=REPO, capture_output=True, text=True, timeout=180)
     assert result.returncode == 0, result.stderr

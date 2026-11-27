@@ -57,14 +57,12 @@ from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 from core import control
 from core import domain
 from core import fs_search
-from core import goal
 from core import paths
 from core import tls
 from core import platforms
 from core import sandbox
 from core import schedule as schedule_module
 from core import settings as node_settings
-from core import updater
 from core import usage
 from core import version as version_module
 from core.platforms import encoding as _platform_encoding
@@ -1044,31 +1042,9 @@ def _tool_mesh_status(args: Dict[str, Any]) -> Dict[str, Any]:
                                          or battery.get("ac_online") is False)
         except Exception:
             pass
-    try:
-        # Local state only: a status call must never wait on the network.
-        state = updater.status()
-        payload["update"] = {
-            "latest": state.get("latest") or "",
-            "update_available": state.get("update_available"),
-            "last_check": state.get("last_check") or "",
-            "last_applied": state.get("last_applied") or "",
-            "auto": state.get("auto"),
-        }
-    except Exception as exc:                   # diagnostics never break the answer
-        payload["update"] = {"error": str(exc)}
-    try:
-        # The objective a previous chat left behind, so a fresh session resumes
-        # it instead of asking what was being done. Off by default: a node-wide
-        # note would leak one chat's objective into another.
-        if goal.enabled():
-            goal_state = goal.get()
-            payload["goal"] = goal_state.get("goal")
-            payload["goal_active"] = bool(goal_state.get("active"))
-        else:
-            payload["goal"] = None
-            payload["goal_active"] = False
-    except Exception:                          # the note must never break status
-        payload["goal"] = None
+    payload["update"] = {"disabled": True, "reason": "LiveUSB RAM-only image"}
+    payload["goal"] = None
+    payload["goal_active"] = False
     try:
         # Timers that fired while nobody was looking: the continuation is the
         # reason the next turn must not start from scratch.
@@ -1087,27 +1063,8 @@ def _parse_flag(value: Any, default: bool = False) -> bool:
 
 
 def _tool_mesh_update(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Report, check for, or install a newer release of this node's own code.
-
-    ``status`` reads local state only; ``check`` asks GitHub; ``apply`` downloads
-    the release payload, verifies its published SHA-256, swaps it in with a
-    backup and restarts the agent (the tunnel drops for a few seconds). Applying
-    is refused in read-only mode, where every other mutation is refused too.
-    """
-    action = str(args.get("action") or "status").strip().lower()
-    force = _parse_flag(args.get("force"))
-    if action in ("status", "state", "info"):
-        return updater.status()
-    if action in ("check", "check_update", "latest"):
-        return updater.check_for_update(force=force, offline=_parse_flag(args.get("offline")))
-    if action in ("apply", "install", "update", "upgrade"):
-        if _read_only_active():
-            return {"error": "this node is read-only (MESH_READ_ONLY=1); "
-                             "self-update is disabled"}
-        restart = args.get("restart")
-        return updater.apply_update(force=force,
-                                    restart=None if restart is None else _parse_flag(restart))
-    return {"error": "unknown action %r: use status, check or apply" % action}
+    """Self-update is disabled on LiveUSBAgent-mcp (RAM-only image)."""
+    return {"ok": False, "error": "self-update is disabled on LiveUSB (RAM-only image)"}
 
 
 def _tool_node_control(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1145,50 +1102,7 @@ def _tool_goal(args: Dict[str, Any]) -> Dict[str, Any]:
     no project file and runs nothing, which is why it is allowed in read-only
     mode.
     """
-    if not goal.enabled():
-        return {"error": "goal is disabled on this node: one objective would be "
-                         "shared by every chat. Set MESH_GOAL=1 to opt in."}
-    action = str(args.get("action") or "get").strip().lower()
-    actor = str(args.get("_origin") or "mcp").strip().lower()
-    note = str(args.get("note") or "")
-    try:
-        if action in ("get", "status", "show"):
-            data = goal.get()
-        elif action in ("set", "start", "add"):
-            data = goal.set_goal(str(args.get("text") or ""), actor=actor, note=note)
-        elif action in ("complete", "done", "finish"):
-            data = goal.finish("done", actor=actor, note=note)
-        elif action == "blocked":
-            data = goal.finish("blocked", actor=actor, note=note)
-        elif action in ("clear", "reset", "forget"):
-            data = goal.clear(actor=actor)
-        else:
-            return {"error": "unknown action %r: use get, set, complete, blocked or clear"
-                             % action}
-    except ValueError as exc:
-        return {"error": str(exc)}
-    current = data.get("goal")
-    result: Dict[str, Any] = {
-        "ok": True,
-        "action": action,
-        "goal": current,
-        "active": bool(data.get("active")),
-        "history": (data.get("history") or [])[:5],
-    }
-    if current and current.get("status") == "active":
-        result["message"] = (
-            "goal: %s — the operator's instruction stands: proceed with its steps and do not "
-            "ask again whether to start or continue." % current.get("text")
-        )
-    elif action in ("complete", "done", "finish"):
-        result["message"] = "goal completed"
-    elif action == "blocked":
-        result["message"] = "goal marked blocked"
-    elif action in ("clear", "reset", "forget"):
-        result["message"] = "goal cleared"
-    else:
-        result["message"] = "no active goal"
-    return result
+    return {"error": "goal is disabled on LiveUSBAgent-mcp"}
 
 
 def _tool_schedule(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -5069,11 +4983,8 @@ EXTENDED_TOOLS: List[Dict[str, Any]] = [
 ]
 
 
-if not goal.enabled():
-    # A node-wide objective bleeds across chats: hide the tool from tools/list
-    # unless the operator opted in. The handler stays for `rhm goal clear`.
-    TOOLS[:] = [tool for tool in TOOLS if tool.get("name") != "goal"]
-    TOOL_ANNOTATIONS.pop("goal", None)
+TOOLS[:] = [tool for tool in TOOLS if tool.get("name") != "goal"]
+TOOL_ANNOTATIONS.pop("goal", None)
 
 
 # Attach the confirmation policy to the advertised specs. Kept out of the literal

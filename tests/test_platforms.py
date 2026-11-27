@@ -54,7 +54,7 @@ def test_windows_wins_over_a_stray_termux_variable(monkeypatch):
     if IS_WINDOWS:
         assert platforms.detect() == "windows"
     else:
-        assert platforms.detect() == "termux"
+        assert platforms.detect() == "linux"
 
 
 def test_every_scenario_has_a_backend():
@@ -242,130 +242,6 @@ def test_linux_capabilities_are_honest():
     caps = linux.LinuxBackend().capabilities()
     assert caps["shell"] is True
     assert caps["screenshot"] is False  # a server has no framebuffer
-
-
-# ---------------------------------------------------------------------------
-# Android backend
-# ---------------------------------------------------------------------------
-
-def _fake_sys(tmp_path, capacity=87, status="Charging", temp=345):
-    root = tmp_path / "sys"
-    battery = root / "class" / "power_supply" / "battery"
-    battery.mkdir(parents=True)
-    (battery / "capacity").write_text(str(capacity), encoding="utf-8")
-    (battery / "status").write_text(status, encoding="utf-8")
-    (battery / "temp").write_text(str(temp), encoding="utf-8")
-    (battery / "voltage_now").write_text("4200000", encoding="utf-8")
-    (battery / "current_now").write_text("1500000", encoding="utf-8")
-
-    thermal = root / "class" / "thermal" / "thermal_zone0"
-    thermal.mkdir(parents=True)
-    (thermal / "type").write_text("cpu-0-0", encoding="utf-8")
-    (thermal / "temp").write_text("41200", encoding="utf-8")
-    return root
-
-
-def test_android_battery_comes_from_sysfs(tmp_path):
-    from core.platforms.android import sysfs
-
-    root = _fake_sys(tmp_path)
-    block = sysfs.battery(str(root / "class" / "power_supply"))
-    assert block["available"] is True
-    assert block["percent"] == 87
-    assert block["charging"] is True
-    assert block["temperature_c"] == 34.5
-    assert block["voltage_v"] == 4.2
-    assert block["current_a"] == 1.5
-
-
-def test_android_thermal_is_named_and_sorted(tmp_path):
-    from core.platforms.android import sysfs
-
-    root = _fake_sys(tmp_path)
-    zones = sysfs.thermal(str(root / "class" / "thermal"))
-    assert zones == [{"zone": "thermal_zone0", "name": "cpu-0-0", "celsius": 41.2}]
-
-
-def test_android_thermal_missing_is_empty_not_an_error(tmp_path):
-    from core.platforms.android import sysfs
-
-    assert sysfs.thermal(str(tmp_path / "missing")) == []
-
-
-def test_android_storage_skips_paths_that_do_not_exist():
-    from core.platforms.android import sysfs
-
-    rows = sysfs.storage(["/definitely/not/here"])
-    assert rows == []
-
-
-def test_android_vitals_carry_the_battery(monkeypatch, tmp_path):
-    """A phone's most important vital is the battery; it must not need termux-api."""
-    from core.platforms.android import telemetry, sysfs
-
-    root = _fake_sys(tmp_path)
-    monkeypatch.setattr(sysfs, "battery", lambda: {
-        "available": True, "percent": 55, "charging": False, "status": "discharging",
-    })
-    monkeypatch.setattr(sysfs, "thermal", lambda limit=8: [{"name": "cpu", "celsius": 40.0}])
-    payload = telemetry.vitals()
-    assert payload["os"] == "Android"
-    assert payload["battery"]["percent"] == 55
-    assert payload["thermal"][0]["celsius"] == 40.0
-
-
-def test_android_capabilities_say_no_screenshot():
-    """Android gives an app no framebuffer: the honest answer is "no"."""
-    from core.platforms.android import AndroidBackend
-
-    caps = AndroidBackend().capabilities()
-    assert caps["screenshot"] is False
-    assert caps["vitals"] == os.path.isdir("/proc")
-
-
-# ---------------------------------------------------------------------------
-# Darwin backend (built anywhere, macOS-specific answers only on macOS)
-# ---------------------------------------------------------------------------
-
-def test_darwin_backend_satisfies_the_contract():
-    from core.platforms import darwin
-
-    backend = darwin.DarwinBackend()
-    assert backend.scenario == "darwin"
-    assert backend.label
-    name, argv = backend.shell()
-    assert name in ("bash", "sh") and argv
-    assert isinstance(backend.capabilities(), dict)
-    assert set(backend.capabilities()) >= {"shell", "vitals", "info_blocks",
-                                           "process_tree", "screenshot", "clipboard"}
-
-
-def test_darwin_telemetry_degrades_instead_of_raising():
-    """The suite runs this on Windows/Linux: unknown must be 0, not an exception."""
-    from core.platforms.darwin import telemetry
-
-    if sys.platform != "darwin":
-        # There is no sysctlbyname on this host, and inventing a number would be
-        # worse than the honest "unknown".
-        assert telemetry.sysctl("hw.memsize") is None
-        assert telemetry.total_bytes() == 0
-    vitals = telemetry.vitals()
-    assert set(vitals) >= {"hostname", "cpu_load", "ram", "disk"}
-    assert set(vitals["cpu_load"]) == {"1m", "5m", "15m"}
-    assert vitals["ram"]["total_mb"] >= 0
-    blocks = telemetry.info_blocks()
-    assert set(blocks) == {"disks", "memory", "load", "top_processes"}
-
-
-def test_darwin_wallpaper_walk_finds_a_file_url():
-    from core.platforms.darwin import _first_image_path
-
-    payload = {"Desktop": {"Content": [{"Choices": [
-        {"Provider": "com.apple.wallpaper.choice.image",
-         "Configuration": {"url": "file:///Library/Desktop%20Pictures/Hello.heic"}},
-    ]}]}}
-    assert _first_image_path(payload) == "/Library/Desktop%20Pictures/Hello.heic"
-    assert _first_image_path({"nothing": 1}) == ""
 
 
 # ---------------------------------------------------------------------------

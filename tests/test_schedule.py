@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from core import control, goal, mcp_tools, schedule, settings
+from core import control, mcp_tools, schedule, settings
 
 
 @pytest.fixture(autouse=True)

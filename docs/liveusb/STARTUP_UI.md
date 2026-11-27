@@ -16,7 +16,7 @@ internet reachability, not by the Ethernet link state alone.
 
 ## 2. Internet is up, session is still being registered: pending view
 
-![Kiosk pending view](images/en/kiosk-pending.png)
+![Kiosk pending view](images/kiosk-pending.png)
 
 `applyAutoView()` switches to the ready view as soon as
 `internet.reachable=true`, even before `session.ready`. The pending card says
@@ -60,9 +60,9 @@ from a fixed allowlist; it never accepts a command or path. The terminal button
 on both views uses `POST /api/terminal`, which resolves the same allowlisted
 `terminal` entry.
 
-![File manager](images/en/kiosk-files.png)
+![File manager](images/kiosk-files.png)
 
-![Terminal](images/en/kiosk-terminal.png)
+![Terminal](images/kiosk-terminal.png)
 
 The hidden-Wi-Fi dialog is unchanged:
 
@@ -92,9 +92,9 @@ The network view has **Network Settings** with five tabs:
   allowed IPs and keepalive; writes a `0600` NetworkManager keyfile.
 - **OpenVPN** — paste a `.ovpn`; imports it through NetworkManager.
 
-![IP and DNS](images/en/network-settings-ip.png)
+![IP and DNS](images/network-settings-ip.png)
 
-![PPPoE](images/en/network-settings-pppoe.png)
+![PPPoE](images/network-settings-pppoe.png)
 
 ![WireGuard](images/en/network-settings-wireguard.png)
 
@@ -109,7 +109,7 @@ active code, docs and tests.
 
 ## 7. AmneziaWG and subscriptions
 
-![AmneziaWG tab](images/en/network-settings-amnezia.png)
+![AmneziaWG tab](images/network-settings-amnezia.png)
 
 The **AmneziaWG** tab accepts the AmneziaWG INI (`Jc/Jmin/Jmax/S1/S2/H1-H4`),
 shows `awg show` status, starts/stops through `awg-quick`, and imports a
@@ -123,7 +123,7 @@ be off for the module.
 
 ## 8. The same UI on the built ISO
 
-![Kiosk running from the built ISO](images/en/kiosk-image-pending.png)
+![Kiosk running from the built ISO](images/kiosk-image-pending.png)
 
 The final ISO was booted in QEMU UEFI (TCG) after the
 `rhm-live-kiosk.service` fix. The kiosk service starts Chromium on `tty1` and

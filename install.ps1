@@ -832,6 +832,7 @@ if (-not $ScriptDir -or -not (Test-Path "$ScriptDir\core\agent.py")) {
         "core/landing.py",
         "core/liveusb_bootstrap.py",
         "core/liveusb_connect_page.py",
+        "core/liveusb_i18n.py",
         "core/liveusb_tunnel.py",
         "core/mcp_tools.py",
         "core/media.py",

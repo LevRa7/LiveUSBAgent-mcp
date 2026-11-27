@@ -147,19 +147,27 @@
     btnNetAwgSubCopy: document.getElementById("btn-net-awg-sub-copy"),
   };
 
-  const INTERNET_BANNER_NO_INTERNET =
-    tr("internet_offline_banner", "Интернет не обнаружен. Подключите Wi-Fi, кабель или USB-модем.");
-  const INTERNET_BANNER_PENDING =
-    tr("internet_getting_token_banner", "Интернет есть. Получаем токен и QR…");
-  const INTERNET_BANNER_ONLINE = tr("internet_online_banner", "Интернет подключён");
+  function getInternetBannerText(reachable, sessionReady) {
+    if (!reachable) {
+      return tr("internet_offline_banner", "Интернет не обнаружен. Подключите Wi-Fi, кабель или USB-модем.");
+    }
+    if (!sessionReady) {
+      return tr("internet_getting_token_banner", "Интернет есть. Получаем токен и QR…");
+    }
+    return tr("internet_online_banner", "Интернет подключён");
+  }
 
-  const PENDING_TITLE_INTERNET = tr("internet_getting_token_short", "Интернет есть, получаем токен…");
-  const PENDING_TITLE_OFFLINE =
-    tr("ready_pending_title", "Потеряно соединение с интернетом. Ожидание восстановления сети…");
-  const PENDING_TEXT_INTERNET =
-    tr("ready_waiting_token_sub", "QR-код и ссылка подключения появятся автоматически, как только сессия будет готова.");
-  const PENDING_TEXT_OFFLINE =
-    tr("ready_pending_text", "Старые QR-код и ссылка скрыты. Как только интернет восстановится, туннель переподключится и появится новый QR-код.");
+  function getPendingTitle(internetReachable) {
+    return internetReachable
+      ? tr("internet_getting_token_short", "Интернет есть, получаем токен…")
+      : tr("ready_pending_title", "Потеряно соединение с интернетом. Ожидание восстановления сети…");
+  }
+
+  function getPendingText(internetReachable) {
+    return internetReachable
+      ? tr("ready_waiting_token_sub", "QR-код и ссылка подключения появятся автоматически, как только сессия будет готова.")
+      : tr("ready_pending_text", "Старые QR-код и ссылка скрыты. Как только интернет восстановится, туннель переподключится и появится новый QR-код.");
+  }
 
   function setView(viewName, explicit) {
     state.activeView = viewName;
@@ -252,15 +260,7 @@
   }
 
   function updateInternetBanner(reachable, sessionReady) {
-    let text;
-    if (!reachable) {
-      text = INTERNET_BANNER_NO_INTERNET;
-    } else if (!sessionReady) {
-      text = INTERNET_BANNER_PENDING;
-    } else {
-      text = INTERNET_BANNER_ONLINE;
-    }
-    els.internetBanner.textContent = text;
+    els.internetBanner.textContent = getInternetBannerText(reachable, sessionReady);
     els.internetBanner.classList.toggle("is-ok", reachable);
   }
 
@@ -268,12 +268,8 @@
     const effectiveReady = Boolean(sessionReady && internetReachable);
     els.readyPending.classList.toggle("is-hidden", effectiveReady);
     els.readyContent.classList.toggle("is-hidden", !effectiveReady);
-    els.readyPendingTitle.textContent = internetReachable
-      ? PENDING_TITLE_INTERNET
-      : PENDING_TITLE_OFFLINE;
-    els.readyPendingText.textContent = internetReachable
-      ? PENDING_TEXT_INTERNET
-      : PENDING_TEXT_OFFLINE;
+    els.readyPendingTitle.textContent = getPendingTitle(internetReachable);
+    els.readyPendingText.textContent = getPendingText(internetReachable);
   }
 
   function applyAutoView(internetReachable, sessionReady) {
@@ -1452,10 +1448,10 @@
     if (!els.oskContainer.classList.contains("is-hidden")) {
       renderOsk();
     }
-    if (!els.appsModalBackdrop.classList.contains("is-hidden")) {
+    if (els.appsBackdrop && !els.appsBackdrop.classList.contains("is-hidden")) {
       loadApps();
     }
-    if (!els.networkModalBackdrop.classList.contains("is-hidden")) {
+    if (els.networkBackdrop && !els.networkBackdrop.classList.contains("is-hidden")) {
       loadNetworkInfo();
       loadAmneziaState();
     }

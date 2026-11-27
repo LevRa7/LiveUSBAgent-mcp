@@ -88,4 +88,15 @@ def test_kiosk_ui_has_zero_untranslated_cyrillic_and_all_keys_exist():
                 if isinstance(v, str) and cyr.search(v) and k != "lang_select_title"
             ]
             assert leaks == [], f"Cyrillic leak in non-ru locale {code}: {leaks}"
+        corrupted = [
+            (k, v)
+            for k, v in bundle.items()
+            if isinstance(v, str)
+            and ("??" in v or re.search(r"[A-Za-z\u0400-\u04ff]\?[A-Za-z\u0400-\u04ff]", v) or v.endswith("?"))
+        ]
+        assert corrupted == [], f"Corrupted '?' encoding in {code}: {corrupted}"
+
+    # 3. No top-level frozen const calling tr(...) before i18n.js finishes loading
+    frozen = re.findall(r"^\s{2}const [A-Z0-9_]+ =\s*tr\(", app, re.M)
+    assert frozen == [], f"Top-level frozen tr() consts in app.js: {frozen}"
 

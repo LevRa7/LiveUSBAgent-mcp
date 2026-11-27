@@ -15,6 +15,10 @@ function Write-Log([string]$msg) {
 }
 
 if ($LogPath) {
+    $logDir = Split-Path -Parent $LogPath
+    if ($logDir -and -not (Test-Path -LiteralPath $logDir)) {
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    }
     Set-Content -Path $LogPath -Value "" -Encoding UTF8
 }
 

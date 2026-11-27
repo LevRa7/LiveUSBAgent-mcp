@@ -17,6 +17,9 @@ if (-not $RepoRoot) {
 }
 $WriterScript = Join-Path $RepoRoot "ops\live-usb\write-usb-windows.ps1"
 $ArtifactsDir = Join-Path $RepoRoot "artifacts"
+if (-not (Test-Path -LiteralPath $ArtifactsDir)) {
+    New-Item -ItemType Directory -Path $ArtifactsDir -Force | Out-Null
+}
 $LogFile = Join-Path $ArtifactsDir "usb-write.log"
 
 $form = New-Object System.Windows.Forms.Form

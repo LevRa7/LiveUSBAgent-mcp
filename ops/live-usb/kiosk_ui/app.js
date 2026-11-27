@@ -1,6 +1,10 @@
 (function () {
   "use strict";
 
+  function tr(key, fallback) {
+    return typeof window.rhmT === "function" ? window.rhmT(key, fallback) : fallback;
+  }
+
   const state = {
     activeView: "network",
     userChoseNetworkView: false,
@@ -144,18 +148,18 @@
   };
 
   const INTERNET_BANNER_NO_INTERNET =
-    "Интернет не обнаружен. Подключите Wi-Fi, кабель или USB-модем.";
+    tr("internet_offline_banner", "Интернет не обнаружен. Подключите Wi-Fi, кабель или USB-модем.");
   const INTERNET_BANNER_PENDING =
-    "Интернет есть. Получаем токен и QR…";
-  const INTERNET_BANNER_ONLINE = "Интернет подключён";
+    tr("internet_getting_token_banner", "Интернет есть. Получаем токен и QR…");
+  const INTERNET_BANNER_ONLINE = tr("internet_online_banner", "Интернет подключён");
 
-  const PENDING_TITLE_INTERNET = "Интернет есть, получаем токен…";
+  const PENDING_TITLE_INTERNET = tr("internet_getting_token_short", "Интернет есть, получаем токен…");
   const PENDING_TITLE_OFFLINE =
-    "Потеряно соединение с интернетом. Ожидание восстановления сети…";
+    tr("ready_pending_title", "Потеряно соединение с интернетом. Ожидание восстановления сети…");
   const PENDING_TEXT_INTERNET =
-    "QR-код и ссылка подключения появятся автоматически, как только сессия будет готова.";
+    tr("ready_waiting_token_sub", "QR-код и ссылка подключения появятся автоматически, как только сессия будет готова.");
   const PENDING_TEXT_OFFLINE =
-    "Старые QR-код и ссылка скрыты. Как только интернет восстановится, туннель переподключится и появится новый QR-код.";
+    tr("ready_pending_text", "Старые QR-код и ссылка скрыты. Как только интернет восстановится, туннель переподключится и появится новый QR-код.");
 
   function setView(viewName, explicit) {
     state.activeView = viewName;
@@ -174,27 +178,27 @@
 
   function formatIfaceStatus(iface) {
     if (!iface) {
-      return { text: "Отключено", meta: "Нет интерфейса", cls: "" };
+      return { text: tr("status_disconnected", "Отключено"), meta: tr("status_no_interface", "Нет интерфейса"), cls: "" };
     }
     if (iface.connected) {
       const meta = [iface.interface, iface.ip].filter(Boolean).join(" / ");
-      return { text: "Подключено", meta: meta || "Активно", cls: "is-ok" };
+      return { text: tr("status_connected", "Подключено"), meta: meta || tr("status_active", "Активно"), cls: "is-ok" };
     }
     if (iface.needs_trust) {
       return {
-        text: "Требуется доверие",
-        meta: iface.interface || "USB-устройство",
+        text: tr("status_trust_required", "Требуется доверие"),
+        meta: iface.interface || tr("status_usb_device", "USB-устройство"),
         cls: "is-warn",
       };
     }
     if (iface.plugged_in || iface.present) {
       return {
-        text: "Обнаружено",
-        meta: iface.interface || "Ожидание IP",
+        text: tr("status_detected", "Обнаружено"),
+        meta: iface.interface || tr("status_waiting_ip", "Ожидание IP"),
         cls: "",
       };
     }
-    return { text: "Не подключено", meta: "Нет соединения", cls: "" };
+    return { text: tr("status_not_connected", "Не подключено"), meta: tr("status_no_connection", "Нет соединения"), cls: "" };
   }
 
   function applyIfaceCard(valueEl, metaEl, info) {
@@ -215,7 +219,7 @@
     if (items.length === 0) {
       const empty = document.createElement("div");
       empty.className = "empty-row";
-      empty.textContent = "Диски не обнаружены";
+      empty.textContent = tr("disks_none", "Диски не обнаружены");
       els.disksList.appendChild(empty);
       return;
     }
@@ -230,7 +234,7 @@
 
       const model = document.createElement("div");
       model.className = "disk-model";
-      model.textContent = disk.model || disk.transport || "Диск";
+      model.textContent = disk.model || disk.transport || tr("disk_fallback", "Диск");
 
       const size = document.createElement("div");
       size.className = "disk-size mono";
@@ -315,8 +319,8 @@
       updateReadyPending(sessionReady, internetReachable);
 
       const connectUrl = session.connect_url || "";
-      els.sessionUrl.textContent = effectiveReady && connectUrl ? connectUrl : "Ожидание ссылки подключения";
-      els.sessionToken.textContent = effectiveReady && session.token ? session.token : "Ожидание токена";
+      els.sessionUrl.textContent = effectiveReady && connectUrl ? connectUrl : tr("waiting_connect_url", "Ожидание ссылки подключения");
+      els.sessionToken.textContent = effectiveReady && session.token ? session.token : tr("waiting_token", "Ожидание токена");
       const tunMode = session.tunnel_mode || "cloudflare";
       const tunStatus = internetReachable ? (session.tunnel_status || "offline") : "offline";
       const tunErr = session.tunnel_error ? (" — " + session.tunnel_error) : "";
@@ -346,20 +350,20 @@
       errRow.className = "empty-row";
       errRow.textContent = errorText;
       els.wifiList.appendChild(errRow);
-      els.wifiScanMeta.textContent = "Ошибка сканирования";
+      els.wifiScanMeta.textContent = tr("wifi_scan_error", "Ошибка сканирования");
       return;
     }
 
     if (!networks || networks.length === 0) {
       const empty = document.createElement("div");
       empty.className = "empty-row";
-      empty.textContent = "Сети Wi-Fi не найдены";
+      empty.textContent = tr("wifi_none_found", "Сети Wi-Fi не найдены");
       els.wifiList.appendChild(empty);
-      els.wifiScanMeta.textContent = "0 сетей";
+      els.wifiScanMeta.textContent = tr("wifi_zero_networks", "0 сетей");
       return;
     }
 
-    els.wifiScanMeta.textContent = "Найдено: " + networks.length;
+    els.wifiScanMeta.textContent = tr("wifi_found_prefix", "Найдено: ") + networks.length;
 
     networks.forEach(function (net) {
       const row = document.createElement("button");
@@ -381,7 +385,7 @@
 
       const stateEl = document.createElement("span");
       stateEl.className = "wifi-state" + (net.in_use ? " is-ok" : "");
-      stateEl.textContent = net.in_use ? "Подключено" : "Выбрать";
+      stateEl.textContent = net.in_use ? tr("status_connected", "Подключено") : tr("btn_select", "Выбрать");
 
       row.appendChild(ssidEl);
       row.appendChild(secEl);
@@ -398,13 +402,13 @@
 
   async function scanWifi() {
     els.btnRefreshWifi.disabled = true;
-    els.wifiScanMeta.textContent = "Сканирование...";
+    els.wifiScanMeta.textContent = tr("wifi_scanning", "Сканирование...");
     try {
       const resp = await fetch("/api/wifi/scan", { cache: "no-store" });
       const data = await resp.json();
-      renderWifiList(data.networks || [], data.ok ? "" : (data.error || "Ошибка сканирования"));
+      renderWifiList(data.networks || [], data.ok ? "" : (data.error || tr("wifi_scan_error", "Ошибка сканирования")));
     } catch (_err) {
-      renderWifiList([], "Сервер недоступен");
+      renderWifiList([], tr("status_server_unavail", "Сервер недоступен"));
     } finally {
       els.btnRefreshWifi.disabled = false;
     }
@@ -415,9 +419,9 @@
     els.inputSsid.readOnly = Boolean(ssid && !isHidden);
     els.inputPassword.value = "";
     els.inputPassword.type = "password";
-    els.btnTogglePassword.textContent = "Показать";
+    els.btnTogglePassword.textContent = tr("btn_show", "Показать");
     els.inputHidden.checked = Boolean(isHidden);
-    els.modalTitle.textContent = isHidden ? "Скрытая сеть Wi-Fi" : "Подключение к Wi-Fi";
+    els.modalTitle.textContent = isHidden ? tr("wifi_hidden_title", "Скрытая сеть Wi-Fi") : tr("wifi_modal_title", "Подключение к Wi-Fi");
     els.modalError.classList.add("is-hidden");
     els.modalError.textContent = "";
     els.modalBackdrop.classList.remove("is-hidden");
@@ -438,7 +442,7 @@
     const hidden = Boolean(els.inputHidden.checked);
 
     if (!ssid) {
-      els.modalError.textContent = "Введите имя сети (SSID)";
+      els.modalError.textContent = tr("wifi_enter_ssid", "Введите имя сети (SSID)");
       els.modalError.classList.remove("is-hidden");
       return;
     }
@@ -458,11 +462,11 @@
         await fetchStatus();
         await scanWifi();
       } else {
-        els.modalError.textContent = data.message || "Не удалось подключиться";
+        els.modalError.textContent = data.message || tr("wifi_connect_failed", "Не удалось подключиться");
         els.modalError.classList.remove("is-hidden");
       }
     } catch (_err) {
-      els.modalError.textContent = "Ошибка связи с локальным сервером";
+      els.modalError.textContent = tr("err_local_server", "Ошибка связи с локальным сервером");
       els.modalError.classList.remove("is-hidden");
     } finally {
       els.btnModalSubmit.disabled = false;
@@ -472,7 +476,7 @@
   async function regenerateSession() {
     els.btnNewToken.disabled = true;
     els.regenFeedback.classList.remove("is-hidden");
-    els.regenFeedback.textContent = "Запрос нового токена...";
+    els.regenFeedback.textContent = tr("token_requesting", "Запрос нового токена...");
     try {
       const resp = await fetch("/api/session/regenerate", {
         method: "POST",
@@ -480,11 +484,11 @@
         body: "{}",
       });
       const data = await resp.json();
-      els.regenFeedback.textContent = data.message || (data.ok ? "Токен обновлён" : "Ошибка обновления");
+      els.regenFeedback.textContent = data.message || (data.ok ? tr("token_updated", "Токен обновлён") : tr("token_update_error", "Ошибка обновления"));
       refreshQrImage();
       await fetchStatus();
     } catch (_err) {
-      els.regenFeedback.textContent = "Не удалось обновить токен";
+      els.regenFeedback.textContent = tr("token_update_failed", "Не удалось обновить токен");
     } finally {
       els.btnNewToken.disabled = false;
     }
@@ -495,7 +499,7 @@
     const feedback = feedbackEl || els.terminalFeedbackReady;
     trigger.disabled = true;
     feedback.classList.remove("is-hidden");
-    feedback.textContent = "Открытие терминала...";
+    feedback.textContent = tr("terminal_opening", "Открытие терминала...");
     try {
       const resp = await fetch("/api/terminal", {
         method: "POST",
@@ -509,9 +513,9 @@
         data = {};
       }
       feedback.textContent = data.message || data.error ||
-        (data.ok ? "Терминал открыт" : "Не удалось открыть терминал");
+        (data.ok ? tr("terminal_opened", "Терминал открыт") : tr("terminal_open_failed", "Не удалось открыть терминал"));
     } catch (_err) {
-      feedback.textContent = "Не удалось открыть терминал";
+      feedback.textContent = tr("terminal_open_failed", "Не удалось открыть терминал");
     } finally {
       trigger.disabled = false;
     }
@@ -533,13 +537,13 @@
   function renderApps(apps) {
     els.appsList.innerHTML = "";
     if (!apps || apps.length === 0) {
-      renderAppsError("Приложения не найдены");
+      renderAppsError(tr("apps_none_found", "Приложения не найдены"));
       return;
     }
 
     apps.forEach(function (app) {
       const available = app.available !== false;
-      const label = app.label || app.id || "Приложение";
+      const label = tr("app_" + (app.id || ""), app.label || app.id || tr("app_fallback", "Приложение"));
 
       const item = document.createElement("button");
       item.type = "button";
@@ -547,7 +551,7 @@
       item.setAttribute("role", "listitem");
       item.disabled = !available;
       item.dataset.appId = app.id || "";
-      item.title = available ? label : (app.reason || "Недоступно на этой системе");
+      item.title = available ? label : (app.reason || tr("app_unavail_system", "Недоступно на этой системе"));
 
       const labelEl = document.createElement("span");
       labelEl.className = "app-label";
@@ -555,7 +559,7 @@
 
       const noteEl = document.createElement("span");
       noteEl.className = "app-note";
-      noteEl.textContent = available ? "Запустить" : (app.reason || "Недоступно");
+      noteEl.textContent = available ? tr("btn_launch", "Запустить") : (app.reason || tr("btn_unavailable", "Недоступно"));
 
       item.appendChild(labelEl);
       item.appendChild(noteEl);
@@ -574,7 +578,7 @@
     if (!appId) {
       return;
     }
-    showAppsMessage("Запуск: " + (label || appId) + "…");
+    showAppsMessage(tr("app_launching_prefix", "Запуск: ") + (label || appId) + "…");
     try {
       const resp = await fetch("/api/apps/launch", {
         method: "POST",
@@ -588,7 +592,7 @@
         data = {};
       }
       if (data.ok) {
-        const parts = [data.message || ("Запущено: " + (label || appId))];
+        const parts = [data.message || (tr("app_launched_prefix", "Запущено: ") + (label || appId))];
         if (data.pid) {
           parts.push("pid " + data.pid);
         }
@@ -597,10 +601,10 @@
         }
         showAppsMessage(parts.join(" · "));
       } else {
-        showAppsMessage(data.message || "Не удалось запустить приложение");
+        showAppsMessage(data.message || tr("app_launch_failed", "Не удалось запустить приложение"));
       }
     } catch (_err) {
-      showAppsMessage("Не удалось запустить приложение");
+      showAppsMessage(tr("app_launch_failed", "Не удалось запустить приложение"));
     }
   }
 
@@ -612,7 +616,7 @@
 
     const loading = document.createElement("div");
     loading.className = "empty-row";
-    loading.textContent = "Загрузка списка приложений…";
+    loading.textContent = tr("apps_loading", "Загрузка списка приложений…");
     els.appsList.appendChild(loading);
 
     try {
@@ -624,12 +628,12 @@
         data = {};
       }
       if (!resp.ok || !data.ok) {
-        renderAppsError(data.message || "Список приложений недоступен");
+        renderAppsError(data.message || tr("apps_list_unavail", "Список приложений недоступен"));
         return;
       }
       renderApps(data.apps || []);
     } catch (_err) {
-      renderAppsError("Сервер недоступен");
+      renderAppsError(tr("status_server_unavail", "Сервер недоступен"));
     }
   }
 
@@ -639,7 +643,7 @@
 
   // --- Network settings dialog --------------------------------------------
   // Secrets rule: the link key lives in memory only, stays masked in the DOM
-  // until the operator clicks "Показать", and submitted passwords/private keys
+  // until the operator clicks tr("btn_show", "Показать"), and submitted passwords/private keys
   // are wiped from the fields right away. Nothing is ever logged.
 
   const MASKED_LINK_KEY = "••••••••";
@@ -704,14 +708,14 @@
     if (!hasKey) {
       els.netCurrentLinkKey.textContent = "—";
       els.netCurrentLinkKey.classList.remove("is-masked");
-      els.btnToggleLinkKey.textContent = "Показать";
+      els.btnToggleLinkKey.textContent = tr("btn_show", "Показать");
       return;
     }
     els.netCurrentLinkKey.textContent = revealed
       ? state.networkLinkKey
       : MASKED_LINK_KEY;
     els.netCurrentLinkKey.classList.toggle("is-masked", !revealed);
-    els.btnToggleLinkKey.textContent = revealed ? "Скрыть" : "Показать";
+    els.btnToggleLinkKey.textContent = revealed ? tr("btn_hide", "Скрыть") : tr("btn_show", "Показать");
   }
 
   function listText(value, fallback) {
@@ -786,7 +790,7 @@
     if (items.length === 0) {
       const empty = document.createElement("div");
       empty.className = "empty-row";
-      empty.textContent = "Интерфейсы не обнаружены";
+      empty.textContent = tr("net_no_interfaces", "Интерфейсы не обнаружены");
       els.netCurrentInterfaces.appendChild(empty);
       return;
     }
@@ -813,9 +817,9 @@
       box.appendChild(head);
 
       appendNetworkRow(box, "MAC", iface.mac);
-      appendNetworkRow(box, "Соединение", iface.connection);
+      appendNetworkRow(box, tr("net_connection", "Соединение"), iface.connection);
       appendNetworkRow(box, "IPv4", iface.ipv4 || iface.ip);
-      appendNetworkRow(box, "Шлюз", iface.gateway);
+      appendNetworkRow(box, tr("net_gateway", "Шлюз"), iface.gateway);
       appendNetworkRow(box, "DNS", interfaceDnsText(iface));
 
       els.netCurrentInterfaces.appendChild(box);
@@ -828,7 +832,7 @@
     if (items.length === 0) {
       const opt = document.createElement("option");
       opt.value = "";
-      opt.textContent = "Интерфейсы не обнаружены";
+      opt.textContent = tr("net_no_interfaces", "Интерфейсы не обнаружены");
       els.netIpInterface.appendChild(opt);
       return;
     }
@@ -853,7 +857,7 @@
   }
 
   async function loadNetworkInfo() {
-    setNetworkFeedback(els.netCurrentFeedback, "Загрузка текущих настроек…", "");
+    setNetworkFeedback(els.netCurrentFeedback, tr("net_loading_current", "Загрузка текущих настроек…"), "");
     try {
       const resp = await fetch("/api/network", { cache: "no-store" });
       let data = {};
@@ -865,7 +869,7 @@
       if (!resp.ok || !data.ok) {
         setNetworkFeedback(
           els.netCurrentFeedback,
-          data.message || data.error || "Текущие настройки недоступны",
+          data.message || data.error || tr("net_current_unavail", "Текущие настройки недоступны"),
           "is-error"
         );
         return;
@@ -873,7 +877,7 @@
       renderNetworkInfo(data);
       setNetworkFeedback(els.netCurrentFeedback, "", "");
     } catch (_err) {
-      setNetworkFeedback(els.netCurrentFeedback, "Сервер недоступен", "is-error");
+      setNetworkFeedback(els.netCurrentFeedback, tr("status_server_unavail", "Сервер недоступен"), "is-error");
     }
   }
 
@@ -895,7 +899,7 @@
     if (button) {
       button.disabled = true;
     }
-    setNetworkFeedback(feedbackEl, "Отправка…", "");
+    setNetworkFeedback(feedbackEl, tr("net_sending", "Отправка…"), "");
     try {
       const resp = await fetch(path, {
         method: "POST",
@@ -910,11 +914,11 @@
       }
       const ok = resp.ok && data.ok !== false;
       const message = data.message || data.error ||
-        (ok ? "Настройки применены" : "Не удалось применить настройки");
+        (ok ? tr("net_applied", "Настройки применены") : tr("net_apply_failed", "Не удалось применить настройки"));
       setNetworkFeedback(feedbackEl, message, ok ? "is-ok" : "is-error");
       return ok;
     } catch (_err) {
-      setNetworkFeedback(feedbackEl, "Ошибка связи с локальным сервером", "is-error");
+      setNetworkFeedback(feedbackEl, tr("err_local_server", "Ошибка связи с локальным сервером"), "is-error");
       return false;
     } finally {
       if (button) {
@@ -957,11 +961,11 @@
       dns: splitCommaList(els.netIpDns.value),
     };
     if (!payload.interface) {
-      setNetworkFeedback(els.netIpFeedback, "Выберите интерфейс", "is-error");
+      setNetworkFeedback(els.netIpFeedback, tr("net_val_select_iface", "Выберите интерфейс"), "is-error");
       return;
     }
     if (payload.mode === "manual" && !payload.address) {
-      setNetworkFeedback(els.netIpFeedback, "Введите IPv4-адрес", "is-error");
+      setNetworkFeedback(els.netIpFeedback, tr("net_val_enter_ipv4", "Введите IPv4-адрес"), "is-error");
       return;
     }
 
@@ -984,11 +988,11 @@
       service: els.netPppoeService.value.trim(),
     };
     if (!payload.username) {
-      setNetworkFeedback(els.netPppoeFeedback, "Введите имя пользователя PPPoE", "is-error");
+      setNetworkFeedback(els.netPppoeFeedback, tr("net_val_enter_pppoe_user", "Введите имя пользователя PPPoE"), "is-error");
       return;
     }
     if (!payload.password) {
-      setNetworkFeedback(els.netPppoeFeedback, "Введите пароль PPPoE", "is-error");
+      setNetworkFeedback(els.netPppoeFeedback, tr("net_val_enter_pppoe_pass", "Введите пароль PPPoE"), "is-error");
       return;
     }
 
@@ -1017,19 +1021,19 @@
         : Number(keepaliveRaw),
     };
     if (!payload.name) {
-      setNetworkFeedback(els.netWgFeedback, "Введите имя подключения", "is-error");
+      setNetworkFeedback(els.netWgFeedback, tr("net_val_enter_conn_name", "Введите имя подключения"), "is-error");
       return;
     }
     if (!payload.private_key) {
-      setNetworkFeedback(els.netWgFeedback, "Введите приватный ключ", "is-error");
+      setNetworkFeedback(els.netWgFeedback, tr("net_val_enter_privkey", "Введите приватный ключ"), "is-error");
       return;
     }
     if (!payload.address) {
-      setNetworkFeedback(els.netWgFeedback, "Введите адрес интерфейса", "is-error");
+      setNetworkFeedback(els.netWgFeedback, tr("net_val_enter_iface_addr", "Введите адрес интерфейса"), "is-error");
       return;
     }
     if (!payload.peer_public_key) {
-      setNetworkFeedback(els.netWgFeedback, "Введите публичный ключ пира", "is-error");
+      setNetworkFeedback(els.netWgFeedback, tr("net_val_enter_peer_pubkey", "Введите публичный ключ пира"), "is-error");
       return;
     }
 
@@ -1050,7 +1054,7 @@
       config: config,
     };
     if (!payload.config) {
-      setNetworkFeedback(els.netOpenvpnFeedback, "Вставьте конфигурацию .ovpn", "is-error");
+      setNetworkFeedback(els.netOpenvpnFeedback, tr("net_val_paste_ovpn", "Вставьте конфигурацию .ovpn"), "is-error");
       return;
     }
 
@@ -1085,23 +1089,23 @@
 
   function amneziaStatusText(status) {
     if (!status) {
-      return "Статус недоступен";
+      return tr("net_awg_status_unavail", "Статус недоступен");
     }
     if (typeof status === "string") {
-      return status.trim() || "Статус недоступен";
+      return status.trim() || tr("net_awg_status_unavail", "Статус недоступен");
     }
     const output = typeof status.output === "string" ? status.output.trim() : "";
     if (output) {
       return output;
     }
-    return status.message || "Статус недоступен";
+    return status.message || tr("net_awg_status_unavail", "Статус недоступен");
   }
 
   function redactAmneziaSecrets(text) {
     return String(text || "").replace(
       /^(\s*)(PrivateKey|PresharedKey)(\s*=\s*).*$/gim,
       function (_line, indent, key, separator) {
-        return indent + key + separator + "[скрыто]";
+        return indent + key + separator + tr("status_hidden_val", "[скрыто]");
       }
     );
   }
@@ -1110,9 +1114,9 @@
     const source = data || {};
 
     if (source.awg_available === true) {
-      els.netAwgAvailable.textContent = "доступен";
+      els.netAwgAvailable.textContent = tr("status_available", "доступен");
     } else if (source.awg_available === false) {
-      els.netAwgAvailable.textContent = "недоступен";
+      els.netAwgAvailable.textContent = tr("status_unavailable_lower", "недоступен");
     } else {
       els.netAwgAvailable.textContent = "—";
     }
@@ -1120,13 +1124,13 @@
     els.netAwgDir.textContent = source.config_dir || "—";
 
     const files = amneziaFileNames(source.files);
-    els.netAwgFiles.textContent = files.length > 0 ? files.join(", ") : "нет конфигураций";
+    els.netAwgFiles.textContent = files.length > 0 ? files.join(", ") : tr("net_awg_no_configs", "нет конфигураций");
 
     const status = source.status || {};
     const interfaces = Array.isArray(status.interfaces)
       ? status.interfaces.filter(Boolean)
       : [];
-    els.netAwgIfaces.textContent = interfaces.length > 0 ? interfaces.join(", ") : "нет";
+    els.netAwgIfaces.textContent = interfaces.length > 0 ? interfaces.join(", ") : tr("net_awg_none", "нет");
 
     els.netAwgShow.textContent = redactAmneziaSecrets(amneziaStatusText(source.status));
   }
@@ -1144,7 +1148,7 @@
         renderAmneziaState({});
         setNetworkFeedback(
           els.netAwgFeedback,
-          data.message || data.error || "Состояние AmneziaWG недоступно",
+          data.message || data.error || tr("net_awg_state_unavail", "Состояние AmneziaWG недоступно"),
           "is-error"
         );
         return;
@@ -1155,7 +1159,7 @@
       }
     } catch (_err) {
       renderAmneziaState({});
-      setNetworkFeedback(els.netAwgFeedback, "Сервер недоступен", "is-error");
+      setNetworkFeedback(els.netAwgFeedback, tr("status_server_unavail", "Сервер недоступен"), "is-error");
     }
   }
 
@@ -1184,13 +1188,13 @@
     if (!url) {
       els.netAwgQrFrame.classList.add("is-hidden");
       els.netAwgQr.removeAttribute("src");
-      els.netAwgQrHint.textContent = "QR-код появится после ввода HTTPS-ссылки подписки.";
+      els.netAwgQrHint.textContent = tr("net_awg_qr_hint", "QR-код появится после ввода HTTPS-ссылки подписки.");
       els.netAwgQrHint.classList.remove("is-warn");
       return;
     }
     els.netAwgQr.src = "/api/network/subscription/qr?url=" + encodeURIComponent(url);
     els.netAwgQrFrame.classList.remove("is-hidden");
-    els.netAwgQrHint.textContent = "QR-код ссылки подписки";
+    els.netAwgQrHint.textContent = tr("net_awg_qr_alt", "QR-код ссылки подписки");
     els.netAwgQrHint.classList.remove("is-warn");
   }
 
@@ -1200,7 +1204,7 @@
     const config = els.netAwgConfig.value.trim();
     const payload = { name: name, config: config };
     if (!payload.config) {
-      setNetworkFeedback(els.netAwgFeedback, "Вставьте конфигурацию AmneziaWG", "is-error");
+      setNetworkFeedback(els.netAwgFeedback, tr("net_val_paste_awg", "Вставьте конфигурацию AmneziaWG"), "is-error");
       return;
     }
 
@@ -1236,7 +1240,7 @@
     const name = els.netAwgName.value.trim() || DEFAULT_AMNEZIAWG_NAME;
     const payload = { url: url, name: name };
     if (!payload.url) {
-      setNetworkFeedback(els.netAwgFeedback, "Введите URL подписки", "is-error");
+      setNetworkFeedback(els.netAwgFeedback, tr("net_val_enter_sub_url", "Введите URL подписки"), "is-error");
       return;
     }
 
@@ -1255,7 +1259,7 @@
   async function copySubscriptionUrl() {
     const url = els.netAwgSubUrl.value.trim();
     if (!url) {
-      setNetworkFeedback(els.netAwgFeedback, "Введите URL подписки", "is-error");
+      setNetworkFeedback(els.netAwgFeedback, tr("net_val_enter_sub_url", "Введите URL подписки"), "is-error");
       return;
     }
     let copied = false;
@@ -1268,14 +1272,14 @@
       }
     }
     if (copied) {
-      setNetworkFeedback(els.netAwgFeedback, "Ссылка скопирована", "is-ok");
+      setNetworkFeedback(els.netAwgFeedback, tr("net_link_copied", "Ссылка скопирована"), "is-ok");
       return;
     }
     els.netAwgSubUrl.focus();
     els.netAwgSubUrl.select();
     setNetworkFeedback(
       els.netAwgFeedback,
-      "Не удалось скопировать автоматически. Ссылка выделена — нажмите Ctrl+C.",
+      tr("net_copy_fallback", "Не удалось скопировать автоматически. Ссылка выделена — нажмите Ctrl+C."),
       "is-error"
     );
   }
@@ -1316,13 +1320,13 @@
             btn.classList.add("is-active");
           }
         } else if (key === "BKSP") {
-          btn.textContent = "Удалить";
+          btn.textContent = tr("osk_backspace", "Удалить");
           btn.classList.add("osk-key-wide");
         } else if (key === "SPACE") {
-          btn.textContent = "Пробел";
+          btn.textContent = tr("osk_space", "Пробел");
           btn.classList.add("osk-key-space");
         } else if (key === "CLEAR") {
-          btn.textContent = "Очистить";
+          btn.textContent = tr("osk_clear", "Очистить");
           btn.classList.add("osk-key-wide");
         } else {
           btn.textContent = key;
@@ -1408,13 +1412,13 @@
   els.netAwgSubUrl.addEventListener("input", scheduleAmneziaQr);
   els.netAwgQr.addEventListener("load", function () {
     els.netAwgQrFrame.classList.remove("is-hidden");
-    els.netAwgQrHint.textContent = "QR-код ссылки подписки";
+    els.netAwgQrHint.textContent = tr("net_awg_qr_alt", "QR-код ссылки подписки");
     els.netAwgQrHint.classList.remove("is-warn");
   });
   els.netAwgQr.addEventListener("error", function () {
     els.netAwgQrFrame.classList.add("is-hidden");
     els.netAwgQrHint.textContent =
-      "QR-код не построен: проверьте HTTPS-ссылку и qrencode на сервере.";
+      tr("net_qr_failed", "QR-код не построен: проверьте HTTPS-ссылку и qrencode на сервере.");
     els.netAwgQrHint.classList.add("is-warn");
   });
   els.btnModalClose.addEventListener("click", closeWifiModal);
@@ -1431,7 +1435,7 @@
   els.btnTogglePassword.addEventListener("click", function () {
     const showing = els.inputPassword.type === "text";
     els.inputPassword.type = showing ? "password" : "text";
-    els.btnTogglePassword.textContent = showing ? "Показать" : "Скрыть";
+    els.btnTogglePassword.textContent = showing ? tr("btn_show", "Показать") : tr("btn_hide", "Скрыть");
   });
 
   els.btnToggleKeyboard.addEventListener("click", function () {
@@ -1439,6 +1443,21 @@
     els.oskContainer.classList.toggle("is-hidden", !willShow);
     if (willShow) {
       renderOsk();
+    }
+  });
+
+  window.addEventListener("rhm:langchange", function () {
+    fetchStatus();
+    scanWifi();
+    if (!els.oskContainer.classList.contains("is-hidden")) {
+      renderOsk();
+    }
+    if (!els.appsModalBackdrop.classList.contains("is-hidden")) {
+      loadApps();
+    }
+    if (!els.networkModalBackdrop.classList.contains("is-hidden")) {
+      loadNetworkInfo();
+      loadAmneziaState();
     }
   });
 

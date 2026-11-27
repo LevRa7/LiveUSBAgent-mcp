@@ -53,3 +53,39 @@ def test_connect_page_and_kiosk_ui_include_language_picker_and_switcher():
     assert '<script src="/i18n.js"></script>' in kiosk_html
     for code in SUPPORTED_LANGUAGES:
         assert f'data-lang-pick="{code}"' in kiosk_html
+
+
+def test_kiosk_ui_has_zero_untranslated_cyrillic_and_all_keys_exist():
+    """Every visible label in index.html and every dynamic string in app.js must be translated across all 7 locales."""
+    import re
+
+    cyr = re.compile(r"[\u0400-\u04ff]")
+    kiosk_dir = REPO_ROOT / "ops" / "live-usb" / "kiosk_ui"
+    html = (kiosk_dir / "index.html").read_text(encoding="utf-8")
+    app = (kiosk_dir / "app.js").read_text(encoding="utf-8")
+
+    # 1. Zero unwrapped Cyrillic literals in app.js
+    unwrapped = []
+    for m in re.finditer(r'(["\'])(?:(?=(\\?))\2.)*?\1', app):
+        s = m.group(0)
+        if cyr.search(s):
+            before = app[max(0, m.start() - 60) : m.start()]
+            if not re.search(r'tr\("[^"]+",\s*$', before):
+                unwrapped.append(s)
+    assert unwrapped == [], f"Unwrapped Cyrillic literals in app.js: {unwrapped}"
+
+    # 2. Every referenced key in index.html & app.js exists in all 7 locales
+    html_keys = set(re.findall(r'data-i18n(?:-alt)?="([^"]+)"', html))
+    js_keys = set(re.findall(r'\btr\("([a-z0-9_]+)"\s*,', app))
+    for code in SUPPORTED_LANGUAGES:
+        bundle = TRANSLATIONS[code]
+        missing = sorted((html_keys | js_keys) - set(bundle.keys()))
+        assert missing == [], f"Missing i18n keys in {code}: {missing}"
+        if code != "ru":
+            leaks = [
+                (k, v)
+                for k, v in bundle.items()
+                if isinstance(v, str) and cyr.search(v) and k != "lang_select_title"
+            ]
+            assert leaks == [], f"Cyrillic leak in non-ru locale {code}: {leaks}"
+

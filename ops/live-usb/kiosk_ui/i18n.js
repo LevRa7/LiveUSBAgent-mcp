@@ -60,15 +60,29 @@
       b.classList.toggle("is-active", b.getAttribute("data-lang-pick") === currentLang);
     }
 
+    var altNodes = document.querySelectorAll("[data-i18n-alt]");
+    for (var a = 0; a < altNodes.length; a += 1) {
+      var altKey = altNodes[a].getAttribute("data-i18n-alt");
+      if (!altKey) continue;
+      var altVal = t(altKey, null);
+      if (altVal !== null) {
+        altNodes[a].setAttribute("alt", altVal);
+      }
+    }
+
     var appItems = document.querySelectorAll("[data-app-id]");
     for (var k = 0; k < appItems.length; k += 1) {
       var aid = appItems[k].getAttribute("data-app-id");
       var translated = t("app_" + aid, null);
       if (translated) {
-        var nameNode = appItems[k].querySelector(".app-name") || appItems[k];
+        var nameNode = appItems[k].querySelector(".app-label, .app-name") || appItems[k];
         nameNode.textContent = translated;
       }
     }
+
+    try {
+      window.dispatchEvent(new CustomEvent("rhm:langchange", { detail: { lang: currentLang } }));
+    } catch (_evErr) {}
   }
 
   function openPicker() {

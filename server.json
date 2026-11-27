@@ -1,0 +1,18 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.LevRa7/LiveUSBAgent-mcp",
+  "title": "LiveUSBAgent-mcp",
+  "description": "Bootable Debian 13 LiveUSB rescue OS with 38 MCP tools for AI-assisted bare-metal recovery.",
+  "version": "0.2.0",
+  "repository": {
+    "url": "https://github.com/LevRa7/LiveUSBAgent-mcp",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/LevRa7/LiveUSBAgent-mcp",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://your-liveusb-tunnel.trycloudflare.com/mcp/{token}"
+    }
+  ]
+}

@@ -148,12 +148,61 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: setup-exe
-          path: dist/LiveUSBAgent-Creator-*
+          path: dist/LiveUSBAgent-Creator-*.exe*
+          if-no-files-found: error
+
+  linux-deb:
+    name: Linux LiveUSB Creator (.deb)
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build .deb package
+        run: python tools/build-creator-deb.py
+
+      - name: Verify and install .deb package
+        run: |
+          deb="$(ls -1 dist/liveusb-agent-creator_*_all.deb | head -n 1)"
+          dpkg-deb -I "$deb"
+          dpkg-deb -c "$deb"
+          sudo apt-get update
+          sudo apt-get install -y "./$deb"
+          liveusb-agent-creator --self-test
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: creator-deb
+          path: dist/liveusb-agent-creator_*_all.deb*
+          if-no-files-found: error
+
+  macos-dmg:
+    name: macOS LiveUSB Creator (.dmg)
+    needs: verify
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Build universal macOS .dmg
+        run: bash tools/build-creator-macos.sh dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: creator-dmg
+          path: dist/LiveUSBAgent-Creator-*-macOS.dmg*
           if-no-files-found: error
 
   release:
     name: publish the release
-    needs: [verify, windows]
+    needs: [verify, windows, linux-deb, macos-dmg]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -194,6 +243,10 @@ jobs:
           gh release upload "$TAG" \
             dist/LiveUSBAgent-Creator-*.exe \
             dist/LiveUSBAgent-Creator-*.exe.sha256 \
+            dist/liveusb-agent-creator_*_all.deb \
+            dist/liveusb-agent-creator_*_all.deb.sha256 \
+            dist/LiveUSBAgent-Creator-*-macOS.dmg \
+            dist/LiveUSBAgent-Creator-*-macOS.dmg.sha256 \
             dist/mesh-payload-*.zip \
             dist/mesh-payload-*.zip.sha256 \
             --clobber

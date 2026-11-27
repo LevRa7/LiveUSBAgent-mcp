@@ -170,6 +170,47 @@ jobs:
           path: dist/RemoteHarnessMCP-Setup-*
           if-no-files-found: error
 
+  creator-linux-deb:
+    name: Linux LiveUSB Creator (.deb)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build and install .deb
+        run: |
+          python tools/build-creator-deb.py
+          deb="$(ls -1 dist/liveusb-agent-creator_*_all.deb | head -n 1)"
+          dpkg-deb -I "$deb"
+          dpkg-deb -c "$deb"
+          sudo apt-get update
+          sudo apt-get install -y "./$deb"
+          liveusb-agent-creator --self-test
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: creator-deb
+          path: dist/liveusb-agent-creator_*_all.deb*
+          if-no-files-found: error
+
+  creator-macos-dmg:
+    name: macOS LiveUSB Creator (.dmg)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build universal macOS .dmg
+        run: bash tools/build-creator-macos.sh dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: creator-dmg
+          path: dist/LiveUSBAgent-Creator-*-macOS.dmg*
+          if-no-files-found: error
+
   # This repository is public, so a credential that reaches it is a published
   # credential: the scan is a hard gate, not a warning. The full history is
   # fetched because a secret that was committed and then deleted stays readable

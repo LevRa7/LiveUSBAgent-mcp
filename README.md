@@ -6,7 +6,7 @@
 
 **Repository:** [github.com/LevRa7/LiveUSBAgent-mcp](https://github.com/LevRa7/LiveUSBAgent-mcp) (evolved from [github.com/LevRa7/remote-harness-mcp](https://github.com/LevRa7/remote-harness-mcp))
 
-**Version:** 0.1.1 — release notes: [docs/releases/v0.1.1.md](docs/releases/v0.1.1.md).
+**Version:** 0.1.2 — release notes: [docs/releases/v0.1.2.md](docs/releases/v0.1.2.md).
 
 ---
 

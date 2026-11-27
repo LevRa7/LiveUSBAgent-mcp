@@ -6,7 +6,7 @@
 
 Проект вырос из [remote-harness-mcp](https://github.com/LevRa7/remote-harness-mcp) и развивается как самостоятельный репозиторий [LiveUSBAgent-mcp](https://github.com/LevRa7/LiveUSBAgent-mcp), заточенный специально под сценарии LiveUSB: нулевую настройку, максимальную совместимость с железом и файловыми системами и безопасную работу с повреждёнными дисками.
 
-**Version:** 0.1.1 — заметки к релизу: [docs/releases/v0.1.1.md](docs/releases/v0.1.1.md).
+**Version:** 0.1.2 — заметки к релизу: [docs/releases/v0.1.2.md](docs/releases/v0.1.2.md).
 
 ---
 

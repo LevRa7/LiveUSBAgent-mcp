@@ -168,7 +168,7 @@ def test_legacy_tools_still_work():
     vitals = mcp_tools.call_tool("system_vitals", {})
     assert "hostname" in vitals and "ram" in vitals and "disk" in vitals
     skill = mcp_tools.call_tool("get_orchestration_skill", {})
-    assert isinstance(skill, str) and "Remote Harness" in skill
+    assert isinstance(skill, str) and "LiveUSBAgent" in skill
     listing = mcp_tools.call_tool("list_dir", {})
     assert listing["exit_code"] == 0
     assert "Directory:" in listing["stdout"]

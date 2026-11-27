@@ -28,4 +28,4 @@ def test_get_orchestration_skill_tool():
     assert "get_orchestration_skill" in server.tools
     skill = server.tools["get_orchestration_skill"]()
     assert isinstance(skill, str)
-    assert "Remote Harness" in skill
+    assert "LiveUSBAgent" in skill

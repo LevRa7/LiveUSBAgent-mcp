@@ -37,7 +37,6 @@ try {
     New-Item -ItemType Directory -Force -Path $stageTools, $stageOps | Out-Null
     Copy-Item -LiteralPath (Join-Path $repo 'tools\liveusb-creator-gui.ps1') -Destination $stageTools
     Copy-Item -LiteralPath (Join-Path $repo 'ops\live-usb\write-usb-windows.ps1') -Destination $stageOps
-    Copy-Item -LiteralPath (Join-Path $repo 'ops\live-usb\build-iso.sh') -Destination $stageOps
 
     $zipPath = Join-Path $stage 'creator-payload.zip'
     Compress-Archive -Path (Join-Path $stage 'tools'), (Join-Path $stage 'ops') -DestinationPath $zipPath -CompressionLevel Optimal
